@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep-Dive Technical Guide: Low-Latency CMAF & Multi-DRM CBCS Orchestration</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    .keyword { color: #569cd6; font-weight: bold; }
+    .type { color: #4ec9b0; }
+    .fn { color: #dcdcaa; }
+    .comment { color: #6a9955; font-style: italic; }
+    .string { color: #ce9178; }
+    .number { color: #b5cea8; }
+    .macro { color: #c586c0; }
+    .diagram-container {
+      background: #0d1117;
+      color: #58a6ff;
+      border: 1px solid #30363d;
+      padding: 1.5rem;
+      border-radius: 8px;
+      font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      margin: 1.5rem 0;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .box-tree {
+      background: #ffffff;
+      border: 2px solid #0f4c81;
+      padding: 1.5rem;
+      border-radius: 8px;
+      font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 1.5rem 0;
+      white-space: pre;
+      overflow-x: auto;
+      color: #24292e;
+    }
+    .callout-warning {
+      background-color: #fff8c5;
+      border-left: 5px solid #d4a72c;
+      padding: 1rem 1.2rem;
+      margin: 1.2rem 0;
+      color: #4d3800;
+      border-radius: 0 6px 6px 0;
+    }
+    .callout-success {
+      background-color: #dafbe1;
+      border-left: 5px solid #2da44e;
+      padding: 1rem 1.2rem;
+      margin: 1.2rem 0;
+      color: #0f5323;
+      border-radius: 0 6px 6px 0;
+    }
+    .line-analysis {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 1rem;
+      margin: 1rem 0;
+    }
+    .line-number {
+      font-family: monospace;
+      font-weight: bold;
+      color: #0969da;
+      background: #ddf4ff;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-right: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>CHUYÊN KHẢO KỸ THUẬT: LOW-LATENCY CMAF & MULTI-DRM CBCS</h1>
+    <p><em>Phân tích toàn diện luồng dữ liệu thời gian thực (Data Flow) và giải phẫu chi tiết từng dòng code trong drmpack (Ticket 02 & Ticket 03).</em></p>
+
+    <hr>
+
+    <h2>Mục Lục</h2>
+    <ol>
+      <li><a href="#section-1">1. Sơ Đồ Toàn Cảnh Kiến Trúc Data Plane & Luồng Dữ Liệu</a></li>
+      <li><a href="#section-2">2. Giải Phẫu Từng Dòng: Subprocess & Đột Phá Unbuffered Pipe (<code>src/gpac/process.rs</code>)</a></li>
+      <li><a href="#section-3">3. Giải Phẫu Từng Dòng: Multi-DRM XML Generator & FairPlay Signaling (<code>src/gpac/xml.rs</code>)</a></li>
+      <li><a href="#section-4">4. Giải Phẫu Từng Dòng: Session Lifecycle & Builder Fix (<code>src/session.rs</code>)</a></li>
+      <li><a href="#section-5">5. Sơ Đồ Cấu Trúc Hộp ISO-BMFF (MP4 Box Hierarchy) & Giải Mã Phần Cứng</a></li>
+      <li><a href="#section-6">6. Giải Phẫu Từng Dòng: Kiểm Thử Tích Hợp E2E (<code>tests/tracer_e2e.rs</code>)</a></li>
+    </ol>
+
+    <hr>
+
+    <h2 id="section-1">1. Sơ Đồ Toàn Cảnh Kiến Trúc Data Plane & Luồng Dữ Liệu</h2>
+    <p>
+      <code>drmpack</code> là thư viện Rust chạy in-process bên trong <code>media-server</code>. Nhiệm vụ của nó là nhận các media segment (muxed fMP4) dạng bytes, mã hóa theo chuẩn bảo mật phần cứng (Widevine L1, Apple FairPlay), đóng gói phân mảnh Low-Latency CMAF, và xuất trực tiếp vào bộ nhớ dùng chung <strong>Ramdisk</strong> (<code>/dev/shm</code>) mà không tiêu tốn bất kỳ I/O đĩa vật lý nào.
+    </p>
+
+    <div class="diagram-container">
++-------------------------------------------------------------------------------------------------------------+
+|                                          MEDIA-SERVER (Host Process)                                         |
+|                                                                                                             |
+|  [ Ingest Stream ] ---> [ fMP4 Multiplexer ] ---> Vec&lt;u8&gt; Chunk (Video AVC/HEVC + Audio AAC)                |
+|                                                          |                                                  |
+|                                                          v                                                  |
+|                                      PackagingSession::push_segment(&amp;[u8])                                   |
++----------------------------------------------------------|--------------------------------------------------+
+                                                           |
+                 [ Anonymous Unix Kernel Pipe ]            | (Kernel Page Cache Buffer: zero disk read/write)
+                                                           v
++-------------------------------------------------------------------------------------------------------------+
+|                                        GPAC SUBPROCESS FILTER GRAPH                                         |
+|                                                                                                             |
+|   +-----------------------------------------------------------------------------------------------------+   |
+|   | 1. Pipe Demuxer (pin:ext=mp4:mstore_samples=0:mstore_purge=0)                                       |   |
+|   |    - Đọc continuous stream từ stdin descriptor                                                      |   |
+|   |    - [mstore_samples=0:mstore_purge=0]: ÉP XẢ SAMPLE TABLES NGAY LẬP TỨC (Triệt tiêu độ trễ 50 frames) |   |
+|   +--------------------------------------------------|--------------------------------------------------+   |
+|                                                      v                                                      |
+|   +-----------------------------------------------------------------------------------------------------+   |
+|   | 2. Common Encryption Engine (cecrypt:cfile=/dev/shm/.../drm.xml)                                    |   |
+|   |    - Đọc cấu hình XML: scheme_type ("cenc" vs "cbcs")                                               |   |
+|   |    - CENC: AES-128 CTR mode (100% sample encrypted)                                                 |   |
+|   |    - CBCS: AES-128 CBC mode với pattern 1:9 (10% encrypt, 90% clear video blocks)                   |   |
+|   |    - Bơm box PSSH (Widevine, PlayReady, FairPlay) vào Init Segment                                  |   |
+|   +--------------------------------------------------|--------------------------------------------------+   |
+|                                                      v                                                      |
+|   +-----------------------------------------------------------------------------------------------------+   |
+|   | 3. Dynamic Dual Dasher (dasher:dual:profile=live:dmode=dynamic:segdur=1:cdur=0.2:asto=0.8:llhls=br) |   |
+|   |    - segdur=1: Segment tổng dài 1 giây                                                              |   |
+|   |    - cdur=0.2: Chia nhỏ thành 5 CMAF partial chunks (200ms mỗi chunk)                               |   |
+|   |    - asto=0.8: Availability Time Offset cho Low-Latency DASH                                        |   |
+|   |    - llhls=br: Byte-range mode sinh thẻ #EXT-X-PART trong file media playlist HLS                   |   |
+|   +--------------------------------------------------|--------------------------------------------------+   |
++------------------------------------------------------|------------------------------------------------------+
+                                                       |
+                               (Direct Memory Writes to RAM - Zero Physical Disk Wear)
+                                                       v
++-------------------------------------------------------------------------------------------------------------+
+|                                    RAMDISK DIRECTORY (/dev/shm/session_xxx/)                                 |
+|                                                                                                             |
+|  * stdin_dashinit.mp4  -> Init segment chứa moov/tenc (KID + pattern), schm (cbcs/cenc), pssh boxes       |
+|  * stdin_dash1.m4s     -> Encrypted media segment chứa moof/traf (senc, saiz, saio) và mdat bytes           |
+|  * live.mpd            -> Dynamic DASH manifest chứa availabilityTimeOffset và availabilityTimeComplete     |
+|  * live_1.m3u8         -> LL-HLS Media playlist chứa #EXT-X-PART, #EXT-X-KEY (skd:// hoặc inline data URI) |
++-------------------------------------------------------------------------------------------------------------+
+                                                       |
+                                                       v
+                   [ Edge HTTP Route / Reverse Proxy serving directly from RAM to Players ]
+    </div>
+
+    <hr>
+
+    <h2 id="section-2">2. Giải Phẫu Từng Dòng: Subprocess & Đột Phá Unbuffered Pipe (<code>src/gpac/process.rs</code>)</h2>
+
+    <p>File này chịu trách nhiệm sinh câu lệnh CLI chuẩn xác cho engine lọc của GPAC và quản lý stdin/stderr pipe qua <code>tokio::process</code>.</p>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 58-60</span>
+      <pre><code><span class="comment">// 1. Input filter: read continuous fMP4 from stdin pipe without memory buffering delay</span>
+args.<span class="fn">push</span>(<span class="string">"-i"</span>.<span class="fn">into</span>());
+args.<span class="fn">push</span>(<span class="string">"stdin:ext=mp4:mstore_samples=0:mstore_purge=0"</span>.<span class="fn">into</span>());</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li><code>stdin</code>: Bảo GPAC bộ lọc đầu vào (filter <code>pin</code>) lắng nghe từ Standard Input (file descriptor 0).</li>
+        <li><code>ext=mp4</code>: Vì pipe là dòng byte vô hướng không có phần mở rộng file, cờ này bắt buộc GPAC kích hoạt demuxer ISOBMFF (<code>mp4dmx</code>).</li>
+        <li><strong>Đột phá <code>mstore_samples=0:mstore_purge=0</code></strong>: Mặc định, GPAC demuxer khi đọc từ stream bộ nhớ sẽ đệm lại <strong>50 samples</strong> (tương đương 1.6 giây video 30fps) và <strong>50,000 bytes</strong> trước khi xả bảng mẫu (sample table) sang filter mã hóa. Trong kịch bản Low-Latency (chunk 200ms = 6 frames), việc đệm 50 frames làm <strong>đóng băng toàn bộ pipeline</strong>; GPAC không tạo ra file nào cho đến khi pipe bị đóng! Thiết lập <code>=0</code> ép GPAC xả dữ liệu ngay khi vừa đọc được từng frame, đảm bảo sub-second chunk xuất hiện tức thì trong Ramdisk.</li>
+      </ul>
+    </div>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 62-63</span>
+      <pre><code><span class="comment">// 2. Encryption filter: cecrypt with generated DRM XML</span>
+args.<span class="fn">push</span>(<span class="macro">format!</span>(<span class="string">"cecrypt:cfile={}"</span>, <span class="keyword">self</span>.drm_xml_path.<span class="fn">display</span>()));</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li>Gắn filter <code>cecrypt</code> vào chuỗi xử lý. Tham số <code>cfile</code> chỉ đến file cấu hình XML DRM tạm trong Ramdisk. Filter này sẽ đọc KID, Key, scheme, và pattern để mã hóa từng frame payload NALU trước khi chuyển tiếp sang module đóng gói manifest.</li>
+      </ul>
+    </div>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 66-83</span>
+      <pre><code><span class="keyword">let</span> manifest_path = <span class="keyword">self</span>.output_dir.<span class="fn">join</span>(<span class="string">"live.mpd"</span>);
+<span class="keyword">let</span> <span class="keyword">mut</span> dasher_opt = <span class="macro">format!</span>(
+    <span class="string">"{}:dual:profile=live:dmode=dynamic:segdur={}:pssh=mv"</span>,
+    manifest_path.<span class="fn">display</span>(),
+    <span class="keyword">self</span>.segment_duration
+);
+
+<span class="keyword">if</span> <span class="keyword">self</span>.latency_mode == LatencyMode::LowLatency {
+    <span class="keyword">let</span> asto = (<span class="keyword">self</span>.segment_duration - <span class="keyword">self</span>.chunk_duration).<span class="fn">max</span>(<span class="number">0.1</span>);
+    dasher_opt.<span class="fn">push_str</span>(&amp;<span class="macro">format!</span>(
+        <span class="string">":cdur={}:asto={:.1}:llhls=br:cmaf=cmfc"</span>,
+        <span class="keyword">self</span>.chunk_duration, asto
+    ));
+}
+
+args.<span class="fn">push</span>(<span class="string">"-o"</span>.<span class="fn">into</span>());
+args.<span class="fn">push</span>(dasher_opt);</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li><code>:dual</code>: Lệnh cho filter <code>dasher</code> tạo đồng thời cả manifest <strong>DASH (<code>live.mpd</code>)</strong> và <strong>HLS (<code>live.m3u8</code>)</strong> từ một luồng media duy nhất, tiết kiệm 50% CPU so với việc chạy 2 tiến trình độc lập.</li>
+        <li><code>:profile=live:dmode=dynamic</code>: Chế độ live stream phân mảnh thời gian thực; manifest liên tục cập nhật timeline trượt (sliding window).</li>
+        <li><code>:pssh=mv</code>: Ghi các hộp PSSH vào movie header (<code>moov</code>) của Init segment, bắt buộc cho chuẩn CMAF và DASH.</li>
+        <li><code>:cdur=0.2</code>: Phân mảnh CMAF sub-second (200ms mỗi chunk).</li>
+        <li><code>:asto=0.8</code>: <em>Availability Time Offset</em>. Báo cho DASH client biết rằng client được phép gửi HTTP request tải chunk sớm trước 0.8 giây so với thời điểm segment 1 giây hoàn thành.</li>
+        <li><code>:llhls=br</code>: Kích hoạt Apple Low-Latency HLS ở chế độ <strong>Byte-range</strong>. GPAC sẽ xuất các partial chunks dưới dạng byte ranges trỏ vào file media chính và thêm các thẻ <code>#EXT-X-PART</code> vào playlist HLS.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2 id="section-3">3. Giải Phẫu Từng Dòng: Multi-DRM XML Generator & FairPlay Signaling (<code>src/gpac/xml.rs</code>)</h2>
+
+    <p>File này chuyển dịch từ điển miền <code>KeySet</code> sang định dạng XML đặc thù mà filter <code>cecrypt</code> của GPAC yêu cầu.</p>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 63-73</span>
+      <pre><code><span class="keyword">let</span> scheme_str = <span class="keyword">match</span> config.scheme {
+    EncryptionScheme::Cenc =&gt; <span class="string">"cenc"</span>,
+    EncryptionScheme::Cbcs =&gt; <span class="string">"cbcs"</span>,
+    EncryptionScheme::Dual =&gt; <span class="string">"cenc"</span>,
+};
+
+<span class="macro">writeln!</span>(xml, <span class="string">r#"&lt;GPACDRM type="{}"&gt;"#</span>, scheme_str).<span class="fn">unwrap</span>();</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li>Trước đây code hardcode <code>&lt;GPACDRM type="CENC"&gt;</code>. Khi thuộc tính này là <code>CENC</code>, GPAC sẽ ép thuật toán AES-CTR bất kể thuộc tính trên track là gì.</li>
+        <li>Bằng cách truyền động <code>scheme_str</code>, khi mã hóa Apple FairPlay (<code>EncryptionScheme::Cbcs</code>), thẻ gốc trở thành <code>&lt;GPACDRM type="cbcs"&gt;</code>, báo cho GPAC kích hoạt cipher AES-CBC và tự động chuyển HLS key method sang <code>#EXT-X-KEY:METHOD=SAMPLE-AES</code>.</li>
+      </ul>
+    </div>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 187-220</span>
+      <pre><code><span class="keyword">fn</span> <span class="fn">build_hls_info</span>(pssh_list: &amp;[PsshData], key: &amp;ContentKey) -&gt; Result&lt;Option&lt;String&gt;&gt; {
+    <span class="keyword">if</span> pssh_list.<span class="fn">is_empty</span>() {
+        <span class="keyword">return</span> <span class="type">Ok</span>(<span class="type">None</span>);
+    }
+
+    <span class="keyword">let</span> <span class="keyword">mut</span> parts = <span class="type">Vec</span>::<span class="fn">new</span>();
+    <span class="keyword">for</span> pssh <span class="keyword">in</span> pssh_list {
+        <span class="keyword">if</span> pssh.drm_system == <span class="type">DrmSystem</span>::FairPlay {
+            <span class="keyword">let</span> skd_uri = <span class="keyword">if</span> !pssh.data.<span class="fn">is_empty</span>() &amp;&amp; pssh.data.<span class="fn">starts_with</span>(<span class="string">b"skd://"</span>) {
+                <span class="type">String</span>::<span class="fn">from_utf8_lossy</span>(&amp;pssh.data).<span class="fn">to_string</span>()
+            } <span class="keyword">else</span> {
+                <span class="macro">format!</span>(<span class="string">"skd://{}"</span>, key.kid.<span class="number">0</span>.<span class="fn">hyphenated</span>())
+            };
+            parts.<span class="fn">push</span>(<span class="macro">format!</span>(
+                <span class="string">r#"URI="{}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#</span>,
+                skd_uri
+            ));
+        } <span class="keyword">else</span> {
+            <span class="keyword">let</span> pssh_box = <span class="fn">build_pssh_box</span>(pssh)?;
+            <span class="keyword">let</span> uri = BASE64_STANDARD.<span class="fn">encode</span>(pssh_box);
+            parts.<span class="fn">push</span>(<span class="macro">format!</span>(
+                <span class="string">r#"URI="data:text/plain;base64,{}",KEYFORMAT="urn:uuid:{}",KEYFORMATVERSIONS="1""#</span>,
+                uri,
+                <span class="fn">format_uuid</span>(&amp;pssh.system_id)
+            ));
+        }
+    }
+
+    <span class="type">Ok</span>(<span class="type">Some</span>(parts.<span class="fn">join</span>(<span class="string">","</span>)))
+}</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li><strong>Đặc thù của Apple FairPlay</strong>: Trình duyệt Safari và thiết bị iOS từ chối giải mã nếu thẻ <code>#EXT-X-KEY</code> mang format PSSH base64. FairPlay bắt buộc phải có <code>KEYFORMAT="com.apple.streamingkeydelivery"</code> và URI giao thức <code>skd://&lt;KID&gt;</code> để trình phát AVPlayer kích hoạt delegate lấy Server Playback Context (SPC).</li>
+        <li><strong>Cú pháp Delimiter <code>,URI=</code> của GPAC</strong>: Để GPAC xuất nhiều dòng <code>#EXT-X-KEY</code> (cho cả FairPlay và Widevine/PlayReady) trong cùng một rendition, các định nghĩa phải nằm trong cùng thuộc tính <code>hlsInfo</code> và ngăn cách nhau bởi delimiter <code>,URI=</code>. Vì mỗi phần tử trong mảng <code>parts</code> bắt đầu bằng <code>URI="..."</code>, việc nối bằng dấu phẩy <code>parts.join(",")</code> tạo ra chính xác chuỗi:
+          <code>hlsInfo='URI="skd://...",KEYFORMAT="com.apple...",URI="data:text...",KEYFORMAT="urn:uuid..."'</code>.
+        </li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2 id="section-4">4. Giải Phẫu Từng Dòng: Session Lifecycle & Builder Fix (<code>src/session.rs</code>)</h2>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 44-58 & 164-171</span>
+      <pre><code><span class="comment">// Sửa lỗi Scheme Shadowing trong Builder:</span>
+<span class="type">Self</span> {
+    content_id: cid,
+    renditions: <span class="type">Vec</span>::<span class="fn">new</span>(),
+    encryption_schemes: <span class="type">Vec</span>::<span class="fn">new</span>(), <span class="comment">// KHÔNG khởi tạo sẵn Cenc</span>
+    drm_systems: <span class="type">Vec</span>::<span class="fn">new</span>(),        <span class="comment">// KHÔNG khởi tạo sẵn Widevine</span>
+    ...
+}
+
+<span class="comment">// Khi khởi tạo Session thực tế, chỉ fallback nếu caller không chỉ định:</span>
+<span class="keyword">let</span> effective_drm_systems = <span class="keyword">if</span> config.drm_systems.<span class="fn">is_empty</span>() {
+    <span class="macro">vec!</span>[<span class="type">DrmSystem</span>::Widevine]
+} <span class="keyword">else</span> {
+    config.drm_systems.<span class="fn">clone</span>()
+};</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li><strong>Lỗi logic ban đầu</strong>: Builder khởi tạo sẵn <code>vec![EncryptionScheme::Cenc]</code>. Khi người dùng gọi <code>.with_encryption_scheme(EncryptionScheme::Cbcs)</code>, code push thêm <code>Cbcs</code> vào sau <code>Cenc</code>. Sau đó khi lấy scheme chính bằng <code>.first()</code>, hệ thống luôn lấy nhầm <code>Cenc</code>!</li>
+        <li><strong>Khắc phục</strong>: Khởi tạo vector rỗng trong builder, giúp người dùng ghi đè cấu hình một cách tường minh và an toàn.</li>
+      </ul>
+    </div>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 264-272</span>
+      <pre><code><span class="keyword">pub async fn</span> <span class="fn">push_segment</span>(&amp;<span class="keyword">mut self</span>, segment: Segment) -&gt; Result&lt;()&gt; {
+    <span class="keyword">if self</span>.closed {
+        <span class="keyword">return</span> <span class="type">Err</span>(<span class="type">DrmpackError</span>::<span class="type">Session</span>(<span class="string">"PackagingSession is closed"</span>.<span class="fn">into</span>()));
+    }
+    <span class="keyword">self</span>.<span class="fn">ping_heartbeat</span>();
+
+    <span class="keyword">let mut</span> gpac = <span class="keyword">self</span>.gpac.<span class="fn">lock</span>().<span class="keyword">await</span>;
+    gpac.<span class="fn">write_data</span>(&amp;segment.data).<span class="keyword">await</span>
+}</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li>Segment bytes từ <code>media-server</code> được ghi thẳng vào stdin pipe của GPAC child process qua <code>tokio::io::AsyncWriteExt::write_all</code> và <code>flush()</code>. Dữ liệu chỉ nằm trên trang bộ nhớ đệm (kernel pipe buffer) của Linux, hoàn toàn không chạm xuống đĩa cứng vật lý.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2 id="section-5">5. Sơ Đồ Cấu Trúc Hộp ISO-BMFF (MP4 Box Hierarchy) & Giải Mã Phần Cứng</h2>
+
+    <p>
+      Phần cứng CDM trên thiết bị (Apple Secure Enclave, Android TEE) phân tích dòng MP4 bằng cách duyệt cây cấu trúc hộp nhị phân (Boxes/Atoms). Bất kỳ sự sai lệch nào về cấu trúc hộp sẽ dẫn đến lỗi từ chối giải mã (Black screen hoặc DRM decode error).
+    </p>
+
+    <div class="box-tree">
+FILE 1: stdin_dashinit.mp4 (Initialization Segment - Khởi tạo bộ giải mã)
+└── ftyp (File Type: "iso6", "cmfc")
+└── moov (Movie Metadata Box)
+    ├── mvhd (Movie Header: timescale, duration = 0 for live)
+    ├── trak (Track Definition)
+    │   ├── tkhd (Track Header: width, height, track ID = 1)
+    │   └── mdia (Media Box)
+    │       ├── mdhd (Media Header)
+    │       └── minf (Media Information)
+    │           └── stbl (Sample Table Box)
+    │               └── stsd (Sample Description: codec profile)
+    │                   └── encv (Encrypted Video Sample Entry - thay thế cho 'avc1')
+    │                       └── sinf (Protection Scheme Information Box)
+    │                           ├── frma (Original Format: data_format = "avc1")
+    │                           ├── schm (Scheme Type Box)
+    │                           │   ├── scheme_type: "cenc" (AES-CTR) hoặc "cbcs" (AES-CBC)
+    │                           │   └── scheme_version: 0x00010000
+    │                           └── schi (Scheme Information Box)
+    │                               └── tenc (Track Encryption Box) ⭐ [QUYẾT ĐỊNH MÃ HÓA]
+    │                                   ├── default_IsEncrypted: 0x01
+    │                                   ├── default_IV_size: 16 bytes
+    │                                   ├── default_KID: [16 bytes UUID]
+    │                                   └── default_crypt_byte_block / default_skip_byte_block:
+    │                                       (Nếu CBCS: 1:9 pattern -&gt; byte giá trị 0x19)
+    ├── pssh (Protection System Specific Header - Widevine: SystemID 0xedef8ba9...)
+    └── pssh (Protection System Specific Header - FairPlay: SystemID 0x94ce86fb...)
+
+FILE 2: stdin_dash1.m4s (Media Segment - Dữ liệu video thực tế)
+├── styp (Segment Type: "msdh", "msix")
+└── moof (Movie Fragment Box - Đóng gói từng phần media)
+    ├── mfhd (Movie Fragment Header: sequence_number)
+    └── traf (Track Fragment Box)
+        ├── tfhd (Track Fragment Header: track_ID, base_data_offset)
+        ├── tfdt (Track Fragment Base Media Decode Time: mốc thời gian phát)
+        ├── trun (Track Fragment Run: độ dài, kích thước từng sample video)
+        ├── senc (Sample Encryption Box) ⭐ [THÔNG TIN VECTOR IV & SUBSAMPLE]
+        │   └── chứa IV (Initialization Vector) cho từng frame
+        │   └── Subsample encryption table: [bytes_clear, bytes_encrypted]
+        ├── saiz (Sample Auxiliary Information Sizes Box)
+        └── saio (Sample Auxiliary Information Offsets Box)
+└── mdat (Media Data Box)
+    └── [Payload các khối NALU video đã bị mã hóa AES 1:9 hoặc full CTR]
+    </div>
+
+    <div class="callout-success">
+      <strong>Tại sao hộp <code>tenc</code> và <code>schm</code> quyết định sự thành bại của Ticket 03?</strong><br>
+      Khi Safari nhận được stream, trình giải mã đọc hộp <code>schm</code> trong <code>moov</code>. Nếu thấy chuỗi <code>cbcs</code>, nó đọc tiếp hộp <code>tenc</code> để kiểm tra byte pattern (1 block mã hóa 16 bytes, 9 blocks bỏ qua 144 bytes). Nếu các trường này chuẩn xác, CDM của Apple sẽ chuyển sang chế độ AES-CBC phần cứng và dùng KID để gửi request lấy license qua URI <code>skd://</code> trong HLS.
+    </div>
+
+    <hr>
+
+    <h2 id="section-6">6. Giải Phẫu Từng Dòng: Kiểm Thử Tích Hợp E2E (<code>tests/tracer_e2e.rs</code>)</h2>
+
+    <p>File test e2e là nơi duy nhất kiểm chứng toàn bộ sự tích hợp giữa Rust, Kernel Pipe và binary GPAC thực tế trên máy chủ.</p>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 335-361</span>
+      <pre><code><span class="comment">// Khởi tạo clip video H.264 fMP4 chuẩn xác qua ffmpeg lavfi</span>
+<span class="keyword">let</span> ffmpeg_status = std::process::Command::<span class="fn">new</span>(<span class="string">"ffmpeg"</span>)
+    .<span class="fn">args</span>([
+        <span class="string">"-f"</span>, <span class="string">"lavfi"</span>,
+        <span class="string">"-i"</span>, <span class="string">"testsrc=duration=4:size=640x360:rate=30"</span>,
+        <span class="string">"-c:v"</span>, <span class="string">"libx264"</span>,
+        <span class="string">"-profile:v"</span>, <span class="string">"baseline"</span>,
+        <span class="string">"-pix_fmt"</span>, <span class="string">"yuv420p"</span>,
+        <span class="string">"-movflags"</span>, <span class="string">"empty_moov+default_base_moof+frag_keyframe"</span>,
+        <span class="string">"-f"</span>, <span class="string">"mp4"</span>,
+        sample_mp4_path.<span class="fn">to_str</span>().<span class="fn">unwrap</span>(),
+        <span class="string">"-y"</span>,
+    ])
+    .<span class="fn">output</span>()
+    .<span class="fn">expect</span>(<span class="string">"Failed to run ffmpeg to generate test fMP4"</span>);</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li><code>duration=4</code>: Tạo đúng 4 giây video (120 frames). GPAC ở chế độ live dynamic yêu cầu độ dài tối thiểu để thiết lập buffer ban đầu của sliding window trước khi xuất bản manifest.</li>
+        <li><code>empty_moov+default_base_moof+frag_keyframe</code>: Tham số sống còn tạo định dạng <strong>Fragmented MP4 (fMP4)</strong>. Không có các cờ này, ffmpeg sẽ tạo regular MP4 (cần seek đĩa để ghi <code>moov</code> ở cuối file), điều này sẽ gây crash ngay lập tức khi pipe vào stdin của GPAC.</li>
+      </ul>
+    </div>
+
+    <div class="line-analysis">
+      <span class="line-number">Dòng 388-440</span>
+      <pre><code><span class="comment">// 1. Khẳng định HLS Playlist mang đúng method SAMPLE-AES và FairPlay signaling</span>
+<span class="macro">assert!</span>(m3u8_content.<span class="fn">contains</span>(<span class="string">"#EXT-X-KEY:METHOD=SAMPLE-AES"</span>));
+<span class="macro">assert!</span>(m3u8_content.<span class="fn">contains</span>(<span class="string">r#"KEYFORMAT="com.apple.streamingkeydelivery""#</span>));
+<span class="macro">assert!</span>(m3u8_content.<span class="fn">contains</span>(&amp;<span class="macro">format!</span>(<span class="string">"URI=\"skd://{}\""</span>, kid.<span class="number">0</span>.<span class="fn">hyphenated</span>())));
+
+<span class="comment">// 2. Khẳng định hộp nhị phân trong Init Segment (stdin_dashinit.mp4)</span>
+<span class="keyword">let</span> tenc = <span class="fn">find_box</span>(&amp;init_bytes, <span class="string">b"tenc"</span>).<span class="fn">expect</span>(<span class="string">"Init segment must contain tenc box"</span>);
+<span class="macro">assert!</span>(tenc.<span class="fn">windows</span>(<span class="number">16</span>).<span class="fn">any</span>(|bytes| bytes == kid.<span class="fn">as_bytes</span>()));
+
+<span class="keyword">let</span> schm = <span class="fn">find_box</span>(&amp;init_bytes, <span class="string">b"schm"</span>).<span class="fn">expect</span>(<span class="string">"Init segment must contain schm box"</span>);
+<span class="macro">assert!</span>(schm.<span class="fn">windows</span>(<span class="number">4</span>).<span class="fn">any</span>(|b| b == <span class="string">b"cbcs"</span>));
+
+<span class="comment">// 3. Khẳng định các hộp mã hóa phân mảnh trong Media Segment (stdin_dash1.m4s)</span>
+<span class="keyword">for</span> box_type <span class="keyword">in</span> [<span class="string">b"senc"</span>, <span class="string">b"saiz"</span>, <span class="string">b"saio"</span>] {
+    <span class="macro">assert!</span>(<span class="fn">find_box</span>(&amp;seg_bytes, box_type).<span class="fn">is_some</span>());
+}</code></pre>
+      <p><strong>Bản chất kỹ thuật:</strong></p>
+      <ul>
+        <li>Test không chỉ kiểm tra file text (m3u8, mpd) mà trực tiếp phân tích dòng byte nhị phân của container MP4:
+          1. <code>tenc</code> phải chứa đúng byte array 16 bytes của KID.
+          2. <code>schm</code> phải chứa 4 ký tự ASCII <code>cbcs</code>.
+          3. <code>senc</code>, <code>saiz</code>, <code>saio</code> phải xuất hiện trong media chunk, chứng minh các NALU video đã thực sự được mã hóa subsample chứ không phải copy raw stream.
+        </li>
+      </ul>
+    </div>
+
+    <hr>
+    <p><em>Tài liệu được biên soạn đồng bộ với mã nguồn tại commit <code>7eab369</code> (feat: complete LL-CMAF chunking and multi-DRM CBCS packaging).</em></p>
+  </div>
+</body>
+</html>
