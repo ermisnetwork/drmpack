@@ -52,6 +52,10 @@ _Avoid_: Key source, key fetcher
 An async handler function that forwards a player's license request to the Provider and returns the response. Media-server mounts it on an HTTP route; auth is media-server's responsibility.
 _Avoid_: License server, license endpoint
 
+**DRM Signaling**:
+The metadata injected into manifests and initialization segments enabling player license acquisition — PSSH boxes for DASH/CMAF and `#EXT-X-KEY` attributes (`skd://` for FairPlay, inline data URI for Widevine/PlayReady) for HLS.
+_Avoid_: Encryption metadata, DRM tags, key header
+
 ### Output & Storage
 
 **Ramdisk**:
