@@ -1,17 +1,21 @@
 # drmpack
 
-A Rust library for DRM-encrypting media segments and generating CMAF/HLS/DASH manifests. Consumed by media-server as an in-process dependency.
+A Rust library orchestrating DRM packaging and manifest generation for media-server with zero disk I/O overhead. Consumed by media-server as an in-process dependency.
 
 ## Language
 
-### Packaging & Encryption
+### Packaging & Orchestration
 
 **PackagingSession**:
-The core unit of work. Created by media-server with rendition declarations, quality tier mappings, DRM configuration, and encryption mode selection. Holds manifest state for the session's lifetime.
-_Avoid_: Job, task, pipeline
+The core controller unit of work. Manages key acquisition, GPAC subprocess lifecycle over anonymous Unix pipes, and manifest delivery into Ramdisk.
+_Avoid_: Job, task, pipeline, worker
+
+**LatencyMode**:
+The streaming delivery latency profile — `LowLatency` (CMAF chunking, LL-HLS, LL-DASH) or `Standard` (traditional 2-6s segments).
+_Avoid_: Stream speed, delay profile
 
 **Segment**:
-A unit of media input — either muxed (fMP4 with init segment) or unmuxed (raw codec NALUs). The atomic input to the packaging pipeline.
+A unit of media input — muxed fMP4 stream pushed into the packaging session.
 _Avoid_: Chunk, fragment, frame
 
 **Rendition**:
@@ -23,13 +27,13 @@ A named group of Renditions that share a single ContentKey (e.g. SD, HD, 4K). En
 _Avoid_: Key group, tier, quality level
 
 **EncryptionScheme**:
-The encryption mode applied to segments — CENC (CTR) or CBCS (CBC pattern). Configurable per-session; a session may produce both schemes simultaneously.
+The cipher mode applied to media samples — CENC (AES-CTR), CBCS (AES-CBC 1:9 pattern), or Dual (both simultaneously).
 _Avoid_: Protection scheme, cipher mode
 
 ### Keys & Licensing
 
 **ContentKey**:
-An AES-128 key used to encrypt segments. Bound to a specific QualityTier and track type (video/audio). Identified by a KeyID (KID).
+An AES-128 key used to encrypt media samples. Bound to a specific QualityTier and track type (video/audio). Identified by a KeyID (KID).
 _Avoid_: Encryption key, media key
 
 **KeyID (KID)**:
@@ -48,12 +52,12 @@ _Avoid_: Key source, key fetcher
 An async handler function that forwards a player's license request to the Provider and returns the response. Media-server mounts it on an HTTP route; auth is media-server's responsibility.
 _Avoid_: License server, license endpoint
 
-### Output
+### Output & Storage
 
-**OutputSink**:
-A trait implemented by media-server to receive encrypted segments, init segments, and manifests. Controls where output goes (memory, disk, CDN stream).
-_Avoid_: Writer, output handler, destination
+**Ramdisk**:
+A memory-backed filesystem directory (`/dev/shm` or `tmpfs`) where manifests and CMAF chunks are written and served with zero disk I/O.
+_Avoid_: Cache, tempdir, disk buffer
 
 **Manifest**:
-The playlist/description file served to players — m3u8 (HLS) or MPD (DASH). drmpack owns manifest generation and lifecycle, including DRM signaling (PSSH, EXT-X-KEY). Separate manifests are produced per DRM/encryption-scheme combination.
+The playlist or description file served to players — HLS (`.m3u8`) or DASH (`.mpd`). Managed in Ramdisk with correct DRM signaling (PSSH, EXT-X-KEY).
 _Avoid_: Playlist (ambiguous with HLS-specific usage)

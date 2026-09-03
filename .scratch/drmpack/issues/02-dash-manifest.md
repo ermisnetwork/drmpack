@@ -1,14 +1,15 @@
-# 02: DASH manifest generation
+# 02: Low-Latency CMAF Chunking (LL-HLS + LL-DASH)
 
-**What to build:** Add MPD (DASH) manifest output alongside the existing HLS manifest. The MPD should include ContentProtection elements for Widevine and PlayReady with correct PSSH boxes, period and adaptation set structure, and segment URLs with the CDN base URL. When a session produces output, both m3u8 and MPD manifests are emitted via OutputSink.
+**What to build:** Implement `LatencyMode::LowLatency` in `PackagingSession`. Configure GPAC's `dasher` filter with CMAF chunking parameters: `:cdur=0.2` (200ms fragment duration), `:asto=1.8` (Availability Time Offset for LL-DASH), and `:llhls=br` (Byte-range partial segments for LL-HLS). Verify that the generated `.m3u8` manifest contains `#EXT-X-PART` tags and `#EXT-X-PRELOAD-HINT`, and the `.mpd` contains `availabilityTimeOffset` and `availabilityTimeComplete="false"`.
 
 **Blocked by:** 01 (Tracer)
 
 **Status:** ready-for-agent
 
-- [ ] MPD manifest generator: valid DASH MPD with Period, AdaptationSet, Representation, SegmentTemplate/SegmentList
-- [ ] ContentProtection elements for Widevine (scheme ID `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`) and PlayReady (scheme ID `9a04f079-9840-4286-ab92-e65be0885f95`)
-- [ ] PSSH boxes encoded as base64 in ContentProtection elements
-- [ ] CDN base URL in segment URLs (BaseURL or SegmentTemplate)
-- [ ] PackagingSession emits both m3u8 and MPD via OutputSink
-- [ ] Test: push segment, verify valid MPD with correct ContentProtection elements and segment URLs
+- [ ] Add `LatencyMode` enum (`Standard`, `LowLatency`) to `PackagingSessionConfig`
+- [ ] Construct GPAC `dasher` filter arguments dynamically based on `LatencyMode`:
+  - `LowLatency`: `:cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc`
+  - `Standard`: standard segment duration without chunking
+- [ ] Test LL-HLS manifest: assert `#EXT-X-PART` entries and `#EXT-X-PRELOAD-HINT` present in variant `.m3u8`
+- [ ] Test LL-DASH manifest: assert `availabilityTimeOffset` attribute present in `.mpd`
+- [ ] Verify sub-second chunk availability in output directory during active stream push

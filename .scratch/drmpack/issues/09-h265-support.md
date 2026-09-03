@@ -1,15 +1,11 @@
-# 09: H.265 (HEVC) support
+# 09: SPEKE v2 KeyProvider
 
-**What to build:** Extend the muxer and encryption pipeline for H.265/HEVC content. Parse VPS, SPS, and PPS parameter sets. Generate correct init segments with HEVCDecoderConfigurationRecord. Handle H.265 NAL unit structure for subsample encryption (CENC and CBCS). Support both muxed fMP4 (H.265) and unmuxed (raw H.265 NALUs) input.
+**What to build:** A KeyProvider implementation for AWS SPEKE (Secure Packager and Encoder Key Exchange) v2 protocol. SPEKE v2 wraps CPIX 2.3 as its payload format but adds SPEKE-specific endpoint URL conventions, AWS SigV4 authentication, and custom HTTP headers. Builds on top of the CPIX request/response parser from ticket 08.
 
-**Blocked by:** 08 (H.264 muxer)
+**Blocked by:** 08 (CPIX KeyProvider)
 
 **Status:** ready-for-agent
 
-- [ ] H.265 NALU parser: identify NAL unit types (VPS, SPS, PPS, IDR, trail), extract parameter sets
-- [ ] H.265 SPS parser: extract resolution, profile, tier, level for HEVCDecoderConfigurationRecord
-- [ ] Init segment with hvcC box (HEVCDecoderConfigurationRecord) instead of avcC
-- [ ] fMP4 fragment muxer handles H.265 NAL units (different start code and header structure from H.264)
-- [ ] Subsample encryption: correct slice header parsing for H.265 (different from H.264)
-- [ ] Test: push muxed H.265 fMP4 segment, verify correct encryption
-- [ ] Test: push unmuxed H.265 NALUs, verify muxing + encryption produces valid output
+- [ ] SPEKE v2 request builder: wrap CPIX request XML per AWS SPEKE v2 specification
+- [ ] Authentication layer: support API key and AWS SigV4 request signing
+- [ ] Integration test with mock SPEKE v2 endpoint

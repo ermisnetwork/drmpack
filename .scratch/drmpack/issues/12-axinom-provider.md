@@ -1,14 +1,11 @@
-# 12: Axinom KeyProvider
+# 12: Audio & Subtitle Track Handling
 
-**What to build:** A KeyProvider implementation for Axinom's DRM key service, based on Axinom's official API documentation. Axinom may use CPIX or their own key service API. The implementation must follow Axinom's documented authentication, request format, and response handling precisely. Research the current Axinom key service API documentation before implementing.
+**What to build:** Support multiple audio tracks (AAC, MP3, AC-3) and subtitle tracks (WebVTT) in the GPAC filter graph and DRM XML config. Audio tracks are encrypted with audio-specific ContentKeys (separate from video keys, per the QualityTier policy). Subtitle tracks (WebVTT) pass through unencrypted (cleartext). Manifests include correct language, codec, and accessibility attributes.
 
-**Blocked by:** 10 (CPIX KeyProvider)
+**Blocked by:** 05 (Multi-rendition)
 
 **Status:** ready-for-agent
 
-- [ ] Research Axinom key service API: read official documentation for current endpoints, auth, request/response format
-- [ ] Implement AxinomProvider following the documented API contract exactly
-- [ ] Axinom-specific authentication (API key, tenant ID, or other credentials per their docs)
-- [ ] Multi-key support per Axinom's API capabilities
-- [ ] Behind `axinom` feature flag
-- [ ] Test: mock Axinom endpoint matching their documented response format, verify correct key extraction
+- [ ] Audio track DRM XML configuration (separate audio ContentKey and KID)
+- [ ] Subtitle track handling (cleartext WebVTT signaling in HLS and DASH manifests)
+- [ ] Multi-audio rendition manifest tags (`EXT-X-MEDIA:TYPE=AUDIO` in HLS, separate Audio AdaptationSet in DASH)

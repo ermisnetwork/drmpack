@@ -1,0 +1,136 @@
+:root {
+  --bg-color: #fdfdfd;
+  --text-color: #111;
+  --accent: #0f4c81;
+  --code-bg: #1e1e1e;
+  --border-color: #e1e4e8;
+  --font-serif: "ETBembo", "Palatino", "Georgia", serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "SF Mono", "Fira Code", Menlo, Consolas, monospace;
+}
+
+body {
+  margin: 0;
+  padding: 2rem;
+  background: var(--bg-color);
+  color: var(--text-color);
+  font-family: var(--font-serif);
+  line-height: 1.6;
+  font-size: 18px;
+}
+
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-sans);
+  color: var(--accent);
+  margin-top: 2rem;
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 2.2rem;
+  border-bottom: 2px solid var(--border-color);
+  padding-bottom: 0.5rem;
+}
+
+h2 {
+  font-size: 1.6rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.3rem;
+}
+
+pre {
+  background: var(--code-bg);
+  color: #d4d4d4;
+  border: 1px solid var(--border-color);
+  padding: 1.2rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+:not(pre) > code {
+  background: #f4f6f8;
+  color: #c7254e;
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  border: 1px solid #e1e4e8;
+}
+
+.code-block {
+  background: var(--code-bg);
+  color: #d4d4d4;
+  padding: 1.2rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 1.5rem 0;
+  white-space: pre;
+}
+
+.box-diagram {
+  background: #ffffff;
+  border: 2px solid var(--accent);
+  padding: 1.2rem;
+  border-radius: 8px;
+  margin: 1.5rem 0;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+  white-space: pre;
+}
+
+.callout {
+  border-left: 4px solid var(--accent);
+  background: #f0f7fc;
+  padding: 1rem 1.2rem;
+  margin: 1.5rem 0;
+  border-radius: 0 6px 6px 0;
+}
+
+.callout strong {
+  color: var(--accent);
+  font-family: var(--font-sans);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+}
+
+th, td {
+  border: 1px solid var(--border-color);
+  padding: 0.75rem;
+  text-align: left;
+}
+
+th {
+  background: #f4f6f8;
+  font-weight: 600;
+}
+
+.footer {
+  margin-top: 4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: #666;
+}

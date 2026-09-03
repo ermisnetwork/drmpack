@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture Guide: GPAC Subprocess & Ramdisk Packaging in drmpack</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    .keyword { color: #569cd6; font-weight: bold; }
+    .type { color: #4ec9b0; }
+    .fn { color: #dcdcaa; }
+    .comment { color: #6a9955; font-style: italic; }
+    .string { color: #ce9178; }
+    .number { color: #b5cea8; }
+    .macro { color: #c586c0; }
+    .box-tree {
+      background: #ffffff;
+      border: 2px solid #0f4c81;
+      padding: 1.5rem;
+      border-radius: 8px;
+      font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.6;
+      margin: 1.5rem 0;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .highlight-box {
+      background-color: #fffbdd;
+      border-left: 4px solid #d99b00;
+      padding: 1rem;
+      margin: 1rem 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>COMPREHENSIVE TECHNICAL GUIDE: ISSUE 01 & PIVOT TO GPAC ORCHESTRATION</h1>
+    <p><em>Topic: Orchestration of GPAC Filter Graphs (`cecrypt` & `dasher:dual`) over Anonymous Kernel Pipes with Ramdisk Manifest Distribution.</em></p>
+
+    <hr>
+
+    <h2>Table of Contents</h2>
+    <ol>
+      <li><a href="#section-1">1. Business Context & Architectural Pivot (ADR-0004)</a></li>
+      <li><a href="#section-2">2. Domain Type System & Key Management</a></li>
+      <li><a href="#section-3">3. GPAC Common Encryption XML Generator (`drm.xml`)</a></li>
+      <li><a href="#section-4">4. Subprocess Pipe IPC & Watchdog Monitoring</a></li>
+      <li><a href="#section-5">5. Zero-I/O Ramdisk Manifest & Chunk Distribution (ADR-0005)</a></li>
+      <li><a href="#section-6">6. PackagingSession Coordination & Cleanup Lifecycle</a></li>
+      <li><a href="#section-7">7. End-to-End Testing Seam Verification</a></li>
+    </ol>
+
+    <hr>
+
+    <h2 id="section-1">1. Business Context & Architectural Pivot (ADR-0004)</h2>
+    <p>
+      Initially, <code>drmpack</code> considered implementing a native Rust MP4 container parser and AES-128 ciphers (ADR-0002). However, strict hardware CDMs (Apple FairPlay, Google Widevine L1, Microsoft PlayReady on SmartTVs) strictly reject ISO-BMFF streams with minute discrepancies in NALU framing, subsample byte offsets, or slice headers without providing debug logs.
+    </p>
+    <p>
+      Per <strong>ADR-0004</strong>, <code>drmpack</code> pivoted to orchestrating the industrial <strong>GPAC filter engine</strong> as an isolated, persistent subprocess over anonymous Unix pipes. This guarantees 100% hardware CDM compliance, native LL-HLS (`EXT-X-PART`) and CMAF chunking support, and isolates C-library memory safety from <code>media-server</code>.
+    </p>
+
+    <div class="box-tree">[ Media Ingest: Muxed fMP4 Streams from media-server ]
+              │
+              ▼ push_segment() / push_bytes()
+┌────────────────────────────────────────────────────────────────────────┐
+│ PackagingSession (Rust Controller in media-server)                     │
+│  - Key acquisition via KeyProvider trait (CPIX / Axinom / RawKey)      │
+│  - Generation of GPAC Common Encryption XML (drm.xml)                  │
+│  - Heartbeat watchdog supervisor & Ramdisk cleanup lifecycle           │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │ Anonymous Unix Pipe (stdin)
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ GPAC Long-Running Subprocess Filter Graph                              │
+│                                                                        │
+│  [stdin:ext=mp4] ──▶ [cecrypt:cfile=drm.xml] ──▶ [dasher:dual]         │
+│     (Input Pipe)          (CENC/CBCS DRM)     (CMAF Chunking & Manifest)│
+└──────────────────────────────────────────────────┬─────────────────────┘
+                                                   │ Zero Disk I/O Output
+                                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Ramdisk (/dev/shm or tmpfs)                                            │
+│  - live.m3u8 (HLS master & variant playlists with EXT-X-PART)          │
+│  - live.mpd (DASH MPD with availabilityTimeOffset)                     │
+│  - stdin_dashinit.mp4 & encrypted CMAF media chunks                    │
+└────────────────────────────────────────────────────────────────────────┘</div>
+
+    <hr>
+
+    <h2 id="section-2">2. Domain Type System & Key Management</h2>
+    <p>
+      <code>drmpack</code> models DRM concepts using strong domain types:
+    </p>
+    <ul>
+      <li><strong>KeyID (KID)</strong>: 16-byte UUID identifying a content key.</li>
+      <li><strong>ContentKey</strong>: 16-byte AES key mapped to a specific <code>QualityTier</code> (e.g. SD, HD, 4K) and <code>TrackType</code> (Audio / Video).</li>
+      <li><strong>KeySet</strong>: In-memory cache of resolved ContentKeys and system-specific <code>PsshData</code>.</li>
+      <li><strong>KeyProvider</strong>: Pluggable async trait for key acquisition (RawKeyProvider for tests, CPIX, Axinom, SPEKE v2).</li>
+    </ul>
+
+    <hr>
+
+    <h2 id="section-3">3. GPAC Common Encryption XML Generator (`drm.xml`)</h2>
+    <p>
+      Rather than transforming MP4 boxes in Rust, <code>GpacDrmXmlGenerator</code> dynamically constructs an XML configuration for GPAC's <code>cecrypt</code> filter:
+    </p>
+    <ul>
+      <li>Defines <code>CrypTrack</code> elements matching each Rendition's track ID.</li>
+      <li>Sets <code>scheme_type="cenc"</code> (AES-CTR) or <code>scheme_type="cbcs"</code> (AES-CBC 1:9 pattern).</li>
+      <li>Injects multi-DRM <code>DRMInfo</code> blocks containing base64-encoded PSSH boxes for Widevine, FairPlay, and PlayReady.</li>
+    </ul>
+
+    <hr>
+
+    <h2 id="section-4">4. Subprocess Pipe IPC & Watchdog Monitoring</h2>
+    <p>
+      <code>GpacProcess</code> manages the child process lifecycle via <code>tokio::process::Command</code>:
+    </p>
+    <ul>
+      <li><strong>stdin</strong>: <code>Stdio::piped()</code> transfers raw fMP4 media bytes without disk writes.</li>
+      <li><strong>stderr</strong>: Continuously buffered into memory and streamed to <code>tracing</code> logs.</li>
+      <li><strong>Watchdog</strong>: Background Tokio task monitors heartbeat pings from <code>push_segment()</code>. If input stalls beyond <code>session_timeout</code>, GPAC is terminated safely to prevent orphaned processes.</li>
+    </ul>
+
+    <hr>
+
+    <h2 id="section-5">5. Zero-I/O Ramdisk Manifest & Chunk Distribution (ADR-0005)</h2>
+    <p>
+      Per <strong>ADR-0005</strong>, GPAC's <code>dasher</code> filter writes manifests and CMAF partial segments directly into shared memory (<code>/dev/shm</code> on Linux, or system tempfs). This guarantees sub-millisecond manifest read latency for edge HTTP servers and eliminates physical SSD wear under 200ms manifest refresh cycles.
+    </p>
+
+    <hr>
+
+    <h2 id="section-6">6. PackagingSession Coordination & Cleanup Lifecycle</h2>
+    <p>
+      <code>PackagingSession</code> exposes clean, typed path accessors:
+    </p>
+    <ul>
+      <li><code>hls_manifest_path()</code> ➔ returns <code>&lt;output_dir&gt;/live.m3u8</code></li>
+      <li><code>dash_manifest_path()</code> ➔ returns <code>&lt;output_dir&gt;/live.mpd</code></li>
+      <li><code>cleanup().await</code> ➔ deletes the Ramdisk directory after the draining window completes.</li>
+      <li><code>auto_cleanup</code> ➔ optional flag to clean Ramdisk immediately on <code>close()</code>.</li>
+    </ul>
+
+    <hr>
+
+    <h2 id="section-7">7. End-to-End Testing Seam Verification</h2>
+    <p>
+      Tests exercise the complete stack at the single public seam: <code>PackagingSession</code>. <code>tests/tracer_e2e.rs</code> pushes a sample fMP4 stream, triggers GPAC packaging, and asserts that generated Ramdisk manifests and init segments contain valid Widevine PSSH boxes verified via <code>tests/common/find_box</code>.
+    </p>
+  </div>
+</body>
+</html>

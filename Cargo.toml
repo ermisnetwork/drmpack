@@ -1,0 +1,36 @@
+[package]
+name = "drmpack"
+version = "0.1.0"
+edition = "2021"
+description = "Native Rust DRM packaging library for CENC/CBCS fMP4 and HLS/DASH manifests"
+authors = ["ermis-stream"]
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["widevine", "fairplay", "playready", "cpix"]
+widevine = []
+fairplay = []
+playready = []
+hls-legacy = []
+cpix = ["dep:reqwest", "dep:quick-xml"]
+speke-v2 = ["dep:reqwest", "dep:quick-xml"]
+axinom = ["dep:reqwest", "dep:quick-xml"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = { version = "1", features = ["serde"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+# Optional dependencies for key providers
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+quick-xml = { version = "0.37", features = ["serialize"], optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
