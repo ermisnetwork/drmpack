@@ -4,10 +4,10 @@
 
 **Blocked by:** 01 (Tracer)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] XML generator support for `EncryptionScheme::Cenc` (`scheme_type="cenc"`, AES-CTR, 16-byte IV)
-- [ ] XML generator support for `EncryptionScheme::Cbcs` (`scheme_type="cbcs"`, AES-CBC 1:9 pattern, constant IV)
-- [ ] Multi-DRM PSSH injection: embed Widevine (UUID `edef...`), PlayReady (UUID `9a04...`), and FairPlay signaling in the XML
-- [ ] Unit tests verifying XML structure matches GPAC `cecrypt` specification
-- [ ] Integration test: verify GPAC correctly parses the generated XML and encrypts sample tracks
+- [x] XML generator support for `EncryptionScheme::Cenc` (`scheme_type="cenc"`, AES-CTR, 16-byte IV)
+- [x] XML generator support for `EncryptionScheme::Cbcs` (`scheme_type="cbcs"`, AES-CBC 1:9 pattern, constant IV)
+- [x] Multi-DRM PSSH injection: embed Widevine (UUID `edef...`), PlayReady (UUID `9a04...`), and FairPlay signaling in the XML
+- [x] Unit tests verifying XML structure matches GPAC `cecrypt` specification
+- [x] Integration test: verify GPAC correctly parses the generated XML and encrypts sample tracks

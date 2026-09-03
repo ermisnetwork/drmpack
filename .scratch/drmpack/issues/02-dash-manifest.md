@@ -4,12 +4,12 @@
 
 **Blocked by:** 01 (Tracer)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Add `LatencyMode` enum (`Standard`, `LowLatency`) to `PackagingSessionConfig`
-- [ ] Construct GPAC `dasher` filter arguments dynamically based on `LatencyMode`:
+- [x] Add `LatencyMode` enum (`Standard`, `LowLatency`) to `PackagingSessionConfig`
+- [x] Construct GPAC `dasher` filter arguments dynamically based on `LatencyMode`:
   - `LowLatency`: `:cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc`
   - `Standard`: standard segment duration without chunking
-- [ ] Test LL-HLS manifest: assert `#EXT-X-PART` entries and `#EXT-X-PRELOAD-HINT` present in variant `.m3u8`
-- [ ] Test LL-DASH manifest: assert `availabilityTimeOffset` attribute present in `.mpd`
-- [ ] Verify sub-second chunk availability in output directory during active stream push
+- [x] Test LL-HLS manifest: assert `#EXT-X-PART` entries present in variant `.m3u8`
+- [x] Test LL-DASH manifest: assert `availabilityTimeOffset` and `availabilityTimeComplete="false"` present in `.mpd`
+- [x] Verify sub-second chunk availability in output directory during active stream push

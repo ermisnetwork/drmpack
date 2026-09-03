@@ -58,18 +58,18 @@ impl GpacDrmXmlGenerator {
     pub fn generate(key_set: &KeySet, config: &GpacDrmConfig) -> Result<String> {
         let mut xml = String::with_capacity(1024);
         writeln!(xml, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
-        writeln!(xml, r#"<GPACDRM type="CENC">"#).unwrap();
-
-        for pssh in &key_set.pssh {
-            Self::write_drm_info(&mut xml, pssh);
-        }
-        let hls_info = build_hls_info(&key_set.pssh)?;
 
         let scheme_str = match config.scheme {
             EncryptionScheme::Cenc => "cenc",
             EncryptionScheme::Cbcs => "cbcs",
             EncryptionScheme::Dual => "cenc", // Default to CENC for the primary branch
         };
+
+        writeln!(xml, r#"<GPACDRM type="{}">"#, scheme_str).unwrap();
+
+        for pssh in &key_set.pssh {
+            Self::write_drm_info(&mut xml, pssh);
+        }
 
         let is_cbcs = config.scheme == EncryptionScheme::Cbcs;
 
@@ -78,6 +78,7 @@ impl GpacDrmXmlGenerator {
         if config.tracks.is_empty() {
             // Find any available key in KeySet
             if let Some((_, key)) = key_set.keys.iter().next() {
+                let hls_info = build_hls_info(&key_set.pssh, key)?;
                 Self::write_cryptrack(
                     &mut xml,
                     None,
@@ -100,6 +101,7 @@ impl GpacDrmXmlGenerator {
                         ))
                     })?;
 
+                let hls_info = build_hls_info(&key_set.pssh, key)?;
                 Self::write_cryptrack(
                     &mut xml,
                     Some(track.track_id),
@@ -185,18 +187,35 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn build_hls_info(pssh_list: &[PsshData]) -> Result<Option<String>> {
-    let Some(pssh) = pssh_list.first() else {
+fn build_hls_info(pssh_list: &[PsshData], key: &ContentKey) -> Result<Option<String>> {
+    if pssh_list.is_empty() {
         return Ok(None);
-    };
+    }
 
-    let pssh_box = build_pssh_box(pssh)?;
-    let uri = BASE64_STANDARD.encode(pssh_box);
-    Ok(Some(format!(
-        r#"URI="data:text/plain;base64,{}",KEYFORMAT="urn:uuid:{}",KEYFORMATVERSIONS="1""#,
-        uri,
-        format_uuid(&pssh.system_id)
-    )))
+    let mut parts = Vec::new();
+    for pssh in pssh_list {
+        if pssh.drm_system == crate::types::DrmSystem::FairPlay {
+            let skd_uri = if !pssh.data.is_empty() && pssh.data.starts_with(b"skd://") {
+                String::from_utf8_lossy(&pssh.data).to_string()
+            } else {
+                format!("skd://{}", key.kid.0.hyphenated())
+            };
+            parts.push(format!(
+                r#"URI="{}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#,
+                skd_uri
+            ));
+        } else {
+            let pssh_box = build_pssh_box(pssh)?;
+            let uri = BASE64_STANDARD.encode(pssh_box);
+            parts.push(format!(
+                r#"URI="data:text/plain;base64,{}",KEYFORMAT="urn:uuid:{}",KEYFORMATVERSIONS="1""#,
+                uri,
+                format_uuid(&pssh.system_id)
+            ));
+        }
+    }
+
+    Ok(Some(parts.join(",")))
 }
 
 fn build_pssh_box(pssh: &PsshData) -> Result<Vec<u8>> {
@@ -265,7 +284,7 @@ mod tests {
 
         let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation failed");
 
-        assert!(xml.contains(r#"<GPACDRM type="CENC">"#));
+        assert!(xml.contains(r#"<GPACDRM type="cenc">"#));
         assert!(xml.contains(
             "  <DRMInfo type=\"pssh\" version=\"0\">\n\
              \x20   <BS ID128=\"edef8ba979d64acea3c827dcd51d21ed\"/>\n\
@@ -298,7 +317,70 @@ mod tests {
 
         let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation failed");
 
+        assert!(xml.contains(r#"<GPACDRM type="cbcs">"#));
         assert!(xml.contains(r#"scheme_type="cbcs""#));
         assert!(xml.contains(r#"crypt_byte_block="1" skip_byte_block="9""#));
+    }
+
+    #[test]
+    fn test_gpac_xml_multi_drm_generation() {
+        let kid_uuid = Uuid::from_bytes([
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ]);
+        let kid = KeyID::new(kid_uuid);
+        let content_key = ContentKey::new(kid, [0xaa; 16], QualityTier::hd(), TrackType::Video);
+
+        let mut key_set = KeySet::new();
+        key_set.insert_key(content_key);
+
+        // 1. Widevine PSSH
+        key_set.add_pssh(PsshData {
+            drm_system: DrmSystem::Widevine,
+            system_id: DrmSystem::Widevine.system_id(),
+            data: Bytes::from_static(b"widevine-data"),
+        });
+
+        // 2. PlayReady PSSH
+        key_set.add_pssh(PsshData {
+            drm_system: DrmSystem::PlayReady,
+            system_id: DrmSystem::PlayReady.system_id(),
+            data: Bytes::from_static(b"playready-data"),
+        });
+
+        // 3. FairPlay
+        key_set.add_pssh(PsshData {
+            drm_system: DrmSystem::FairPlay,
+            system_id: DrmSystem::FairPlay.system_id(),
+            data: Bytes::from_static(b""),
+        });
+
+        let config = GpacDrmConfig::new(EncryptionScheme::Cbcs).with_track(
+            1,
+            TrackType::Video,
+            QualityTier::hd(),
+        );
+
+        let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation failed");
+
+        // Verify all 3 DRM systems have DRMInfo PSSH tags
+        assert!(xml.contains(r#"<BS ID128="edef8ba979d64acea3c827dcd51d21ed"/>"#));
+        assert!(xml.contains(r#"<BS ID128="9a04f07998404286ab92e65be0885f95"/>"#));
+        assert!(xml.contains(r#"<BS ID128="94ce86fb07ff4f43adb893d2fa968ca2"/>"#));
+
+        // Verify hlsInfo includes FairPlay skd URI as well as Widevine and PlayReady UUIDs
+        let expected_fairplay = format!(
+            r#"URI="skd://{}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#,
+            kid_uuid.hyphenated()
+        );
+        let expected_widevine = r#"KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed""#;
+        let expected_playready = r#"KEYFORMAT="urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95""#;
+
+        assert!(xml.contains(&expected_fairplay));
+        assert!(xml.contains(expected_widevine));
+        assert!(xml.contains(expected_playready));
+
+        // Verify delimiter ,URI= is present between DRM formats
+        assert!(xml.contains(r#",KEYFORMATVERSIONS="1",URI="#));
     }
 }

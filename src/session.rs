@@ -44,8 +44,8 @@ impl PackagingSessionConfig {
         Self {
             content_id: cid,
             renditions: Vec::new(),
-            encryption_schemes: vec![EncryptionScheme::Cenc],
-            drm_systems: vec![DrmSystem::Widevine],
+            encryption_schemes: Vec::new(),
+            drm_systems: Vec::new(),
             latency_mode: LatencyMode::LowLatency,
             segment_duration: 2.0,
             chunk_duration: 0.2,
@@ -161,10 +161,16 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
             }
         }
 
+        let effective_drm_systems = if config.drm_systems.is_empty() {
+            vec![DrmSystem::Widevine]
+        } else {
+            config.drm_systems.clone()
+        };
+
         let key_req = KeyRequest {
             content_id: config.content_id.clone(),
             requested_tiers,
-            drm_systems: config.drm_systems.clone(),
+            drm_systems: effective_drm_systems,
         };
 
         info!(content_id = %config.content_id, "Fetching encryption keys from provider");
