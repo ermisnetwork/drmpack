@@ -12,5 +12,5 @@
 
 ## Consequences
 
-- Each Dual session is one unit of work: a failure in either Representation fails the session and teardown attempts both packaging branches.
+- Each Dual session is one unit of work: a failure in either Representation fails the session and teardown attempts to shut down both subprocesses.
 - The current shared ContentKey/KID model is a topology proof only. Production Dual packaging requires scheme-aware, distinct key identity and material for CENC and CBCS before it can be treated as production-safe.
