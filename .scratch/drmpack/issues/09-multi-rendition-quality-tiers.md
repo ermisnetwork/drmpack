@@ -1,8 +1,8 @@
-# 05: Multi-rendition + per-quality-tier keys
+# 09: Multi-rendition + per-quality-tier keys
 
 **What to build:** Support multiple Renditions in a single `PackagingSession`, each mapped to a `QualityTier` (SD/HD/4K). Each (track_type, QualityTier) combination gets a unique `ContentKey`. The session's key request fetches all keys in a single batch call. The GPAC DRM XML generator assigns the correct key and KID to each track. Manifests include multi-bitrate ABR structure (HLS master playlist with variant playlists, DASH MPD with multiple Representations per AdaptationSet).
 
-**Blocked by:** 01 (Tracer), 03 (Multi-DRM XML)
+**Blocked by:** 01 (Tracer), 05 (CPIX KeyProvider)
 
 **Status:** ready-for-agent
 

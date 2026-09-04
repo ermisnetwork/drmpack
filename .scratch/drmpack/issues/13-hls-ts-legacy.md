@@ -2,7 +2,7 @@
 
 **What to build:** An optional output profile for legacy clients (older SmartTVs, iOS <10) that do not support fMP4-based HLS. Configure GPAC with MPEG-2 Transport Stream segmentation and SAMPLE-AES encryption for CBCS in TS containers. Output is generated as an additional legacy rendition alongside the primary CMAF (fMP4) output.
 
-**Blocked by:** 06 (Process Lifecycle)
+**Blocked by:** 11 (Process Lifecycle)
 
 **Status:** ready-for-agent
 
