@@ -19,8 +19,8 @@ pub use gpac::{GpacDrmConfig, GpacDrmXmlGenerator, GpacProcess, GpacProcessConfi
 pub use key::{ContentKey, KeyID, KeyProvider, KeyRequest, KeySet, RawKeyProvider};
 pub use session::{PackagingSession, PackagingSessionConfig};
 pub use types::{
-    DrmSystem, EncryptionScheme, LatencyMode, ManifestFormat, QualityTier, Rendition, Segment,
-    TrackType,
+    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, QualityTier,
+    Rendition, Segment, TrackType,
 };
 
 #[cfg(feature = "cpix")]

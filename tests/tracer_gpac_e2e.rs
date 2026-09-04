@@ -13,11 +13,11 @@ fn create_test_key_provider() -> (RawKeyProvider, KeyID) {
     let key_bytes = [0x42; 16];
     let content_key = ContentKey::new(kid, key_bytes, QualityTier::hd(), TrackType::Video);
 
-    let pssh = PsshData {
-        drm_system: DrmSystem::Widevine,
-        system_id: DrmSystem::Widevine.system_id(),
-        data: bytes::Bytes::from_static(b"widevine-pssh-test-payload"),
-    };
+    let pssh = PsshData::new(
+        DrmSystem::Widevine,
+        DrmSystem::Widevine.system_id(),
+        bytes::Bytes::from_static(b"widevine-pssh-test-payload"),
+    );
 
     let provider = RawKeyProvider::new().with_key(content_key).with_pssh(pssh);
 

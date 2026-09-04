@@ -6,6 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Audio track DRM XML configuration (separate audio ContentKey and KID)
-- [ ] Subtitle track handling (cleartext WebVTT signaling in HLS and DASH manifests)
+- [ ] Audio track DRM XML configuration (separate audio ContentKey and KID) *(Note: `KeyMappingPolicy::SharedVideoSingleAudio` implemented in ADR-0007)*
+- [ ] Subtitle track handling (cleartext WebVTT signaling in HLS and DASH manifests) *(Note: `Rendition::clear()` and `<CrypTrack IsEncrypted="0"/>` implemented in ADR-0007)*
 - [ ] Multi-audio rendition manifest tags (`EXT-X-MEDIA:TYPE=AUDIO` in HLS, separate Audio AdaptationSet in DASH)
+

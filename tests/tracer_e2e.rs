@@ -21,11 +21,11 @@ fn create_test_key_provider() -> (RawKeyProvider, KeyID) {
     let key_bytes = [0x42; 16];
     let content_key = ContentKey::new(kid, key_bytes, QualityTier::hd(), TrackType::Video);
 
-    let pssh = PsshData {
-        drm_system: DrmSystem::Widevine,
-        system_id: DrmSystem::Widevine.system_id(),
-        data: Bytes::from_static(WIDEVINE_PSSH_PAYLOAD),
-    };
+    let pssh = PsshData::new(
+        DrmSystem::Widevine,
+        DrmSystem::Widevine.system_id(),
+        Bytes::from_static(WIDEVINE_PSSH_PAYLOAD),
+    );
 
     let provider = RawKeyProvider::new().with_key(content_key).with_pssh(pssh);
 
@@ -501,17 +501,17 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
     ]));
     let content_key = ContentKey::new(kid, [0x55; 16], QualityTier::hd(), TrackType::Video);
 
-    let fairplay_pssh = PsshData {
-        drm_system: DrmSystem::FairPlay,
-        system_id: DrmSystem::FairPlay.system_id(),
-        data: Bytes::from_static(b""),
-    };
+    let fairplay_pssh = PsshData::new(
+        DrmSystem::FairPlay,
+        DrmSystem::FairPlay.system_id(),
+        Bytes::from_static(b""),
+    );
 
-    let widevine_pssh = PsshData {
-        drm_system: DrmSystem::Widevine,
-        system_id: DrmSystem::Widevine.system_id(),
-        data: Bytes::from_static(b"widevine-cbcs-pssh"),
-    };
+    let widevine_pssh = PsshData::new(
+        DrmSystem::Widevine,
+        DrmSystem::Widevine.system_id(),
+        Bytes::from_static(b"widevine-cbcs-pssh"),
+    );
 
     let provider = RawKeyProvider::new()
         .with_key(content_key)

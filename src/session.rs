@@ -4,7 +4,10 @@ use crate::error::{
 use crate::gpac::process::{GpacProcess, GpacProcessConfig};
 use crate::gpac::xml::{GpacDrmConfig, GpacDrmXmlGenerator};
 use crate::key::{KeyProvider, KeyRequest, KeySet};
-use crate::types::{DrmSystem, EncryptionScheme, LatencyMode, ManifestFormat, Rendition, Segment};
+use crate::types::{
+    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, QualityTier,
+    Rendition, Segment, TrackType,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -50,6 +53,7 @@ pub struct PackagingSessionConfig {
     pub is_live: bool,
     pub gpac_bin: Option<String>,
     pub auto_cleanup: bool,
+    pub key_mapping_policy: KeyMappingPolicy,
 }
 
 impl PackagingSessionConfig {
@@ -70,11 +74,17 @@ impl PackagingSessionConfig {
             is_live: true,
             gpac_bin: None,
             auto_cleanup: false,
+            key_mapping_policy: KeyMappingPolicy::default(),
         }
     }
 
     pub fn with_rendition(mut self, rendition: Rendition) -> Self {
         self.renditions.push(rendition);
+        self
+    }
+
+    pub fn with_key_mapping_policy(mut self, policy: KeyMappingPolicy) -> Self {
+        self.key_mapping_policy = policy;
         self
     }
 
@@ -622,8 +632,8 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn control_dir_path(&self) -> &Path {
+    /// Path to the session's private control directory containing GPAC DRM XML definitions.
+    pub fn control_dir_path(&self) -> &Path {
         &self.control_dir
     }
 }
@@ -679,11 +689,44 @@ async fn fetch_key_set<P: KeyProvider>(
     config: &PackagingSessionConfig,
     provider: &P,
 ) -> Result<KeySet> {
-    let mut requested_tiers = Vec::new();
-    for rendition in &config.renditions {
-        let pair = (rendition.track_type, rendition.quality_tier.clone());
-        if !requested_tiers.contains(&pair) {
-            requested_tiers.push(pair);
+    let encrypted_renditions: Vec<&Rendition> =
+        config.renditions.iter().filter(|r| r.encrypted).collect();
+
+    // If all renditions are clear, bypass key acquisition entirely
+    if encrypted_renditions.is_empty() {
+        info!(
+            content_id = %config.content_id,
+            "All renditions are unencrypted; skipping key acquisition"
+        );
+        return Ok(KeySet::new());
+    }
+
+    let mut requested_quality_tiers = Vec::new();
+    match config.key_mapping_policy {
+        KeyMappingPolicy::PerTierAndTrack => {
+            for rendition in &encrypted_renditions {
+                let pair = (rendition.track_type, rendition.quality_tier.clone());
+                if !requested_quality_tiers.contains(&pair) {
+                    requested_quality_tiers.push(pair);
+                }
+            }
+        }
+        KeyMappingPolicy::SharedVideoSingleAudio => {
+            let has_video = encrypted_renditions
+                .iter()
+                .any(|r| r.track_type == TrackType::Video);
+            let has_audio = encrypted_renditions
+                .iter()
+                .any(|r| r.track_type == TrackType::Audio);
+            if has_video {
+                requested_quality_tiers.push((TrackType::Video, QualityTier::hd()));
+            }
+            if has_audio {
+                requested_quality_tiers.push((TrackType::Audio, QualityTier::sd()));
+            }
+        }
+        KeyMappingPolicy::SharedAll => {
+            requested_quality_tiers.push((TrackType::Video, QualityTier::hd()));
         }
     }
 
@@ -696,14 +739,60 @@ async fn fetch_key_set<P: KeyProvider>(
     let encryption_schemes = concrete_schemes(config.encryption_scheme).to_vec();
 
     info!(content_id = %config.content_id, "Fetching encryption keys from provider");
-    provider
+    let fetched_set = provider
         .fetch_keys(&KeyRequest {
             content_id: config.content_id.clone(),
-            requested_tiers,
+            requested_quality_tiers,
             drm_systems,
             encryption_schemes,
         })
-        .await
+        .await?;
+
+    let mut final_set = KeySet::new();
+
+    match config.key_mapping_policy {
+        KeyMappingPolicy::PerTierAndTrack => {
+            final_set.keys = fetched_set.keys;
+        }
+        KeyMappingPolicy::SharedVideoSingleAudio => {
+            for rendition in &encrypted_renditions {
+                for &scheme in concrete_schemes(config.encryption_scheme) {
+                    let source_tier = if rendition.track_type == TrackType::Video {
+                        QualityTier::hd()
+                    } else {
+                        QualityTier::sd()
+                    };
+                    if let Some(key) = fetched_set.get_key_for_scheme(
+                        scheme,
+                        rendition.track_type,
+                        &source_tier,
+                    ) {
+                        let mut k = key.clone();
+                        k.quality_tier = rendition.quality_tier.clone();
+                        final_set.insert_key(k);
+                    }
+                }
+            }
+        }
+        KeyMappingPolicy::SharedAll => {
+            for rendition in &encrypted_renditions {
+                for &scheme in concrete_schemes(config.encryption_scheme) {
+                    if let Some(key) = fetched_set
+                        .get_key_for_scheme(scheme, TrackType::Video, &QualityTier::hd())
+                        .or_else(|| fetched_set.keys.values().next())
+                    {
+                        let mut k = key.clone();
+                        k.track_type = rendition.track_type;
+                        k.quality_tier = rendition.quality_tier.clone();
+                        final_set.insert_key(k);
+                    }
+                }
+            }
+        }
+    }
+
+    final_set.pssh = fetched_set.pssh;
+    Ok(final_set)
 }
 
 async fn prepare_output_dir(output_dir: &Path, is_dual: bool) -> Result<bool> {
@@ -762,11 +851,13 @@ async fn spawn_representation(
 
     let mut drm_config = GpacDrmConfig::new(scheme);
     for (index, rendition) in config.renditions.iter().enumerate() {
-        drm_config = drm_config.with_track(
+        let mut track = crate::gpac::xml::GpacTrackConfig::new(
             (index + 1) as u32,
             rendition.track_type,
             rendition.quality_tier.clone(),
         );
+        track.encrypted = rendition.encrypted;
+        drm_config.tracks.push(track);
     }
     let xml = GpacDrmXmlGenerator::generate(key_set, &drm_config)?;
     tokio::fs::write(drm_path, xml).await?;
@@ -1117,4 +1208,152 @@ mod tests {
         assert!(session.is_closed());
         session.cleanup().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn all_clear_renditions_bypasses_key_provider() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(rendition().clear())
+            .with_rendition(
+                Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2").clear(),
+            )
+            .with_output_dir(&output_dir)
+            .with_gpac_bin("gpac");
+
+        // RawKeyProvider is empty (no keys). If fetch_keys were called, it would error.
+        let empty_provider = RawKeyProvider::new();
+        let mut session = PackagingSession::create(config, empty_provider)
+            .await
+            .unwrap();
+
+        let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cenc.xml"))
+            .await
+            .unwrap();
+        assert!(drm_xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="0"/>"#));
+        assert!(drm_xml.contains(r#"<CrypTrack trackID="2" IsEncrypted="0"/>"#));
+
+        let _ = session.close().await;
+        session.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_renditions_selective_encryption_gpac_xml() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(rendition()) // encrypted video HD
+            .with_rendition(
+                Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2").clear(), // clear audio
+            )
+            .with_output_dir(&output_dir)
+            .with_gpac_bin("gpac");
+
+        // provider() only supplies Video HD key. No Audio key is provided.
+        let mut session = PackagingSession::create(config, provider())
+            .await
+            .unwrap();
+
+        let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cenc.xml"))
+            .await
+            .unwrap();
+        // Track 1 is encrypted with video key
+        assert!(drm_xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="1""#));
+        assert!(drm_xml.contains("42424242424242424242424242424242"));
+        // Track 2 is unencrypted
+        assert!(drm_xml.contains(r#"<CrypTrack trackID="2" IsEncrypted="0"/>"#));
+
+        let _ = session.close().await;
+        session.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn key_mapping_policy_shared_all() {
+        let video_sd = Rendition::video("v_sd", QualityTier::sd(), 854, 480, 1_500_000, "avc1.4d401f");
+        let video_hd = rendition();
+        let audio = Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2");
+
+        let config = PackagingSessionConfig::new("test")
+            .with_key_mapping_policy(KeyMappingPolicy::SharedAll)
+            .with_rendition(video_hd)
+            .with_rendition(video_sd)
+            .with_rendition(audio);
+
+        // Provider has only 1 key for HD Video
+        let key_set = fetch_key_set(&config, &provider()).await.unwrap();
+
+        let v_hd = key_set
+            .get_key(TrackType::Video, &QualityTier::hd())
+            .unwrap();
+        let v_sd = key_set
+            .get_key(TrackType::Video, &QualityTier::sd())
+            .unwrap();
+        let a_sd = key_set
+            .get_key(TrackType::Audio, &QualityTier::sd())
+            .unwrap();
+
+        assert_eq!(v_hd.kid, v_sd.kid);
+        assert_eq!(v_hd.kid, a_sd.kid);
+        assert_eq!(v_hd.key, [0x42; 16]);
+    }
+
+    #[tokio::test]
+    async fn key_mapping_policy_shared_video_single_audio() {
+        let video_hd = rendition();
+        let video_sd = Rendition::video("v_sd", QualityTier::sd(), 854, 480, 1_500_000, "avc1.4d401f");
+        let audio_sd = Rendition::audio("a_sd", QualityTier::sd(), 128_000, "mp4a.40.2");
+        let audio_hd = Rendition::audio("a_hd", QualityTier::hd(), 256_000, "mp4a.40.2");
+
+        let config = PackagingSessionConfig::new("test")
+            .with_key_mapping_policy(KeyMappingPolicy::SharedVideoSingleAudio)
+            .with_rendition(video_hd)
+            .with_rendition(video_sd)
+            .with_rendition(audio_sd)
+            .with_rendition(audio_hd);
+
+        let kid_video = KeyID::new(Uuid::from_bytes([0x01; 16]));
+        let kid_audio = KeyID::new(Uuid::from_bytes([0x02; 16]));
+
+        let provider = RawKeyProvider::new()
+            .with_key(ContentKey::new(kid_video, [0x11; 16], QualityTier::hd(), TrackType::Video))
+            .with_key(ContentKey::new(kid_audio, [0x22; 16], QualityTier::sd(), TrackType::Audio));
+
+        let key_set = fetch_key_set(&config, &provider).await.unwrap();
+
+        let v_hd = key_set.get_key(TrackType::Video, &QualityTier::hd()).unwrap();
+        let v_sd = key_set.get_key(TrackType::Video, &QualityTier::sd()).unwrap();
+        let a_sd = key_set.get_key(TrackType::Audio, &QualityTier::sd()).unwrap();
+        let a_hd = key_set.get_key(TrackType::Audio, &QualityTier::hd()).unwrap();
+
+        assert_eq!(v_hd.kid, kid_video);
+        assert_eq!(v_sd.kid, kid_video);
+        assert_eq!(a_sd.kid, kid_audio);
+        assert_eq!(a_hd.kid, kid_audio);
+    }
+
+    #[tokio::test]
+    async fn key_mapping_policy_per_tier_and_track() {
+        let video_hd = rendition();
+        let video_sd = Rendition::video("v_sd", QualityTier::sd(), 854, 480, 1_500_000, "avc1.4d401f");
+
+        let config = PackagingSessionConfig::new("test")
+            .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
+            .with_rendition(video_hd)
+            .with_rendition(video_sd);
+
+        let kid_hd = KeyID::new(Uuid::from_bytes([0x01; 16]));
+        let kid_sd = KeyID::new(Uuid::from_bytes([0x02; 16]));
+
+        let provider = RawKeyProvider::new()
+            .with_key(ContentKey::new(kid_hd, [0x11; 16], QualityTier::hd(), TrackType::Video))
+            .with_key(ContentKey::new(kid_sd, [0x22; 16], QualityTier::sd(), TrackType::Video));
+
+        let key_set = fetch_key_set(&config, &provider).await.unwrap();
+
+        let v_hd = key_set.get_key(TrackType::Video, &QualityTier::hd()).unwrap();
+        let v_sd = key_set.get_key(TrackType::Video, &QualityTier::sd()).unwrap();
+
+        assert_eq!(v_hd.kid, kid_hd);
+        assert_eq!(v_sd.kid, kid_sd);
+        assert_ne!(v_hd.kid, v_sd.kid);
+    }
 }
+

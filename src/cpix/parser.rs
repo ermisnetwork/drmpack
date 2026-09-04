@@ -201,6 +201,22 @@ impl CpixResponseParser {
                                 rule.track_type = Some(TrackType::Audio);
                             }
                         }
+                        "ContentKeyUsageRule" => {
+                            let mut rule = RawUsageRule::default();
+                            for attr in e.attributes().flatten() {
+                                let key_name = local_to_str(attr.key.local_name());
+                                if key_name.eq_ignore_ascii_case("kid") {
+                                    if let Ok(val) = attr.unescape_value() {
+                                        rule.kid = parse_uuid(&val).map(KeyID::new);
+                                    }
+                                } else if key_name.eq_ignore_ascii_case("intendedTrackType") {
+                                    if let Ok(val) = attr.unescape_value() {
+                                        rule.intended_track_type = Some(val.into_owned());
+                                    }
+                                }
+                            }
+                            usage_rules.push(rule);
+                        }
                         "DRMSystem" => {
                             let mut drm = RawDrmSystem::default();
                             for attr in e.attributes().flatten() {
@@ -381,20 +397,23 @@ impl CpixResponseParser {
 
             let scheme = raw_key.scheme.or_else(|| matching_spec.map(|s| s.scheme));
 
-            let track_type = matching_rule
-                .and_then(|r| r.track_type)
+            let track_type = matching_spec
+                .map(|s| s.track_type)
+                .or_else(|| matching_rule.and_then(|r| r.track_type))
                 .or_else(|| {
                     matching_rule
                         .and_then(|r| r.intended_track_type.as_deref())
                         .map(infer_track_type)
                 })
-                .or_else(|| matching_spec.map(|s| s.track_type))
                 .unwrap_or(TrackType::Video);
 
-            let quality_tier = matching_rule
-                .and_then(|r| r.intended_track_type.as_deref())
-                .map(infer_quality_tier)
-                .or_else(|| matching_spec.map(|s| s.quality_tier.clone()))
+            let quality_tier = matching_spec
+                .map(|s| s.quality_tier.clone())
+                .or_else(|| {
+                    matching_rule
+                        .and_then(|r| r.intended_track_type.as_deref())
+                        .map(infer_quality_tier)
+                })
                 .unwrap_or_else(QualityTier::hd);
 
             let content_key = ContentKey {
@@ -429,10 +448,22 @@ impl CpixResponseParser {
                 continue;
             };
 
+            let scheme = drm.kid.and_then(|k| {
+                spec_by_kid.get(&k).map(|s| s.scheme).or_else(|| {
+                    key_set
+                        .keys
+                        .values()
+                        .find(|ck| ck.kid == k)
+                        .and_then(|ck| ck.encryption_scheme)
+                })
+            });
+
             key_set.add_pssh(PsshData {
                 drm_system,
                 system_id,
                 data,
+                kid: drm.kid,
+                encryption_scheme: scheme,
             });
         }
 
@@ -926,5 +957,60 @@ mod tests {
         assert_eq!(infer_quality_tier("audio"), QualityTier::sd());
         assert_eq!(infer_quality_tier("video_sd"), QualityTier::sd());
         assert_eq!(infer_quality_tier("AUDIO_SD"), QualityTier::sd());
+    }
+
+    #[test]
+    fn test_parse_self_closing_usage_rule() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<cpix:CPIX xmlns:cpix="urn:dashif:org:cpix" xmlns:pskc="urn:ietf:params:xml:ns:keyprov:pskc">
+  <cpix:ContentKeyList>
+    <cpix:ContentKey kid="11111111-1111-1111-1111-111111111111" commonEncryptionScheme="cenc">
+      <cpix:Data><pskc:Secret><pskc:PlainValue>AQEBAQEBAQEBAQEBAQEBAQ==</pskc:PlainValue></pskc:Secret></cpix:Data>
+    </cpix:ContentKey>
+  </cpix:ContentKeyList>
+  <cpix:ContentKeyUsageRuleList>
+    <cpix:ContentKeyUsageRule kid="11111111-1111-1111-1111-111111111111" intendedTrackType="HD"/>
+  </cpix:ContentKeyUsageRuleList>
+</cpix:CPIX>"#;
+
+        let keyset = CpixResponseParser::parse(xml, None).unwrap();
+        assert_eq!(keyset.len(), 1);
+        let key = keyset.get_key(TrackType::Video, &QualityTier::hd()).unwrap();
+        assert_eq!(
+            key.kid.0,
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_parse_playready_pssh() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<cpix:CPIX xmlns:cpix="urn:dashif:org:cpix" xmlns:pskc="urn:ietf:params:xml:ns:keyprov:pskc">
+  <cpix:ContentKeyList>
+    <cpix:ContentKey kid="99999999-9999-9999-3333-300000000003" commonEncryptionScheme="cenc">
+      <cpix:Data><pskc:Secret><pskc:PlainValue>NWX+FHyzgWfc6oCmVFR9PQ==</pskc:PlainValue></pskc:Secret></cpix:Data>
+    </cpix:ContentKey>
+  </cpix:ContentKeyList>
+  <cpix:DRMSystemList>
+    <cpix:DRMSystem kid="99999999-9999-9999-3333-300000000003" systemId="9a04f079-9840-4286-ab92-e65be0885f95">
+      <cpix:PSSH>AAAAUHBzc2gAAAAAmgT/eZioQG6rkubN5l/5lQAAAEAAAAAFAFAAUgBPAEYASQBMAEUA</cpix:PSSH>
+    </cpix:DRMSystem>
+  </cpix:DRMSystemList>
+</cpix:CPIX>"#;
+
+        let keyset = CpixResponseParser::parse(xml, None).unwrap();
+        let playready = keyset
+            .pssh
+            .iter()
+            .find(|p| p.drm_system == DrmSystem::PlayReady)
+            .expect("PlayReady PSSH must be identified");
+
+        assert_eq!(playready.drm_system, DrmSystem::PlayReady);
+        assert_eq!(playready.system_id, DrmSystem::PlayReady.system_id());
+        assert_eq!(
+            playready.kid.unwrap().0,
+            Uuid::parse_str("99999999-9999-9999-3333-300000000003").unwrap()
+        );
+        assert_eq!(playready.encryption_scheme, Some(EncryptionScheme::Cenc));
     }
 }

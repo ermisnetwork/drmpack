@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use std::fmt;
+
 #[cfg(feature = "cpix")]
 pub use crate::cpix::CpixProvider;
 
-/// 128-bit Key Identifier.
+/// 128-bit KeyID (KID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeyID(pub Uuid);
 
@@ -43,7 +45,7 @@ mod hex {
 }
 
 /// AES-128 Content Key with associated KeyID and metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentKey {
     pub kid: KeyID,
     pub key: [u8; 16],
@@ -51,6 +53,19 @@ pub struct ContentKey {
     pub track_type: TrackType,
     pub iv: Option<[u8; 16]>,
     pub encryption_scheme: Option<EncryptionScheme>,
+}
+
+impl fmt::Debug for ContentKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContentKey")
+            .field("kid", &self.kid)
+            .field("key", &"[REDACTED]")
+            .field("quality_tier", &self.quality_tier)
+            .field("track_type", &self.track_type)
+            .field("iv", &self.iv.as_ref().map(|_| "[REDACTED]"))
+            .field("encryption_scheme", &self.encryption_scheme)
+            .finish()
+    }
 }
 
 impl ContentKey {
@@ -104,13 +119,37 @@ pub struct PsshData {
     pub drm_system: DrmSystem,
     pub system_id: [u8; 16],
     pub data: Bytes,
+    pub kid: Option<KeyID>,
+    pub encryption_scheme: Option<EncryptionScheme>,
+}
+
+impl PsshData {
+    pub fn new(drm_system: DrmSystem, system_id: [u8; 16], data: Bytes) -> Self {
+        Self {
+            drm_system,
+            system_id,
+            data,
+            kid: None,
+            encryption_scheme: None,
+        }
+    }
+
+    pub fn with_kid(mut self, kid: KeyID) -> Self {
+        self.kid = Some(kid);
+        self
+    }
+
+    pub fn with_encryption_scheme(mut self, scheme: EncryptionScheme) -> Self {
+        self.encryption_scheme = Some(scheme);
+        self
+    }
 }
 
 /// Description of keys requested from a KeyProvider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRequest {
     pub content_id: String,
-    pub requested_tiers: Vec<(TrackType, QualityTier)>,
+    pub requested_quality_tiers: Vec<(TrackType, QualityTier)>,
     pub drm_systems: Vec<DrmSystem>,
     pub encryption_schemes: Vec<EncryptionScheme>,
 }
@@ -119,15 +158,20 @@ impl KeyRequest {
     pub fn new(content_id: impl Into<String>) -> Self {
         Self {
             content_id: content_id.into(),
-            requested_tiers: Vec::new(),
+            requested_quality_tiers: Vec::new(),
             drm_systems: Vec::new(),
             encryption_schemes: Vec::new(),
         }
     }
 
-    pub fn with_tier(mut self, track_type: TrackType, tier: QualityTier) -> Self {
-        self.requested_tiers.push((track_type, tier));
+    pub fn with_quality_tier(mut self, track_type: TrackType, tier: QualityTier) -> Self {
+        self.requested_quality_tiers.push((track_type, tier));
         self
+    }
+
+    /// Alias for backwards compatibility with earlier code.
+    pub fn with_tier(self, track_type: TrackType, tier: QualityTier) -> Self {
+        self.with_quality_tier(track_type, tier)
     }
 
     pub fn with_drm_system(mut self, drm: DrmSystem) -> Self {
@@ -138,6 +182,22 @@ impl KeyRequest {
     pub fn with_encryption_scheme(mut self, scheme: EncryptionScheme) -> Self {
         self.encryption_schemes.push(scheme);
         self
+    }
+    pub fn concrete_schemes(&self) -> Vec<Option<EncryptionScheme>> {
+        if self.encryption_schemes.is_empty() {
+            vec![None]
+        } else {
+            let mut schemes = Vec::new();
+            for scheme in &self.encryption_schemes {
+                for concrete in scheme.concrete_schemes() {
+                    let opt = Some(*concrete);
+                    if !schemes.contains(&opt) {
+                        schemes.push(opt);
+                    }
+                }
+            }
+            schemes
+        }
     }
 }
 
@@ -194,6 +254,23 @@ impl KeySet {
         if !self.pssh.iter().any(|p| p == &pssh) {
             self.pssh.push(pssh);
         }
+    }
+
+    /// Query PSSH data associated with a specific KeyID.
+    pub fn pssh_for_kid<'a>(&'a self, kid: &'a KeyID) -> impl Iterator<Item = &'a PsshData> {
+        self.pssh
+            .iter()
+            .filter(move |p| p.kid.as_ref().is_none_or(|k| k == kid))
+    }
+
+    /// Query PSSH data associated with a specific EncryptionScheme.
+    pub fn pssh_for_scheme(
+        &self,
+        scheme: EncryptionScheme,
+    ) -> impl Iterator<Item = &PsshData> {
+        self.pssh
+            .iter()
+            .filter(move |p| p.encryption_scheme.is_none_or(|s| s == scheme))
     }
 
     pub fn all_keys(&self) -> impl Iterator<Item = &ContentKey> {
@@ -257,33 +334,23 @@ impl RawKeyProvider {
 impl KeyProvider for RawKeyProvider {
     async fn fetch_keys(&self, request: &KeyRequest) -> Result<KeySet> {
         let mut set = KeySet::new();
-
-        let schemes: Vec<Option<EncryptionScheme>> = if request.encryption_schemes.is_empty() {
-            vec![None]
-        } else {
-            let mut s = Vec::new();
-            for scheme in &request.encryption_schemes {
-                for concrete in scheme.concrete_schemes() {
-                    let opt = Some(*concrete);
-                    if !s.contains(&opt) {
-                        s.push(opt);
-                    }
-                }
-            }
-            s
-        };
+        let schemes = request.concrete_schemes();
 
         for scheme_opt in &schemes {
-            for (track_type, tier) in &request.requested_tiers {
+            for (track_type, tier) in &request.requested_quality_tiers {
                 let key = self
                     .keys
                     .get(&(*scheme_opt, *track_type, tier.clone()))
                     .or_else(|| self.keys.get(&(None, *track_type, tier.clone())))
                     .or_else(|| {
-                        self.keys
-                            .iter()
-                            .find(|((_, t, q), _)| *t == *track_type && q == tier)
-                            .map(|(_, k)| k)
+                        if scheme_opt.is_none() {
+                            self.keys
+                                .iter()
+                                .find(|((_, t, q), _)| *t == *track_type && q == tier)
+                                .map(|(_, k)| k)
+                        } else {
+                            None
+                        }
                     });
 
                 if let Some(key) = key {
@@ -322,7 +389,7 @@ mod tests {
 
         let req = KeyRequest {
             content_id: "test-content".into(),
-            requested_tiers: vec![(TrackType::Video, QualityTier::hd())],
+            requested_quality_tiers: vec![(TrackType::Video, QualityTier::hd())],
             drm_systems: vec![DrmSystem::Widevine],
             encryption_schemes: vec![EncryptionScheme::Cenc],
         };
@@ -340,7 +407,7 @@ mod tests {
         let provider = RawKeyProvider::new();
         let req = KeyRequest {
             content_id: "test-content".into(),
-            requested_tiers: vec![(TrackType::Video, QualityTier::hd())],
+            requested_quality_tiers: vec![(TrackType::Video, QualityTier::hd())],
             drm_systems: vec![DrmSystem::Widevine],
             encryption_schemes: vec![EncryptionScheme::Cenc],
         };
@@ -412,13 +479,13 @@ mod tests {
     #[test]
     fn test_keyset_pssh_deduplication() {
         let mut keyset = KeySet::new();
-        let pssh = PsshData {
-            drm_system: DrmSystem::Widevine,
-            system_id: DrmSystem::Widevine.system_id(),
-            data: Bytes::from_static(b"pssh-payload"),
-        };
+        let pssh = PsshData::new(
+            DrmSystem::Widevine,
+            DrmSystem::Widevine.system_id(),
+            Bytes::from_static(b"pssh-payload"),
+        );
         keyset.add_pssh(pssh.clone());
-        keyset.add_pssh(pssh.clone());
+        keyset.add_pssh(pssh);
         assert_eq!(keyset.pssh.len(), 1, "Duplicate PSSH must be deduplicated");
     }
 }

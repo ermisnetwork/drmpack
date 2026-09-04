@@ -9,7 +9,7 @@ pub enum EncryptionScheme {
     Cenc,
     /// Common Encryption using AES-128 in CBC mode with 10% pattern encryption (FairPlay / modern Widevine).
     Cbcs,
-    /// Dual encryption producing both CENC and CBCS streams simultaneously.
+    /// Dual encryption producing both CENC and CBCS representations simultaneously.
     Dual,
 }
 
@@ -147,6 +147,19 @@ impl fmt::Display for QualityTier {
     }
 }
 
+/// The orchestration policy governing how ContentKeys are assigned across Renditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum KeyMappingPolicy {
+    /// Single ContentKey shared across all encrypted Renditions (default).
+    #[default]
+    SharedAll,
+    /// One ContentKey for all video Renditions, and one ContentKey for all audio Renditions.
+    SharedVideoSingleAudio,
+    /// Granular ContentKey per (TrackType, QualityTier) combination (ADR-0003).
+    PerTierAndTrack,
+}
+
+
 /// A single rendition declaration (e.g. 720p@2Mbps).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rendition {
@@ -158,6 +171,7 @@ pub struct Rendition {
     pub bitrate: u64,
     pub frame_rate: Option<f64>,
     pub codecs: String,
+    pub encrypted: bool,
 }
 
 impl Rendition {
@@ -178,6 +192,7 @@ impl Rendition {
             bitrate,
             frame_rate: None,
             codecs: codecs.into(),
+            encrypted: true,
         }
     }
 
@@ -196,7 +211,20 @@ impl Rendition {
             bitrate,
             frame_rate: None,
             codecs: codecs.into(),
+            encrypted: true,
         }
+    }
+
+    /// Mark this rendition as clear (unencrypted), bypassing GPAC cecrypt.
+    pub fn clear(mut self) -> Self {
+        self.encrypted = false;
+        self
+    }
+
+    /// Set explicit encryption state.
+    pub fn with_encrypted(mut self, encrypted: bool) -> Self {
+        self.encrypted = encrypted;
+        self
     }
 }
 

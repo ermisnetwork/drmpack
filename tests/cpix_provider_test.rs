@@ -706,7 +706,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
         .await
         .expect("Failed to close session cleanly");
 
-    // Verify CENC branch has CENC CPIX KID
+    // Verify CENC Representation has CENC CPIX KID
     let cenc_init = out_dir.join("cenc/stdin_dashinit.mp4");
     assert!(cenc_init.exists());
     let cenc_init_bytes = tokio::fs::read(&cenc_init).await.unwrap();
@@ -717,7 +717,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
         "CENC tenc must carry CENC CPIX KID"
     );
 
-    // Verify CBCS branch has distinct CBCS CPIX KID
+    // Verify CBCS Representation has distinct CBCS CPIX KID
     let cbcs_init = out_dir.join("cbcs/stdin_dashinit.mp4");
     assert!(cbcs_init.exists());
     let cbcs_init_bytes = tokio::fs::read(&cbcs_init).await.unwrap();
@@ -859,3 +859,59 @@ async fn test_cpix_provider_multi_tier_uhd_sd_hd() {
         Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap()
     );
 }
+
+#[tokio::test]
+async fn test_cpix_provider_selective_encryption_clear_audio() {
+    let server = MockServer::start(200, SAMPLE_CPIX_RESPONSE_CENC.into()).await;
+    let provider = CpixProvider::new(&server.url);
+
+    let video_rendition = Rendition::video(
+        "v720p",
+        QualityTier::hd(),
+        1280,
+        720,
+        2_500_000,
+        "avc1.4d401f",
+    );
+    let audio_rendition = Rendition::audio(
+        "a_clear",
+        QualityTier::sd(),
+        128_000,
+        "mp4a.40.2",
+    ).clear();
+
+    let out_dir = std::env::temp_dir().join(format!("drmpack_cpix_selective_{}", Uuid::new_v4()));
+    let control_dir = std::env::temp_dir().join(format!("drmpack_control_selective_{}", Uuid::new_v4()));
+
+    let config = PackagingSessionConfig::new("cpix-selective-content")
+        .with_rendition(video_rendition)
+        .with_rendition(audio_rendition)
+        .with_encryption_scheme(EncryptionScheme::Cenc)
+        .with_output_dir(&out_dir)
+        .with_control_dir(&control_dir)
+        .with_gpac_bin("gpac");
+
+    let mut session = PackagingSession::create(config, provider)
+        .await
+        .expect("PackagingSession::create must succeed for selective encryption with CPIX");
+
+    let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cenc.xml"))
+        .await
+        .unwrap();
+
+    // Verify track 1 (Video) is encrypted
+    assert!(drm_xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="1""#));
+    // Verify track 2 (Audio) is unencrypted
+    assert!(drm_xml.contains(r#"<CrypTrack trackID="2" IsEncrypted="0"/>"#));
+
+    // Verify CPIX request body only requested Video, since Audio is unencrypted
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.contains(r#"intendedTrackType="UHD,HD""#) || requests[0].body.contains(r#"intendedTrackType="HD""#));
+    assert!(!requests[0].body.contains(r#"intendedTrackType="AUDIO""#));
+
+    let _ = session.close().await;
+    let _ = session.cleanup().await;
+    let _ = tokio::fs::remove_dir_all(&out_dir).await;
+}
+

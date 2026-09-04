@@ -7,7 +7,8 @@
 **Status:** ready-for-agent
 
 - [ ] `PackagingSessionConfig` accepts a list of `Renditions`, each with resolution, bitrate, codec, and `QualityTier`
-- [ ] `KeyProvider::fetch_keys()` requests keys for all (track_type, QualityTier) combinations in one batch call
+- [ ] `KeyProvider::fetch_keys()` requests keys for all (track_type, QualityTier) combinations in one batch call *(Note: `KeyMappingPolicy` with `SharedAll`, `SharedVideoSingleAudio`, and `PerTierAndTrack` implemented in ADR-0007)*
 - [ ] GPAC DRM XML maps each track ID to its tier's `ContentKey` and `KeyID`
 - [ ] Multi-rendition HLS master manifest generated with correct bandwidth and codec tags
 - [ ] Multi-Representation DASH MPD generated with correct adaptation sets
+

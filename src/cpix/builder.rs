@@ -30,28 +30,26 @@ impl CpixRequestBuilder {
             ));
         }
 
-        if request.requested_tiers.is_empty() {
+        if request.requested_quality_tiers.is_empty() {
             return Err(DrmpackError::InvalidConfig(
-                "KeyRequest requires at least one requested track and tier".into(),
+                "KeyRequest requires at least one requested track and QualityTier".into(),
             ));
         }
 
         let schemes: Vec<EncryptionScheme> = if request.encryption_schemes.is_empty() {
             vec![EncryptionScheme::Cenc]
         } else {
-            let mut s = Vec::new();
-            for scheme in &request.encryption_schemes {
-                for concrete in scheme.concrete_schemes() {
-                    if !s.contains(concrete) {
-                        s.push(*concrete);
-                    }
+            let mut unique_schemes = Vec::new();
+            for concrete in request.concrete_schemes().into_iter().flatten() {
+                if !unique_schemes.contains(&concrete) {
+                    unique_schemes.push(concrete);
                 }
             }
-            s
+            unique_schemes
         };
 
         let mut unique_tiers = Vec::new();
-        for tier in &request.requested_tiers {
+        for tier in &request.requested_quality_tiers {
             if !unique_tiers.contains(tier) {
                 unique_tiers.push(tier.clone());
             }
@@ -72,20 +70,20 @@ impl CpixRequestBuilder {
         let drm_systems = if request.drm_systems.is_empty() {
             vec![DrmSystem::Widevine]
         } else {
-            let mut d = Vec::new();
+            let mut unique_drm = Vec::new();
             for drm in &request.drm_systems {
-                if !d.contains(drm) {
-                    d.push(*drm);
+                if !unique_drm.contains(drm) {
+                    unique_drm.push(*drm);
                 }
             }
-            d
+            unique_drm
         };
 
         let mut xml = String::with_capacity(2048);
         writeln!(xml, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
         writeln!(
             xml,
-            r#"<cpix:CPIX xmlns:cpix="urn:dashif:org:cpix" xmlns:pskc="urn:ietf:params:xml:ns:keyprov:pskc" xmlns:speke="urn:aws:amazon:com:speke" contentId="{}">"#,
+            r#"<cpix:CPIX xmlns:cpix="urn:dashif:org:cpix" xmlns:pskc="urn:ietf:params:xml:ns:keyprov:pskc" version="2.3" contentId="{}">"#,
             escape_xml(&request.content_id)
         )
         .unwrap();
@@ -175,7 +173,7 @@ mod tests {
     fn test_cpix_request_builder_cenc() {
         let req = KeyRequest {
             content_id: "test-asset-1".into(),
-            requested_tiers: vec![(TrackType::Video, QualityTier::hd())],
+            requested_quality_tiers: vec![(TrackType::Video, QualityTier::hd())],
             drm_systems: vec![DrmSystem::Widevine, DrmSystem::FairPlay],
             encryption_schemes: vec![EncryptionScheme::Cenc],
         };
@@ -204,7 +202,7 @@ mod tests {
     fn test_cpix_request_builder_dual() {
         let req = KeyRequest {
             content_id: "dual-asset".into(),
-            requested_tiers: vec![
+            requested_quality_tiers: vec![
                 (TrackType::Video, QualityTier::sd()),
                 (TrackType::Video, QualityTier::hd()),
             ],

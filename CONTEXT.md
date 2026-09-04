@@ -56,6 +56,14 @@ _Avoid_: License server, license endpoint
 The metadata injected into manifests and initialization segments enabling player license acquisition — PSSH boxes for DASH/CMAF and `#EXT-X-KEY` attributes (`skd://` for FairPlay, inline data URI for Widevine/PlayReady) for HLS.
 _Avoid_: Encryption metadata, DRM tags, key header
 
+**KeyMappingPolicy**:
+The orchestration policy governing how ContentKeys are assigned across Renditions — `SharedAll` (single key for all tracks, default), `SharedVideoSingleAudio` (one video key, one audio key), or `PerTierAndTrack` (granular key per QualityTier and track type per ADR-0003).
+_Avoid_: Key allocation, key strategy, tier mode
+
+**Selective Encryption**:
+The capability to encrypt a subset of Renditions while passing others through unencrypted (Clear Renditions, e.g. unencrypted audio or clear SD preview). Clear Renditions bypass GPAC cecrypt and emit no DRM signaling in manifests.
+_Avoid_: Partial encryption, hybrid DRM, split encryption
+
 ### Output & Storage
 
 **Representation**:

@@ -10,6 +10,7 @@ pub struct GpacTrackConfig {
     pub track_id: u32,
     pub track_type: TrackType,
     pub quality_tier: QualityTier,
+    pub encrypted: bool,
 }
 
 impl GpacTrackConfig {
@@ -18,7 +19,13 @@ impl GpacTrackConfig {
             track_id,
             track_type,
             quality_tier,
+            encrypted: true,
         }
+    }
+
+    pub fn with_encrypted(mut self, encrypted: bool) -> Self {
+        self.encrypted = encrypted;
+        self
     }
 }
 
@@ -47,6 +54,17 @@ impl GpacDrmConfig {
             .push(GpacTrackConfig::new(track_id, track_type, quality_tier));
         self
     }
+
+    pub fn with_clear_track(
+        mut self,
+        track_id: u32,
+        track_type: TrackType,
+        quality_tier: QualityTier,
+    ) -> Self {
+        self.tracks
+            .push(GpacTrackConfig::new(track_id, track_type, quality_tier).with_encrypted(false));
+        self
+    }
 }
 
 /// Generator for GPAC `cecrypt` Common Encryption XML configuration.
@@ -73,9 +91,14 @@ impl GpacDrmXmlGenerator {
         writeln!(xml, r#"<GPACDRM type="{}">"#, scheme_str).unwrap();
 
         for pssh in &key_set.pssh {
-            // FairPlay does not support CENC mode
-            if config.scheme == EncryptionScheme::Cenc && pssh.drm_system == DrmSystem::FairPlay {
+            // FairPlay strictly uses HLS playlist signaling and must not emit ISO-BMFF PSSH boxes
+            if pssh.drm_system == DrmSystem::FairPlay {
                 continue;
+            }
+            if let Some(s) = pssh.encryption_scheme {
+                if s != config.scheme {
+                    continue;
+                }
             }
             Self::write_drm_info(&mut xml, pssh);
         }
@@ -107,6 +130,11 @@ impl GpacDrmXmlGenerator {
             }
         } else {
             for track in &config.tracks {
+                if !track.encrypted {
+                    Self::write_clear_track(&mut xml, track.track_id)?;
+                    continue;
+                }
+
                 let key = key_set
                     .get_key_for_scheme(config.scheme, track.track_type, &track.quality_tier)
                     .ok_or_else(|| {
@@ -130,6 +158,11 @@ impl GpacDrmXmlGenerator {
 
         writeln!(xml, r#"</GPACDRM>"#).unwrap();
         Ok(xml)
+    }
+
+    fn write_clear_track(xml: &mut String, track_id: u32) -> Result<()> {
+        writeln!(xml, r#"  <CrypTrack trackID="{}" IsEncrypted="0"/>"#, track_id).unwrap();
+        Ok(())
     }
 
     fn write_drm_info(xml: &mut String, pssh: &PsshData) {
@@ -214,14 +247,39 @@ fn build_hls_info(
     let mut parts = Vec::new();
     let mut has_fairplay = false;
     for pssh in pssh_list {
+        // Only include PSSH matching this key's KID (if PSSH has kid bound)
+        if let Some(pssh_kid) = &pssh.kid {
+            if pssh_kid != &key.kid {
+                continue;
+            }
+        }
+        // Only include PSSH matching this scheme (if PSSH has scheme bound)
+        if let Some(pssh_scheme) = pssh.encryption_scheme {
+            if pssh_scheme != scheme {
+                continue;
+            }
+        }
+
         if pssh.drm_system == crate::types::DrmSystem::FairPlay {
             // FairPlay does not support CENC mode
             if scheme == EncryptionScheme::Cenc || has_fairplay {
                 continue;
             }
             has_fairplay = true;
-            let skd_uri = if !pssh.data.is_empty() && pssh.data.starts_with(b"skd://") {
-                String::from_utf8_lossy(&pssh.data).to_string()
+            let skd_uri = if !pssh.data.is_empty() {
+                let s = String::from_utf8_lossy(&pssh.data);
+                if s.starts_with("skd://") {
+                    s.to_string()
+                } else if let Some(start) = s.find("URI=\"skd://") {
+                    let rem = &s[start + 5..];
+                    if let Some(end) = rem.find('"') {
+                        rem[..end].to_string()
+                    } else {
+                        format!("skd://{}", key.kid.0.hyphenated())
+                    }
+                } else {
+                    format!("skd://{}", key.kid.0.hyphenated())
+                }
             } else {
                 format!("skd://{}", key.kid.0.hyphenated())
             };
@@ -301,11 +359,11 @@ mod tests {
         let mut key_set = KeySet::new();
         key_set.insert_key(content_key);
 
-        let pssh = PsshData {
-            drm_system: DrmSystem::Widevine,
-            system_id: DrmSystem::Widevine.system_id(),
-            data: Bytes::from_static(b"widevine-payload"),
-        };
+        let pssh = PsshData::new(
+            DrmSystem::Widevine,
+            DrmSystem::Widevine.system_id(),
+            Bytes::from_static(b"widevine-payload"),
+        );
         key_set.add_pssh(pssh);
 
         let config = GpacDrmConfig::new(EncryptionScheme::Cenc).with_track(
@@ -386,25 +444,25 @@ mod tests {
         key_set.insert_key(content_key);
 
         // 1. Widevine PSSH
-        key_set.add_pssh(PsshData {
-            drm_system: DrmSystem::Widevine,
-            system_id: DrmSystem::Widevine.system_id(),
-            data: Bytes::from_static(b"widevine-data"),
-        });
+        key_set.add_pssh(PsshData::new(
+            DrmSystem::Widevine,
+            DrmSystem::Widevine.system_id(),
+            Bytes::from_static(b"widevine-data"),
+        ));
 
         // 2. PlayReady PSSH
-        key_set.add_pssh(PsshData {
-            drm_system: DrmSystem::PlayReady,
-            system_id: DrmSystem::PlayReady.system_id(),
-            data: Bytes::from_static(b"playready-data"),
-        });
+        key_set.add_pssh(PsshData::new(
+            DrmSystem::PlayReady,
+            DrmSystem::PlayReady.system_id(),
+            Bytes::from_static(b"playready-data"),
+        ));
 
         // 3. FairPlay
-        key_set.add_pssh(PsshData {
-            drm_system: DrmSystem::FairPlay,
-            system_id: DrmSystem::FairPlay.system_id(),
-            data: Bytes::from_static(b""),
-        });
+        key_set.add_pssh(PsshData::new(
+            DrmSystem::FairPlay,
+            DrmSystem::FairPlay.system_id(),
+            Bytes::from_static(b""),
+        ));
 
         let config = GpacDrmConfig::new(EncryptionScheme::Cbcs).with_track(
             1,
@@ -414,10 +472,11 @@ mod tests {
 
         let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation failed");
 
-        // Verify all 3 DRM systems have DRMInfo PSSH tags
+        // Verify Widevine and PlayReady have DRMInfo PSSH tags
         assert!(xml.contains(r#"<BS ID128="edef8ba979d64acea3c827dcd51d21ed"/>"#));
         assert!(xml.contains(r#"<BS ID128="9a04f07998404286ab92e65be0885f95"/>"#));
-        assert!(xml.contains(r#"<BS ID128="94ce86fb07ff4f43adb893d2fa968ca2"/>"#));
+        // Verify FairPlay does NOT emit an ISO-BMFF PSSH tag
+        assert!(!xml.contains(r#"<BS ID128="94ce86fb07ff4f43adb893d2fa968ca2"/>"#));
 
         // Verify hlsInfo includes FairPlay skd URI as well as Widevine and PlayReady UUIDs
         let expected_fairplay = format!(
@@ -448,18 +507,18 @@ mod tests {
         key_set.insert_key(content_key);
 
         // Widevine PSSH
-        key_set.add_pssh(PsshData {
-            drm_system: DrmSystem::Widevine,
-            system_id: DrmSystem::Widevine.system_id(),
-            data: Bytes::from_static(b"widevine-data"),
-        });
+        key_set.add_pssh(PsshData::new(
+            DrmSystem::Widevine,
+            DrmSystem::Widevine.system_id(),
+            Bytes::from_static(b"widevine-data"),
+        ));
 
         // FairPlay PSSH
-        key_set.add_pssh(PsshData {
-            drm_system: DrmSystem::FairPlay,
-            system_id: DrmSystem::FairPlay.system_id(),
-            data: Bytes::from_static(b"skd://custom-key-uri"),
-        });
+        key_set.add_pssh(PsshData::new(
+            DrmSystem::FairPlay,
+            DrmSystem::FairPlay.system_id(),
+            Bytes::from_static(b"skd://custom-key-uri"),
+        ));
 
         let config = GpacDrmConfig::new(EncryptionScheme::Cenc).with_track(
             1,
@@ -508,4 +567,23 @@ mod tests {
             GpacDrmXmlGenerator::generate(&key_set, &config_cenc).expect("XML generation failed");
         assert!(xml_cenc.contains("01010101010101010101010101010101"));
     }
+
+    #[test]
+    fn test_gpac_xml_selective_encryption_clear_track() {
+        let kid = KeyID::new(Uuid::from_bytes([0x01; 16]));
+        let key = ContentKey::new(kid, [0xaa; 16], QualityTier::hd(), TrackType::Video);
+
+        let mut key_set = KeySet::new();
+        key_set.insert_key(key);
+        // Note: key_set intentionally contains NO Audio key!
+
+        let config = GpacDrmConfig::new(EncryptionScheme::Cenc)
+            .with_track(1, TrackType::Video, QualityTier::hd())
+            .with_clear_track(2, TrackType::Audio, QualityTier::sd());
+
+        let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation must succeed");
+        assert!(xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="1""#));
+        assert!(xml.contains(r#"<CrypTrack trackID="2" IsEncrypted="0"/>"#));
+    }
 }
+

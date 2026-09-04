@@ -11,3 +11,6 @@
 - [x] Async HTTP client (`reqwest`) executing POST request to provider endpoint
 - [x] CPIX response XML parser: extract ContentKeys (`<pskc:PlainValue>`), KIDs, and PSSH elements for Widevine, FairPlay, and PlayReady
 - [x] Unit & integration tests with mock CPIX HTTP server
+- [x] Code review fixes: redaction of secret keys in `Debug`, self-closing XML tag support, FairPlay PSSH suppression in ISO-BMFF init fragments, PSSH KID/scheme binding
+- [x] Selective encryption (`Rendition.clear()`, `<CrypTrack IsEncrypted="0"/>`) & `KeyMappingPolicy` (ADR-0007)
+

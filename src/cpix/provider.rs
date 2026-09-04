@@ -5,7 +5,7 @@ use crate::key::{KeyProvider, KeyRequest, KeySet};
 use async_trait::async_trait;
 use std::time::Duration;
 
-/// Configuration options for connecting to a CPIX 2.3 key service.
+/// Configuration options for connecting to a CPIX 2.3 Provider.
 #[derive(Debug, Clone)]
 pub struct CpixConfig {
     pub endpoint: String,
