@@ -2,6 +2,7 @@ use drmpack::error::DrmpackError;
 use drmpack::key::{ContentKey, KeyID, PsshData, RawKeyProvider};
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
 use drmpack::types::{DrmSystem, QualityTier, Rendition, TrackType};
+use drmpack::PackagingOperation;
 use uuid::Uuid;
 
 fn create_test_key_provider() -> (RawKeyProvider, KeyID) {
@@ -46,13 +47,15 @@ async fn test_packaging_session_detects_missing_gpac_binary() {
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(
-        matches!(err, DrmpackError::Gpac(_)),
-        "Expected DrmpackError::Gpac, got: {:?}",
-        err
-    );
-    let err_msg = err.to_string();
-    assert!(err_msg.contains("non_existent_gpac_binary_xyz_123"));
+    let DrmpackError::PackagingSession(failure) = err else {
+        panic!("Expected structured PackagingSession failure");
+    };
+    assert_eq!(failure.cenc.len(), 1);
+    assert_eq!(failure.cenc[0].operation, PackagingOperation::Create);
+    assert!(failure.cenc[0]
+        .error
+        .to_string()
+        .contains("non_existent_gpac_binary_xyz_123"));
 
     // Cleanup
     let _ = tokio::fs::remove_dir_all(&out_dir).await;

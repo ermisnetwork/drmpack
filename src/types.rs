@@ -23,6 +23,22 @@ impl fmt::Display for EncryptionScheme {
     }
 }
 
+/// The manifest protocol used to deliver a Representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ManifestFormat {
+    Dash,
+    Hls,
+}
+
+impl fmt::Display for ManifestFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ManifestFormat::Dash => write!(f, "dash"),
+            ManifestFormat::Hls => write!(f, "hls"),
+        }
+    }
+}
+
 /// The streaming delivery latency profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LatencyMode {

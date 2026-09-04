@@ -1,0 +1,38 @@
+name: DRM end-to-end
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  drm-e2e:
+    name: GPAC 26.07 CENC/CBCS validation
+    runs-on: ubuntu-24.04
+    env:
+      DRMPACK_REQUIRE_MEDIA_TOOLS: "1"
+      GPAC_VERSION: "26.07.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install FFmpeg and GPAC build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential cmake git pkg-config \
+            libfreetype6-dev libjpeg-dev libpng-dev libssl-dev \
+            zlib1g-dev libxml2-dev libcurl4-openssl-dev ffmpeg
+      - name: Build pinned GPAC
+        run: |
+          git clone --depth 1 --branch "v${GPAC_VERSION}" https://github.com/gpac/gpac.git /tmp/gpac
+          cmake -S /tmp/gpac -B /tmp/gpac/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/gpac/build --parallel
+          sudo cmake --install /tmp/gpac/build
+      - name: Preflight media tools
+        run: |
+          gpac -version
+          gpac -version | grep -F "${GPAC_VERSION}"
+          ffmpeg -version
+      - name: Run required DRM end-to-end tests
+        run: cargo test --all-targets

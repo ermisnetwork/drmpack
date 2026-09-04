@@ -27,7 +27,7 @@ A named group of Renditions that share a single ContentKey (e.g. SD, HD, 4K). En
 _Avoid_: Key group, tier, quality level
 
 **EncryptionScheme**:
-The cipher mode applied to media samples — CENC (AES-CTR), CBCS (AES-CBC 1:9 pattern), or Dual (both simultaneously).
+The concrete cipher mode applied to one media representation — CENC (AES-CTR) or CBCS (AES-CBC 1:9 pattern). `Dual` is an orchestration mode that produces one independent representation of each concrete scheme from the same input.
 _Avoid_: Protection scheme, cipher mode
 
 ### Keys & Licensing
@@ -58,6 +58,14 @@ _Avoid_: Encryption metadata, DRM tags, key header
 
 ### Output & Storage
 
+**Representation**:
+An independently encrypted and packaged form of the same media, identified by a concrete EncryptionScheme. A Dual PackagingSession produces one CENC Representation and one CBCS Representation.
+_Avoid_: Branch, stream
+
+**Control directory**:
+Private session-scoped storage for packaging control-plane material, kept separate from the Ramdisk delivery output.
+_Avoid_: Output directory, served directory
+
 **Ramdisk**:
 A memory-backed filesystem directory (`/dev/shm` or `tmpfs`) where manifests and CMAF chunks are written and served with zero disk I/O.
 _Avoid_: Cache, tempdir, disk buffer
@@ -65,3 +73,7 @@ _Avoid_: Cache, tempdir, disk buffer
 **Manifest**:
 The playlist or description file served to players — HLS (`.m3u8`) or DASH (`.mpd`). Managed in Ramdisk with correct DRM signaling (PSSH, EXT-X-KEY).
 _Avoid_: Playlist (ambiguous with HLS-specific usage)
+
+**Manifest format**:
+The delivery protocol of a Manifest: DASH or HLS. It is independent of the concrete EncryptionScheme of a Representation.
+_Avoid_: Output type, playlist type

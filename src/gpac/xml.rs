@@ -62,7 +62,12 @@ impl GpacDrmXmlGenerator {
         let scheme_str = match config.scheme {
             EncryptionScheme::Cenc => "cenc",
             EncryptionScheme::Cbcs => "cbcs",
-            EncryptionScheme::Dual => "cenc", // Default to CENC for the primary branch
+            EncryptionScheme::Dual => {
+                return Err(DrmpackError::InvalidConfig(
+                    "EncryptionScheme::Dual is an orchestration mode and cannot generate GPAC DRM XML"
+                        .into(),
+                ));
+            }
         };
 
         writeln!(xml, r#"<GPACDRM type="{}">"#, scheme_str).unwrap();
@@ -320,6 +325,25 @@ mod tests {
         assert!(xml.contains(r#"<GPACDRM type="cbcs">"#));
         assert!(xml.contains(r#"scheme_type="cbcs""#));
         assert!(xml.contains(r#"crypt_byte_block="1" skip_byte_block="9""#));
+    }
+
+    #[test]
+    fn test_gpac_xml_rejects_dual_orchestration_mode() {
+        let kid = KeyID::new(Uuid::from_bytes([0x01; 16]));
+        let mut key_set = KeySet::new();
+        key_set.insert_key(ContentKey::new(
+            kid,
+            [0x42; 16],
+            QualityTier::hd(),
+            TrackType::Video,
+        ));
+
+        let error =
+            GpacDrmXmlGenerator::generate(&key_set, &GpacDrmConfig::new(EncryptionScheme::Dual))
+                .expect_err("Dual must not be accepted as a GPAC encryption scheme");
+
+        assert!(matches!(error, DrmpackError::InvalidConfig(_)));
+        assert!(error.to_string().contains("orchestration mode"));
     }
 
     #[test]

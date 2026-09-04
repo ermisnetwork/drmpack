@@ -196,15 +196,15 @@ impl GpacProcess {
                 Ok(Some(status)) => {
                     let stderr = self.get_recent_stderr();
                     let code = status.code();
-                    if !status.success() {
-                        error!(code = ?code, stderr = %stderr, "GPAC process crashed");
-                        Err(DrmpackError::ProcessCrashed {
-                            exit_code: code,
-                            stderr,
-                        })
-                    } else {
-                        Ok(())
-                    }
+                    error!(code = ?code, stderr = %stderr, "GPAC process exited unexpectedly");
+                    Err(DrmpackError::ProcessCrashed {
+                        exit_code: code,
+                        stderr: if status.success() {
+                            format!("GPAC exited successfully before PackagingSession::close(). Stderr: {stderr}")
+                        } else {
+                            stderr
+                        },
+                    })
                 }
                 Ok(None) => Ok(()), // Still running
                 Err(e) => Err(DrmpackError::Gpac(format!(

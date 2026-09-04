@@ -45,6 +45,65 @@ fn expected_widevine_pssh() -> Vec<u8> {
     pssh
 }
 
+fn media_tools_available() -> bool {
+    ["gpac", "ffmpeg"].into_iter().all(|binary| {
+        std::process::Command::new("which")
+            .arg(binary)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
+fn require_media_tools() {
+    if media_tools_available() {
+        return;
+    }
+    if std::env::var_os("DRMPACK_REQUIRE_MEDIA_TOOLS").is_some() {
+        panic!("GPAC and FFmpeg are required when DRMPACK_REQUIRE_MEDIA_TOOLS is set");
+    }
+    println!("SKIPPING test_tracer_gpac_e2e_dual_packaging: 'gpac' and 'ffmpeg' are required");
+}
+
+async fn generate_sample_mp4(prefix: &str) -> Vec<u8> {
+    let sample_mp4_path = std::env::temp_dir().join(format!("{prefix}_{}.mp4", Uuid::new_v4()));
+    let ffmpeg_status = std::process::Command::new("ffmpeg")
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=4:size=640x360:rate=30",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "empty_moov+default_base_moof+frag_keyframe",
+            "-f",
+            "mp4",
+            sample_mp4_path.to_str().unwrap(),
+            "-y",
+        ])
+        .output()
+        .expect("Failed to run ffmpeg to generate test fMP4");
+    assert!(ffmpeg_status.status.success(), "ffmpeg generation failed");
+
+    let sample_bytes = tokio::fs::read(&sample_mp4_path).await.unwrap();
+    let _ = tokio::fs::remove_file(&sample_mp4_path).await;
+    sample_bytes
+}
+
+async fn wait_for_path(path: &std::path::Path) {
+    for _ in 0..50 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("Timed out waiting for {}", path.display());
+}
+
 #[tokio::test]
 async fn test_tracer_session_detects_missing_gpac() {
     let (provider, _) = create_test_key_provider();
@@ -68,13 +127,18 @@ async fn test_tracer_session_detects_missing_gpac() {
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(
-        matches!(err, DrmpackError::Gpac(_)),
-        "Expected DrmpackError::Gpac, got: {:?}",
-        err
+    let DrmpackError::PackagingSession(failure) = err else {
+        panic!("Expected structured PackagingSession failure");
+    };
+    assert_eq!(failure.cenc.len(), 1);
+    assert_eq!(
+        failure.cenc[0].operation,
+        drmpack::PackagingOperation::Create
     );
-    let err_msg = err.to_string();
-    assert!(err_msg.contains("non_existent_gpac_binary_xyz_123"));
+    assert!(failure.cenc[0]
+        .error
+        .to_string()
+        .contains("non_existent_gpac_binary_xyz_123"));
 
     // Cleanup
     let _ = tokio::fs::remove_dir_all(&out_dir).await;
@@ -120,12 +184,30 @@ async fn test_tracer_gpac_e2e_live_packaging() {
         .await
         .expect("Failed to create PackagingSession with real GPAC");
 
-    // Verify drm.xml was generated in output directory
-    let drm_xml_path = out_dir.join("drm.xml");
-    assert!(drm_xml_path.exists());
-    let drm_xml_content = tokio::fs::read_to_string(&drm_xml_path).await.unwrap();
-    assert!(drm_xml_content.contains(r#"<GPACDRM type="cenc">"#));
-    assert!(drm_xml_content.contains(&format!("0x{}", kid.to_hex())));
+    // DRM XML is private control-plane material and must not be exposed in Ramdisk output.
+    assert!(!out_dir.join("drm.xml").exists());
+    assert_eq!(
+        session
+            .manifest_path(EncryptionScheme::Cenc, drmpack::ManifestFormat::Dash)
+            .unwrap(),
+        out_dir.join("live.mpd")
+    );
+    assert_eq!(
+        session.hls_manifest_path().unwrap(),
+        out_dir.join("live.m3u8")
+    );
+    assert_eq!(
+        session.dash_manifest_path().unwrap(),
+        out_dir.join("live.mpd")
+    );
+    assert_eq!(
+        session
+            .key_set()
+            .get_key(TrackType::Video, &QualityTier::hd())
+            .unwrap()
+            .kid,
+        kid
+    );
 
     // Generate a 4-second synthetic H.264 fMP4 clip via ffmpeg to push into the pipe
     let sample_mp4_path = std::env::temp_dir().join(format!("sample_{}.mp4", Uuid::new_v4()));
@@ -263,6 +345,144 @@ async fn test_tracer_gpac_e2e_live_packaging() {
 }
 
 #[tokio::test]
+async fn test_tracer_gpac_e2e_dual_packaging() {
+    if !media_tools_available() {
+        require_media_tools();
+        return;
+    }
+
+    let (provider, kid) = create_test_key_provider();
+    let rendition = Rendition::video(
+        "v720p",
+        QualityTier::hd(),
+        1280,
+        720,
+        2_500_000,
+        "avc1.4d401f",
+    );
+    let out_dir = std::env::temp_dir().join(format!("drmpack_gpac_dual_{}", Uuid::new_v4()));
+    let config = PackagingSessionConfig::new("e2e-dual-live-stream")
+        .with_rendition(rendition)
+        .with_latency_mode(LatencyMode::LowLatency)
+        .with_segment_duration(1.0)
+        .with_chunk_duration(0.2)
+        .with_output_dir(&out_dir)
+        .with_encryption_scheme(EncryptionScheme::Dual)
+        .with_drm_system(DrmSystem::Widevine);
+
+    let mut session = PackagingSession::create(config, provider)
+        .await
+        .expect("Failed to create Dual PackagingSession with real GPAC");
+
+    let cenc_dash = session
+        .manifest_path(EncryptionScheme::Cenc, drmpack::ManifestFormat::Dash)
+        .unwrap();
+    let cenc_hls = session
+        .manifest_path(EncryptionScheme::Cenc, drmpack::ManifestFormat::Hls)
+        .unwrap();
+    let cbcs_dash = session
+        .manifest_path(EncryptionScheme::Cbcs, drmpack::ManifestFormat::Dash)
+        .unwrap();
+    let cbcs_hls = session
+        .manifest_path(EncryptionScheme::Cbcs, drmpack::ManifestFormat::Hls)
+        .unwrap();
+    assert_eq!(cenc_dash, out_dir.join("cenc/live.mpd"));
+    assert_eq!(cenc_hls, out_dir.join("cenc/live.m3u8"));
+    assert_eq!(cbcs_dash, out_dir.join("cbcs/live.mpd"));
+    assert_eq!(cbcs_hls, out_dir.join("cbcs/live.m3u8"));
+    assert!(matches!(
+        session.manifest_path(EncryptionScheme::Dual, drmpack::ManifestFormat::Dash),
+        Err(DrmpackError::InvalidConfig(_))
+    ));
+    assert!(matches!(
+        session.hls_manifest_path(),
+        Err(DrmpackError::InvalidConfig(_))
+    ));
+    assert!(!out_dir.join("drm.xml").exists());
+
+    let sample_bytes = generate_sample_mp4("sample_dual").await;
+    session
+        .push_segment(Segment {
+            rendition_id: "v720p".into(),
+            sequence_number: 0,
+            duration_seconds: 4.0,
+            data: Bytes::from(sample_bytes),
+            is_init: false,
+        })
+        .await
+        .expect("Failed to fan out fMP4 Segment to both Dual Representations");
+
+    let cenc_init = out_dir.join("cenc/stdin_dashinit.mp4");
+    let cbcs_init = out_dir.join("cbcs/stdin_dashinit.mp4");
+    wait_for_path(&cenc_init).await;
+    wait_for_path(&cbcs_init).await;
+    session.close().await.expect("Failed to close Dual session");
+
+    let expected_pssh_base64 = BASE64_STANDARD.encode(expected_widevine_pssh());
+    let cenc_mpd = tokio::fs::read_to_string(&cenc_dash).await.unwrap();
+    let cbcs_mpd = tokio::fs::read_to_string(&cbcs_dash).await.unwrap();
+    assert!(
+        cenc_mpd.contains("cenc"),
+        "CENC DASH manifest must signal cenc"
+    );
+    assert!(
+        cbcs_mpd.contains("cbcs"),
+        "CBCS DASH manifest must signal cbcs"
+    );
+    assert!(cenc_mpd.contains(&kid.0.hyphenated().to_string()));
+    assert!(cbcs_mpd.contains(&kid.0.hyphenated().to_string()));
+
+    let cenc_variant = tokio::fs::read_to_string(out_dir.join("cenc/live_1.m3u8"))
+        .await
+        .unwrap();
+    let cbcs_variant = tokio::fs::read_to_string(out_dir.join("cbcs/live_1.m3u8"))
+        .await
+        .unwrap();
+    assert!(cenc_variant.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
+    assert!(cenc_variant.contains(&format!(
+        "URI=\"data:text/plain;base64,{expected_pssh_base64}\""
+    )));
+    assert!(cbcs_variant.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"));
+
+    for (scheme, init_path, segment_path, expected_scheme) in [
+        (
+            "cenc",
+            cenc_init,
+            out_dir.join("cenc/stdin_dash1.m4s"),
+            b"cenc".as_slice(),
+        ),
+        (
+            "cbcs",
+            cbcs_init,
+            out_dir.join("cbcs/stdin_dash1.m4s"),
+            b"cbcs".as_slice(),
+        ),
+    ] {
+        let init_bytes = tokio::fs::read(&init_path).await.unwrap();
+        let sch_info = find_box(&init_bytes, b"sinf")
+            .and_then(|sinf| find_box(sinf, b"schm"))
+            .expect("Init segment must contain scheme info");
+        assert!(
+            sch_info.windows(4).any(|window| window == expected_scheme),
+            "{scheme} init segment must declare its concrete encryption scheme"
+        );
+        let tenc = find_box(&init_bytes, b"tenc").expect("init segment must contain tenc");
+        assert!(tenc.windows(16).any(|value| value == kid.as_bytes()));
+
+        let segment_bytes = tokio::fs::read(&segment_path).await.unwrap();
+        for box_type in [b"senc", b"saiz", b"saio"] {
+            assert!(
+                find_box(&segment_bytes, box_type).is_some(),
+                "{scheme} encrypted CMAF segment must contain {}",
+                String::from_utf8_lossy(box_type)
+            );
+        }
+    }
+
+    tokio::fs::remove_dir_all(&out_dir).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_tracer_gpac_e2e_cbcs_packaging() {
     let gpac_check = std::process::Command::new("which").arg("gpac").output();
     let has_gpac = match gpac_check {
@@ -322,16 +542,22 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
         .await
         .expect("Failed to create PackagingSession with CBCS encryption");
 
-    // Verify drm.xml reflects CBCS and 1:9 pattern
-    let drm_xml_path = out_dir.join("drm.xml");
-    assert!(drm_xml_path.exists());
-    let drm_xml_content = tokio::fs::read_to_string(&drm_xml_path).await.unwrap();
-    assert!(drm_xml_content.contains(r#"<GPACDRM type="cbcs">"#));
-    assert!(drm_xml_content.contains(r#"scheme_type="cbcs""#));
-    assert!(drm_xml_content.contains(r#"crypt_byte_block="1" skip_byte_block="9""#));
-    assert!(drm_xml_content.contains(&format!("0x{}", kid.to_hex())));
-    assert!(drm_xml_content.contains(r#"KEYFORMAT="com.apple.streamingkeydelivery""#));
-    assert!(drm_xml_content.contains(&format!("skd://{}", kid.0.hyphenated())));
+    // DRM XML is private control-plane material and must not be exposed in Ramdisk output.
+    assert!(!out_dir.join("drm.xml").exists());
+    assert_eq!(
+        session
+            .manifest_path(EncryptionScheme::Cbcs, drmpack::ManifestFormat::Hls)
+            .unwrap(),
+        out_dir.join("live.m3u8")
+    );
+    assert_eq!(
+        session
+            .key_set()
+            .get_key(TrackType::Video, &QualityTier::hd())
+            .unwrap()
+            .kid,
+        kid
+    );
 
     // Generate test fMP4 clip via ffmpeg
     let sample_mp4_path = std::env::temp_dir().join(format!("sample_cbcs_{}.mp4", Uuid::new_v4()));
