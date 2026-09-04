@@ -606,6 +606,11 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
                         ),
                     ))
                 })?;
+            if let Some(parent) = self.control_dir.parent() {
+                if parent.file_name().and_then(|n| n.to_str()) == Some("drmpack-control") {
+                    let _ = tokio::fs::remove_dir(parent).await;
+                }
+            }
         }
         Ok(())
     }
@@ -624,6 +629,11 @@ impl<P: KeyProvider + 'static> Drop for PackagingSession<P> {
         if self.control_dir.exists() {
             if let Err(error) = std::fs::remove_dir_all(&self.control_dir) {
                 debug!(path = %self.control_dir.display(), %error, "Failed to remove private control directory during drop");
+            }
+            if let Some(parent) = self.control_dir.parent() {
+                if parent.file_name().and_then(|n| n.to_str()) == Some("drmpack-control") {
+                    let _ = std::fs::remove_dir(parent);
+                }
             }
         }
         if self.config.auto_cleanup && self.config.output_dir.exists() {
@@ -832,6 +842,11 @@ async fn rollback_creation(
 ) {
     if let Some(control_dir) = control_dir {
         let _ = tokio::fs::remove_dir_all(control_dir).await;
+        if let Some(parent) = control_dir.parent() {
+            if parent.file_name().and_then(|n| n.to_str()) == Some("drmpack-control") {
+                let _ = tokio::fs::remove_dir(parent).await;
+            }
+        }
     }
     if output_dir_created {
         let _ = tokio::fs::remove_dir_all(output_dir).await;
