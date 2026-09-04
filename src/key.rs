@@ -1,10 +1,13 @@
 use crate::error::{DrmpackError, Result};
-use crate::types::{DrmSystem, QualityTier, TrackType};
+use crate::types::{DrmSystem, EncryptionScheme, QualityTier, TrackType};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
+
+#[cfg(feature = "cpix")]
+pub use crate::cpix::CpixProvider;
 
 /// 128-bit Key Identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,6 +50,7 @@ pub struct ContentKey {
     pub quality_tier: QualityTier,
     pub track_type: TrackType,
     pub iv: Option<[u8; 16]>,
+    pub encryption_scheme: Option<EncryptionScheme>,
 }
 
 impl ContentKey {
@@ -62,11 +66,34 @@ impl ContentKey {
             quality_tier,
             track_type,
             iv: None,
+            encryption_scheme: None,
+        }
+    }
+
+    pub fn new_with_scheme(
+        kid: KeyID,
+        key: [u8; 16],
+        quality_tier: QualityTier,
+        track_type: TrackType,
+        scheme: EncryptionScheme,
+    ) -> Self {
+        Self {
+            kid,
+            key,
+            quality_tier,
+            track_type,
+            iv: None,
+            encryption_scheme: Some(scheme),
         }
     }
 
     pub fn with_iv(mut self, iv: [u8; 16]) -> Self {
         self.iv = Some(iv);
+        self
+    }
+
+    pub fn with_encryption_scheme(mut self, scheme: EncryptionScheme) -> Self {
+        self.encryption_scheme = Some(scheme);
         self
     }
 }
@@ -85,12 +112,39 @@ pub struct KeyRequest {
     pub content_id: String,
     pub requested_tiers: Vec<(TrackType, QualityTier)>,
     pub drm_systems: Vec<DrmSystem>,
+    pub encryption_schemes: Vec<EncryptionScheme>,
+}
+
+impl KeyRequest {
+    pub fn new(content_id: impl Into<String>) -> Self {
+        Self {
+            content_id: content_id.into(),
+            requested_tiers: Vec::new(),
+            drm_systems: Vec::new(),
+            encryption_schemes: Vec::new(),
+        }
+    }
+
+    pub fn with_tier(mut self, track_type: TrackType, tier: QualityTier) -> Self {
+        self.requested_tiers.push((track_type, tier));
+        self
+    }
+
+    pub fn with_drm_system(mut self, drm: DrmSystem) -> Self {
+        self.drm_systems.push(drm);
+        self
+    }
+
+    pub fn with_encryption_scheme(mut self, scheme: EncryptionScheme) -> Self {
+        self.encryption_schemes.push(scheme);
+        self
+    }
 }
 
 /// The set of ContentKeys and PSSH boxes returned by a KeyProvider.
 #[derive(Debug, Clone, Default)]
 pub struct KeySet {
-    pub keys: HashMap<(TrackType, QualityTier), ContentKey>,
+    pub keys: HashMap<(Option<EncryptionScheme>, TrackType, QualityTier), ContentKey>,
     pub pssh: Vec<PsshData>,
 }
 
@@ -100,8 +154,14 @@ impl KeySet {
     }
 
     pub fn insert_key(&mut self, key: ContentKey) {
-        self.keys
-            .insert((key.track_type, key.quality_tier.clone()), key);
+        self.keys.insert(
+            (
+                key.encryption_scheme,
+                key.track_type,
+                key.quality_tier.clone(),
+            ),
+            key,
+        );
     }
 
     pub fn get_key(
@@ -109,11 +169,43 @@ impl KeySet {
         track_type: TrackType,
         quality_tier: &QualityTier,
     ) -> Option<&ContentKey> {
-        self.keys.get(&(track_type, quality_tier.clone()))
+        self.keys
+            .get(&(None, track_type, quality_tier.clone()))
+            .or_else(|| {
+                self.keys
+                    .iter()
+                    .find(|((_, t, q), _)| *t == track_type && q == quality_tier)
+                    .map(|(_, k)| k)
+            })
+    }
+
+    pub fn get_key_for_scheme(
+        &self,
+        scheme: EncryptionScheme,
+        track_type: TrackType,
+        quality_tier: &QualityTier,
+    ) -> Option<&ContentKey> {
+        self.keys
+            .get(&(Some(scheme), track_type, quality_tier.clone()))
+            .or_else(|| self.keys.get(&(None, track_type, quality_tier.clone())))
     }
 
     pub fn add_pssh(&mut self, pssh: PsshData) {
-        self.pssh.push(pssh);
+        if !self.pssh.iter().any(|p| p == &pssh) {
+            self.pssh.push(pssh);
+        }
+    }
+
+    pub fn all_keys(&self) -> impl Iterator<Item = &ContentKey> {
+        self.keys.values()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
     }
 }
 
@@ -126,7 +218,7 @@ pub trait KeyProvider: Send + Sync {
 /// Raw key provider supplying manually configured keys for testing and development.
 #[derive(Debug, Clone, Default)]
 pub struct RawKeyProvider {
-    keys: HashMap<(TrackType, QualityTier), ContentKey>,
+    keys: HashMap<(Option<EncryptionScheme>, TrackType, QualityTier), ContentKey>,
     pssh: Vec<PsshData>,
 }
 
@@ -136,8 +228,7 @@ impl RawKeyProvider {
     }
 
     pub fn with_key(mut self, key: ContentKey) -> Self {
-        self.keys
-            .insert((key.track_type, key.quality_tier.clone()), key);
+        self.insert_key(key);
         self
     }
 
@@ -147,8 +238,18 @@ impl RawKeyProvider {
     }
 
     pub fn add_key(&mut self, key: ContentKey) {
-        self.keys
-            .insert((key.track_type, key.quality_tier.clone()), key);
+        self.insert_key(key);
+    }
+
+    pub fn insert_key(&mut self, key: ContentKey) {
+        self.keys.insert(
+            (
+                key.encryption_scheme,
+                key.track_type,
+                key.quality_tier.clone(),
+            ),
+            key,
+        );
     }
 }
 
@@ -156,14 +257,50 @@ impl RawKeyProvider {
 impl KeyProvider for RawKeyProvider {
     async fn fetch_keys(&self, request: &KeyRequest) -> Result<KeySet> {
         let mut set = KeySet::new();
-        for (track_type, tier) in &request.requested_tiers {
-            if let Some(key) = self.keys.get(&(*track_type, tier.clone())) {
-                set.insert_key(key.clone());
-            } else {
-                return Err(DrmpackError::KeyProvider(format!(
-                    "No raw key configured for {:?} / {}",
-                    track_type, tier
-                )));
+
+        let schemes: Vec<Option<EncryptionScheme>> = if request.encryption_schemes.is_empty() {
+            vec![None]
+        } else {
+            let mut s = Vec::new();
+            for scheme in &request.encryption_schemes {
+                for concrete in scheme.concrete_schemes() {
+                    let opt = Some(*concrete);
+                    if !s.contains(&opt) {
+                        s.push(opt);
+                    }
+                }
+            }
+            s
+        };
+
+        for scheme_opt in &schemes {
+            for (track_type, tier) in &request.requested_tiers {
+                let key = self
+                    .keys
+                    .get(&(*scheme_opt, *track_type, tier.clone()))
+                    .or_else(|| self.keys.get(&(None, *track_type, tier.clone())))
+                    .or_else(|| {
+                        self.keys
+                            .iter()
+                            .find(|((_, t, q), _)| *t == *track_type && q == tier)
+                            .map(|(_, k)| k)
+                    });
+
+                if let Some(key) = key {
+                    let mut k = key.clone();
+                    if k.encryption_scheme.is_none() && scheme_opt.is_some() {
+                        k.encryption_scheme = *scheme_opt;
+                    }
+                    set.insert_key(k);
+                } else {
+                    let scheme_desc = scheme_opt
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "agnostic".into());
+                    return Err(DrmpackError::KeyProvider(format!(
+                        "No raw key configured for {:?} / {} (scheme: {})",
+                        track_type, tier, scheme_desc
+                    )));
+                }
             }
         }
         set.pssh = self.pssh.clone();
@@ -187,6 +324,7 @@ mod tests {
             content_id: "test-content".into(),
             requested_tiers: vec![(TrackType::Video, QualityTier::hd())],
             drm_systems: vec![DrmSystem::Widevine],
+            encryption_schemes: vec![EncryptionScheme::Cenc],
         };
 
         let keyset = provider.fetch_keys(&req).await.unwrap();
@@ -204,9 +342,83 @@ mod tests {
             content_id: "test-content".into(),
             requested_tiers: vec![(TrackType::Video, QualityTier::hd())],
             drm_systems: vec![DrmSystem::Widevine],
+            encryption_schemes: vec![EncryptionScheme::Cenc],
         };
 
         let result = provider.fetch_keys(&req).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_scheme_aware_key_differentiation() {
+        let kid_cenc = KeyID::random();
+        let kid_cbcs = KeyID::random();
+        let key_cenc = ContentKey::new_with_scheme(
+            kid_cenc,
+            [0x11; 16],
+            QualityTier::hd(),
+            TrackType::Video,
+            EncryptionScheme::Cenc,
+        );
+        let key_cbcs = ContentKey::new_with_scheme(
+            kid_cbcs,
+            [0x22; 16],
+            QualityTier::hd(),
+            TrackType::Video,
+            EncryptionScheme::Cbcs,
+        );
+
+        let mut keyset = KeySet::new();
+        keyset.insert_key(key_cenc);
+        keyset.insert_key(key_cbcs);
+
+        let fetched_cenc = keyset
+            .get_key_for_scheme(EncryptionScheme::Cenc, TrackType::Video, &QualityTier::hd())
+            .unwrap();
+        let fetched_cbcs = keyset
+            .get_key_for_scheme(EncryptionScheme::Cbcs, TrackType::Video, &QualityTier::hd())
+            .unwrap();
+
+        assert_eq!(fetched_cenc.kid, kid_cenc);
+        assert_eq!(fetched_cenc.key, [0x11; 16]);
+        assert_eq!(fetched_cbcs.kid, kid_cbcs);
+        assert_eq!(fetched_cbcs.key, [0x22; 16]);
+    }
+
+    #[tokio::test]
+    async fn test_raw_key_provider_dual_scheme_expansion() {
+        let kid = KeyID::random();
+        let provider = RawKeyProvider::new().with_key(ContentKey::new(
+            kid,
+            [0xaa; 16],
+            QualityTier::hd(),
+            TrackType::Video,
+        ));
+
+        let req = KeyRequest::new("dual-content")
+            .with_tier(TrackType::Video, QualityTier::hd())
+            .with_encryption_scheme(EncryptionScheme::Dual);
+
+        let keyset = provider.fetch_keys(&req).await.unwrap();
+        // Both Cenc and Cbcs keys must be resolved
+        assert!(keyset
+            .get_key_for_scheme(EncryptionScheme::Cenc, TrackType::Video, &QualityTier::hd())
+            .is_some());
+        assert!(keyset
+            .get_key_for_scheme(EncryptionScheme::Cbcs, TrackType::Video, &QualityTier::hd())
+            .is_some());
+    }
+
+    #[test]
+    fn test_keyset_pssh_deduplication() {
+        let mut keyset = KeySet::new();
+        let pssh = PsshData {
+            drm_system: DrmSystem::Widevine,
+            system_id: DrmSystem::Widevine.system_id(),
+            data: Bytes::from_static(b"pssh-payload"),
+        };
+        keyset.add_pssh(pssh.clone());
+        keyset.add_pssh(pssh.clone());
+        assert_eq!(keyset.pssh.len(), 1, "Duplicate PSSH must be deduplicated");
     }
 }

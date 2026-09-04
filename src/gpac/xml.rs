@@ -1,6 +1,6 @@
 use crate::error::{DrmpackError, Result};
 use crate::key::{ContentKey, KeySet, PsshData};
-use crate::types::{EncryptionScheme, QualityTier, TrackType};
+use crate::types::{DrmSystem, EncryptionScheme, QualityTier, TrackType};
 use base64::prelude::*;
 use std::fmt::Write;
 
@@ -73,6 +73,10 @@ impl GpacDrmXmlGenerator {
         writeln!(xml, r#"<GPACDRM type="{}">"#, scheme_str).unwrap();
 
         for pssh in &key_set.pssh {
+            // FairPlay does not support CENC mode
+            if config.scheme == EncryptionScheme::Cenc && pssh.drm_system == DrmSystem::FairPlay {
+                continue;
+            }
             Self::write_drm_info(&mut xml, pssh);
         }
 
@@ -81,9 +85,15 @@ impl GpacDrmXmlGenerator {
         // If tracks are specified, generate a CrypTrack for each.
         // Otherwise, generate a default CrypTrack matching all tracks.
         if config.tracks.is_empty() {
-            // Find any available key in KeySet
-            if let Some((_, key)) = key_set.keys.iter().next() {
-                let hls_info = build_hls_info(&key_set.pssh, key)?;
+            // Find any available key in KeySet for this scheme
+            let key = key_set
+                .keys
+                .iter()
+                .find(|((scheme, _, _), _)| scheme.is_none_or(|s| s == config.scheme))
+                .map(|(_, k)| k)
+                .or_else(|| key_set.keys.values().next());
+            if let Some(key) = key {
+                let hls_info = build_hls_info(&key_set.pssh, key, config.scheme)?;
                 Self::write_cryptrack(
                     &mut xml,
                     None,
@@ -98,15 +108,15 @@ impl GpacDrmXmlGenerator {
         } else {
             for track in &config.tracks {
                 let key = key_set
-                    .get_key(track.track_type, &track.quality_tier)
+                    .get_key_for_scheme(config.scheme, track.track_type, &track.quality_tier)
                     .ok_or_else(|| {
                         DrmpackError::Encryption(format!(
-                            "No ContentKey found for track_id={} ({:?} / {})",
-                            track.track_id, track.track_type, track.quality_tier
+                            "No ContentKey found for track_id={} ({:?} / {} / {})",
+                            track.track_id, track.track_type, track.quality_tier, config.scheme
                         ))
                     })?;
 
-                let hls_info = build_hls_info(&key_set.pssh, key)?;
+                let hls_info = build_hls_info(&key_set.pssh, key, config.scheme)?;
                 Self::write_cryptrack(
                     &mut xml,
                     Some(track.track_id),
@@ -192,14 +202,24 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn build_hls_info(pssh_list: &[PsshData], key: &ContentKey) -> Result<Option<String>> {
+fn build_hls_info(
+    pssh_list: &[PsshData],
+    key: &ContentKey,
+    scheme: EncryptionScheme,
+) -> Result<Option<String>> {
     if pssh_list.is_empty() {
         return Ok(None);
     }
 
     let mut parts = Vec::new();
+    let mut has_fairplay = false;
     for pssh in pssh_list {
         if pssh.drm_system == crate::types::DrmSystem::FairPlay {
+            // FairPlay does not support CENC mode
+            if scheme == EncryptionScheme::Cenc || has_fairplay {
+                continue;
+            }
+            has_fairplay = true;
             let skd_uri = if !pssh.data.is_empty() && pssh.data.starts_with(b"skd://") {
                 String::from_utf8_lossy(&pssh.data).to_string()
             } else {
@@ -212,15 +232,22 @@ fn build_hls_info(pssh_list: &[PsshData], key: &ContentKey) -> Result<Option<Str
         } else {
             let pssh_box = build_pssh_box(pssh)?;
             let uri = BASE64_STANDARD.encode(pssh_box);
-            parts.push(format!(
+            let part = format!(
                 r#"URI="data:text/plain;base64,{}",KEYFORMAT="urn:uuid:{}",KEYFORMATVERSIONS="1""#,
                 uri,
                 format_uuid(&pssh.system_id)
-            ));
+            );
+            if !parts.contains(&part) {
+                parts.push(part);
+            }
         }
     }
 
-    Ok(Some(parts.join(",")))
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(parts.join(",")))
+    }
 }
 
 fn build_pssh_box(pssh: &PsshData) -> Result<Vec<u8>> {
@@ -406,5 +433,79 @@ mod tests {
 
         // Verify delimiter ,URI= is present between DRM formats
         assert!(xml.contains(r#",KEYFORMATVERSIONS="1",URI="#));
+    }
+
+    #[test]
+    fn test_gpac_xml_cenc_excludes_fairplay() {
+        let kid_uuid = Uuid::from_bytes([
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ]);
+        let kid = KeyID::new(kid_uuid);
+        let content_key = ContentKey::new(kid, [0xaa; 16], QualityTier::hd(), TrackType::Video);
+
+        let mut key_set = KeySet::new();
+        key_set.insert_key(content_key);
+
+        // Widevine PSSH
+        key_set.add_pssh(PsshData {
+            drm_system: DrmSystem::Widevine,
+            system_id: DrmSystem::Widevine.system_id(),
+            data: Bytes::from_static(b"widevine-data"),
+        });
+
+        // FairPlay PSSH
+        key_set.add_pssh(PsshData {
+            drm_system: DrmSystem::FairPlay,
+            system_id: DrmSystem::FairPlay.system_id(),
+            data: Bytes::from_static(b"skd://custom-key-uri"),
+        });
+
+        let config = GpacDrmConfig::new(EncryptionScheme::Cenc).with_track(
+            1,
+            TrackType::Video,
+            QualityTier::hd(),
+        );
+
+        let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation failed");
+
+        // Widevine must be present
+        assert!(xml.contains(r#"<BS ID128="edef8ba979d64acea3c827dcd51d21ed"/>"#));
+        // FairPlay MUST NOT be present in CENC XML
+        assert!(
+            !xml.contains(r#"<BS ID128="94ce86fb07ff4f43adb893d2fa968ca2"/>"#),
+            "CENC GPAC XML must not contain FairPlay DRMInfo"
+        );
+        assert!(
+            !xml.contains("com.apple.streamingkeydelivery"),
+            "CENC GPAC XML must not contain FairPlay HLS signaling"
+        );
+    }
+
+    #[test]
+    fn test_gpac_xml_empty_tracks_scheme_matching() {
+        let kid_cenc = KeyID::new(Uuid::from_bytes([1; 16]));
+        let mut key_cenc =
+            ContentKey::new(kid_cenc, [0xaa; 16], QualityTier::hd(), TrackType::Video);
+        key_cenc.encryption_scheme = Some(EncryptionScheme::Cenc);
+
+        let kid_cbcs = KeyID::new(Uuid::from_bytes([2; 16]));
+        let mut key_cbcs =
+            ContentKey::new(kid_cbcs, [0xbb; 16], QualityTier::hd(), TrackType::Video);
+        key_cbcs.encryption_scheme = Some(EncryptionScheme::Cbcs);
+
+        let mut key_set = KeySet::new();
+        key_set.insert_key(key_cenc);
+        key_set.insert_key(key_cbcs);
+
+        let config_cbcs = GpacDrmConfig::new(EncryptionScheme::Cbcs);
+        let xml_cbcs =
+            GpacDrmXmlGenerator::generate(&key_set, &config_cbcs).expect("XML generation failed");
+        assert!(xml_cbcs.contains("02020202020202020202020202020202"));
+
+        let config_cenc = GpacDrmConfig::new(EncryptionScheme::Cenc);
+        let xml_cenc =
+            GpacDrmXmlGenerator::generate(&key_set, &config_cenc).expect("XML generation failed");
+        assert!(xml_cenc.contains("01010101010101010101010101010101"));
     }
 }

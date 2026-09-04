@@ -13,6 +13,18 @@ pub enum EncryptionScheme {
     Dual,
 }
 
+impl EncryptionScheme {
+    /// Return the concrete encryption schemes represented by this scheme.
+    /// `Cenc` -> `[Cenc]`, `Cbcs` -> `[Cbcs]`, `Dual` -> `[Cenc, Cbcs]`.
+    pub fn concrete_schemes(&self) -> &'static [EncryptionScheme] {
+        match self {
+            EncryptionScheme::Cenc => &[EncryptionScheme::Cenc],
+            EncryptionScheme::Cbcs => &[EncryptionScheme::Cbcs],
+            EncryptionScheme::Dual => &[EncryptionScheme::Cenc, EncryptionScheme::Cbcs],
+        }
+    }
+}
+
 impl fmt::Display for EncryptionScheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

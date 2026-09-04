@@ -181,10 +181,10 @@ impl Lifecycle {
 /// A stateful packaging session that orchestrates DRM key acquisition,
 /// GPAC child process lifecycle, and low-latency manifest/chunk generation into Ramdisk.
 ///
-/// # Dual topology warning
-/// `EncryptionScheme::Dual` currently reuses one temporary KeySet for both CENC and CBCS
-/// Representations. It proves packaging topology only and is not production-safe until
-/// scheme-aware selection provides distinct ContentKeys and KIDs for each Representation.
+/// # Dual Scheme-Aware Keys
+/// `EncryptionScheme::Dual` queries scheme-aware keys for both CENC and CBCS Representations
+/// (`KeyRequest::encryption_schemes`). When supplied by a scheme-aware KeyProvider (such as CPIX),
+/// each Representation receives distinct ContentKeys and KIDs per ADR-0006.
 pub struct PackagingSession<P: KeyProvider + 'static> {
     config: PackagingSessionConfig,
     _key_provider: P,
@@ -329,9 +329,9 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         let failures = write_results
             .into_iter()
             .filter_map(|(scheme, result)| {
-                result
-                    .err()
-                    .map(|error| RepresentationFailure::new(scheme, PackagingOperation::Write, error))
+                result.err().map(|error| {
+                    RepresentationFailure::new(scheme, PackagingOperation::Write, error)
+                })
             })
             .collect();
 
@@ -536,7 +536,10 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         DrmpackError::PackagingSession(failure)
     }
 
-    async fn close_representations(&self, operation: PackagingOperation) -> Vec<RepresentationFailure> {
+    async fn close_representations(
+        &self,
+        operation: PackagingOperation,
+    ) -> Vec<RepresentationFailure> {
         let mut failures = Vec::new();
         for representation in &self.representations {
             let result = representation
@@ -546,7 +549,11 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
                 .close_and_wait(self.config.finalization_timeout)
                 .await;
             if let Err(error) = result {
-                failures.push(RepresentationFailure::new(representation.scheme, operation, error));
+                failures.push(RepresentationFailure::new(
+                    representation.scheme,
+                    operation,
+                    error,
+                ));
             }
         }
         failures
@@ -686,12 +693,15 @@ async fn fetch_key_set<P: KeyProvider>(
         config.drm_systems.clone()
     };
 
+    let encryption_schemes = concrete_schemes(config.encryption_scheme).to_vec();
+
     info!(content_id = %config.content_id, "Fetching encryption keys from provider");
     provider
         .fetch_keys(&KeyRequest {
             content_id: config.content_id.clone(),
             requested_tiers,
             drm_systems,
+            encryption_schemes,
         })
         .await
 }
@@ -726,9 +736,8 @@ async fn create_control_dir(config: &PackagingSessionConfig) -> Result<PathBuf> 
         .control_dir
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join("drmpack-control"));
-    tokio::fs::create_dir_all(&parent).await?;
     let control_dir = parent.join(format!("{}-{}", config.content_id, Uuid::new_v4()));
-    tokio::fs::create_dir(&control_dir).await?;
+    tokio::fs::create_dir_all(&control_dir).await?;
 
     #[cfg(unix)]
     {
@@ -783,11 +792,7 @@ async fn spawn_representation(
 }
 
 fn concrete_schemes(mode: EncryptionScheme) -> &'static [EncryptionScheme] {
-    match mode {
-        EncryptionScheme::Cenc => &[EncryptionScheme::Cenc],
-        EncryptionScheme::Cbcs => &[EncryptionScheme::Cbcs],
-        EncryptionScheme::Dual => &[EncryptionScheme::Cenc, EncryptionScheme::Cbcs],
-    }
+    mode.concrete_schemes()
 }
 
 async fn write_representation(
@@ -829,7 +834,11 @@ async fn shutdown_representations(
             .close_and_wait(finalization_timeout)
             .await
         {
-            failures.push(RepresentationFailure::new(scheme, PackagingOperation::Close, error));
+            failures.push(RepresentationFailure::new(
+                scheme,
+                PackagingOperation::Close,
+                error,
+            ));
         }
     }
     failures

@@ -4,10 +4,10 @@
 
 **Blocked by:** 01 (Tracer), 04 (Dual Encryption)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Upgrade `KeyRequest` and `KeySet` in `src/key.rs` to support `EncryptionScheme` key differentiation
-- [ ] CPIX request XML builder: construct CPIX 2.3 document (`urn:dashif:org:cpix`, `urn:ietf:params:xml:ns:keyprov:pskc`)
-- [ ] Async HTTP client (`reqwest`) executing POST request to provider endpoint
-- [ ] CPIX response XML parser: extract ContentKeys (`<pskc:PlainValue>`), KIDs, and PSSH elements for Widevine, FairPlay, and PlayReady
-- [ ] Unit & integration tests with mock CPIX HTTP server
+- [x] Upgrade `KeyRequest` and `KeySet` in `src/key.rs` to support `EncryptionScheme` key differentiation
+- [x] CPIX request XML builder: construct CPIX 2.3 document (`urn:dashif:org:cpix`, `urn:ietf:params:xml:ns:keyprov:pskc`)
+- [x] Async HTTP client (`reqwest`) executing POST request to provider endpoint
+- [x] CPIX response XML parser: extract ContentKeys (`<pskc:PlainValue>`), KIDs, and PSSH elements for Widevine, FairPlay, and PlayReady
+- [x] Unit & integration tests with mock CPIX HTTP server
