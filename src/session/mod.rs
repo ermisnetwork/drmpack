@@ -1,12 +1,12 @@
+pub mod cluster;
+pub use cluster::{Representation, RepresentationCluster};
+
 use crate::error::{
     DrmpackError, PackagingOperation, PackagingSessionFailure, RepresentationFailure, Result,
 };
-use crate::gpac::process::{GpacProcess, GpacProcessConfig};
-use crate::gpac::xml::{GpacDrmConfig, GpacDrmXmlGenerator};
-use crate::key::{KeyProvider, KeyRequest, KeySet};
+use crate::key::{KeyPolicyEngine, KeyProvider, KeySet};
 use crate::types::{
-    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, QualityTier,
-    Rendition, Segment, TrackType,
+    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, Rendition, Segment,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -16,6 +16,7 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
@@ -161,11 +162,6 @@ enum SessionState {
     Failed,
 }
 
-struct Representation {
-    scheme: EncryptionScheme,
-    gpac: Arc<Mutex<GpacProcess>>,
-}
-
 #[derive(Debug)]
 struct Lifecycle {
     state: SessionState,
@@ -199,11 +195,12 @@ pub struct PackagingSession<P: KeyProvider + 'static> {
     config: PackagingSessionConfig,
     _key_provider: P,
     key_set: KeySet,
-    representations: Vec<Representation>,
+    cluster: Arc<RepresentationCluster>,
     control_dir: PathBuf,
     lifecycle: Arc<Mutex<Lifecycle>>,
     is_terminal: Arc<AtomicBool>,
     heartbeat_tx: Option<mpsc::Sender<()>>,
+    cancellation_token: CancellationToken,
     watchdog_handle: Option<JoinHandle<()>>,
 }
 
@@ -211,14 +208,7 @@ impl<P: KeyProvider + 'static> std::fmt::Debug for PackagingSession<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PackagingSession")
             .field("config", &self.config)
-            .field(
-                "representations",
-                &self
-                    .representations
-                    .iter()
-                    .map(|representation| representation.scheme)
-                    .collect::<Vec<_>>(),
-            )
+            .field("representations", &self.cluster.schemes())
             .finish_non_exhaustive()
     }
 }
@@ -235,72 +225,42 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         let control_dir = match create_control_dir(&config).await {
             Ok(control_dir) => control_dir,
             Err(error) => {
-                rollback_creation(&config.output_dir, output_dir_created, None).await;
+                if output_dir_created {
+                    let _ = tokio::fs::remove_dir_all(&config.output_dir).await;
+                }
                 return Err(error);
             }
         };
 
-        let schemes = concrete_schemes(config.encryption_scheme);
-        let mut representations = Vec::with_capacity(schemes.len());
-
-        for &scheme in schemes {
-            let output_dir = if is_dual {
-                config.output_dir.join(scheme.to_string())
-            } else {
-                config.output_dir.clone()
-            };
-            if let Err(error) = tokio::fs::create_dir_all(&output_dir).await {
-                let shutdown_failures =
-                    shutdown_representations(&mut representations, config.finalization_timeout)
-                        .await;
-                rollback_creation(&config.output_dir, output_dir_created, Some(&control_dir)).await;
-                return Err(creation_failure(
-                    scheme,
-                    DrmpackError::Io(error),
-                    shutdown_failures,
-                ));
-            }
-
-            let drm_path = control_dir.join(format!("{scheme}.xml"));
-            let result =
-                spawn_representation(&config, &key_set, scheme, &output_dir, &drm_path).await;
-            match result {
-                Ok(representation) => representations.push(representation),
-                Err(error) => {
-                    let shutdown_failures =
-                        shutdown_representations(&mut representations, config.finalization_timeout)
-                            .await;
-                    rollback_creation(&config.output_dir, output_dir_created, Some(&control_dir))
-                        .await;
-                    return Err(creation_failure(scheme, error, shutdown_failures));
-                }
-            }
-        }
+        let cluster = Arc::new(
+            RepresentationCluster::spawn(&config, &key_set, &control_dir, output_dir_created)
+                .await?,
+        );
 
         let lifecycle = Arc::new(Mutex::new(Lifecycle::new()));
         let is_terminal = Arc::new(AtomicBool::new(false));
-        let (heartbeat_tx, watchdog_handle) = build_watchdog(
-            config.session_timeout,
-            config.finalization_timeout,
-            config.auto_cleanup.then(|| config.output_dir.clone()),
-            control_dir.clone(),
-            Arc::clone(&lifecycle),
-            Arc::clone(&is_terminal),
-            representations
-                .iter()
-                .map(|representation| (representation.scheme, Arc::clone(&representation.gpac)))
-                .collect(),
-        );
+        let cancellation_token = CancellationToken::new();
+        let (heartbeat_tx, watchdog_handle) = build_watchdog(WatchdogContext {
+            timeout: config.session_timeout,
+            finalization_timeout: config.finalization_timeout,
+            output_dir_for_cleanup: config.auto_cleanup.then(|| config.output_dir.clone()),
+            control_dir: control_dir.clone(),
+            lifecycle: Arc::clone(&lifecycle),
+            is_terminal: Arc::clone(&is_terminal),
+            cluster: Arc::clone(&cluster),
+            cancellation_token: cancellation_token.clone(),
+        });
 
         Ok(Self {
             config,
             _key_provider: key_provider,
             key_set,
-            representations,
+            cluster,
             control_dir,
             lifecycle,
             is_terminal,
             heartbeat_tx,
+            cancellation_token,
             watchdog_handle,
         })
     }
@@ -324,27 +284,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         self.ensure_active().await?;
         self.ping_heartbeat();
 
-        let write_results = match self.representations.as_slice() {
-            [] => Vec::new(),
-            [representation] => vec![write_representation(representation, bytes).await],
-            [first, second] => {
-                let (first_result, second_result) = tokio::join!(
-                    write_representation(first, bytes),
-                    write_representation(second, bytes),
-                );
-                vec![first_result, second_result]
-            }
-            _ => unreachable!("PackagingSession supports at most CENC and CBCS Representations"),
-        };
-        let failures = write_results
-            .into_iter()
-            .filter_map(|(scheme, result)| {
-                result.err().map(|error| {
-                    RepresentationFailure::new(scheme, PackagingOperation::Write, error)
-                })
-            })
-            .collect();
-
+        let failures = self.cluster.write_data(bytes).await;
         self.finish_operation_failures(failures).await
     }
 
@@ -360,18 +300,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
             }
         }
 
-        let mut failures = Vec::new();
-        for representation in &self.representations {
-            let result = representation.gpac.lock().await.check_status();
-            if let Err(error) = result {
-                failures.push(RepresentationFailure::new(
-                    representation.scheme,
-                    PackagingOperation::Status,
-                    error,
-                ));
-            }
-        }
-
+        let failures = self.cluster.check_status().await;
         self.finish_operation_failures(failures).await
     }
 
@@ -379,25 +308,31 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     /// even when an earlier finalization fails.
     #[instrument(skip(self))]
     pub async fn close(&mut self) -> Result<()> {
-        let state = { self.lifecycle.lock().await.state };
-        match state {
+        self.cancellation_token.cancel();
+
+        let mut lifecycle = self.lifecycle.lock().await;
+        match lifecycle.state {
             SessionState::Closed => return Ok(()),
+            SessionState::Closing => return Ok(()),
             SessionState::Failed => {
-                self.stop_watchdog();
+                let err = lifecycle.failure_error();
+                drop(lifecycle);
                 let _ = self.cleanup_control_dir().await;
                 if self.config.auto_cleanup {
                     let _ = self.cleanup_output_dir().await;
                 }
-                return Err(self.lifecycle.lock().await.failure_error());
+                return Err(err);
             }
-            SessionState::Closing => return Ok(()),
             SessionState::Active => {
-                self.lifecycle.lock().await.state = SessionState::Closing;
+                lifecycle.state = SessionState::Closing;
             }
         }
 
         self.stop_watchdog();
-        let failures = self.close_representations(PackagingOperation::Close).await;
+        let failures = self
+            .cluster
+            .close(self.config.finalization_timeout, PackagingOperation::Close)
+            .await;
         let control_cleanup = self.cleanup_control_dir().await.err();
         let output_cleanup = if self.config.auto_cleanup {
             self.cleanup_output_dir().await.err()
@@ -406,19 +341,19 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         };
 
         if failures.is_empty() && control_cleanup.is_none() && output_cleanup.is_none() {
-            self.lifecycle.lock().await.state = SessionState::Closed;
+            lifecycle.state = SessionState::Closed;
             self.is_terminal.store(true, Ordering::Release);
             info!("PackagingSession closed successfully");
             Ok(())
         } else {
-            {
-                let mut lifecycle = self.lifecycle.lock().await;
-                lifecycle.state = SessionState::Failed;
-            }
+            lifecycle.state = SessionState::Failed;
+            let failure = Arc::new(
+                PackagingSessionFailure::from_failures(failures)
+                    .with_cleanup_failures(output_cleanup, control_cleanup),
+            );
+            lifecycle.terminal_failure = Some(Arc::clone(&failure));
             self.is_terminal.store(true, Ordering::Release);
-            Err(self
-                .record_new_failure(failures, output_cleanup, control_cleanup)
-                .await)
+            Err(DrmpackError::PackagingSession(failure))
         }
     }
 
@@ -429,7 +364,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         format: ManifestFormat,
     ) -> Result<PathBuf> {
         let is_dual = self.config.encryption_scheme == EncryptionScheme::Dual;
-        if scheme == EncryptionScheme::Dual || !self.has_representation(scheme) {
+        if scheme == EncryptionScheme::Dual || !self.cluster.has_scheme(scheme) {
             return Err(DrmpackError::InvalidConfig(format!(
                 "{} is not a Representation in this PackagingSession",
                 scheme
@@ -510,75 +445,46 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     }
 
     async fn fail_close(&self, mut failures: Vec<RepresentationFailure>) -> DrmpackError {
-        {
-            let mut lifecycle = self.lifecycle.lock().await;
-            if lifecycle.state == SessionState::Failed {
-                return lifecycle.failure_error();
-            }
-            lifecycle.state = SessionState::Failed;
-        }
-
         self.stop_watchdog();
-        failures.extend(self.close_representations(PackagingOperation::Close).await);
+
+        let mut lifecycle = self.lifecycle.lock().await;
+        if lifecycle.state == SessionState::Failed {
+            return lifecycle.failure_error();
+        }
+        lifecycle.state = SessionState::Failed;
+
+        failures.extend(
+            self.cluster
+                .close(self.config.finalization_timeout, PackagingOperation::Close)
+                .await,
+        );
         let control_cleanup = self.cleanup_control_dir().await.err();
         let output_cleanup = if self.config.auto_cleanup {
             self.cleanup_output_dir().await.err()
         } else {
             None
         };
-        self.record_new_failure(failures, output_cleanup, control_cleanup)
-            .await
-    }
-
-    async fn record_new_failure(
-        &self,
-        failures: Vec<RepresentationFailure>,
-        output_cleanup: Option<DrmpackError>,
-        control_cleanup: Option<DrmpackError>,
-    ) -> DrmpackError {
         let failure = Arc::new(
             PackagingSessionFailure::from_failures(failures)
                 .with_cleanup_failures(output_cleanup, control_cleanup),
         );
-        let mut lifecycle = self.lifecycle.lock().await;
         lifecycle.terminal_failure = Some(Arc::clone(&failure));
         self.is_terminal.store(true, Ordering::Release);
         DrmpackError::PackagingSession(failure)
     }
 
-    async fn close_representations(
-        &self,
-        operation: PackagingOperation,
-    ) -> Vec<RepresentationFailure> {
-        let mut failures = Vec::new();
-        for representation in &self.representations {
-            let result = representation
-                .gpac
-                .lock()
-                .await
-                .close_and_wait(self.config.finalization_timeout)
-                .await;
-            if let Err(error) = result {
-                failures.push(RepresentationFailure::new(
-                    representation.scheme,
-                    operation,
-                    error,
-                ));
-            }
-        }
-        failures
+    /// Access active representations managed in this cluster.
+    pub fn representations(&self) -> &[Representation] {
+        self.cluster.representations()
+    }
+
+    /// Access the underlying RepresentationCluster.
+    pub fn cluster(&self) -> &Arc<RepresentationCluster> {
+        &self.cluster
     }
 
     fn stop_watchdog(&self) {
-        if let Some(handle) = &self.watchdog_handle {
-            handle.abort();
-        }
-    }
-
-    fn has_representation(&self, scheme: EncryptionScheme) -> bool {
-        self.representations
-            .iter()
-            .any(|representation| representation.scheme == scheme)
+        self.cancellation_token.cancel();
     }
 
     fn single_scheme_manifest_path(&self, format: ManifestFormat) -> Result<PathBuf> {
@@ -640,6 +546,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
 
 impl<P: KeyProvider + 'static> Drop for PackagingSession<P> {
     fn drop(&mut self) {
+        self.cancellation_token.cancel();
         if let Some(handle) = &self.watchdog_handle {
             handle.abort();
         }
@@ -689,110 +596,33 @@ async fn fetch_key_set<P: KeyProvider>(
     config: &PackagingSessionConfig,
     provider: &P,
 ) -> Result<KeySet> {
-    let encrypted_renditions: Vec<&Rendition> =
-        config.renditions.iter().filter(|r| r.encrypted).collect();
+    let plan = KeyPolicyEngine::plan(
+        &config.content_id,
+        &config.renditions,
+        config.key_mapping_policy,
+        config.encryption_scheme,
+        &config.drm_systems,
+    );
 
-    // If all renditions are clear, bypass key acquisition entirely
-    if encrypted_renditions.is_empty() {
-        info!(
-            content_id = %config.content_id,
-            "All renditions are unencrypted; skipping key acquisition"
-        );
-        return Ok(KeySet::new());
-    }
-
-    let mut requested_quality_tiers = Vec::new();
-    match config.key_mapping_policy {
-        KeyMappingPolicy::PerTierAndTrack => {
-            for rendition in &encrypted_renditions {
-                let pair = (rendition.track_type, rendition.quality_tier.clone());
-                if !requested_quality_tiers.contains(&pair) {
-                    requested_quality_tiers.push(pair);
-                }
-            }
+    match plan.request {
+        Some(ref request) => {
+            info!(content_id = %config.content_id, "Fetching encryption keys from provider");
+            let fetched = provider.fetch_keys(request).await?;
+            KeyPolicyEngine::resolve(&plan, &config.renditions, config.encryption_scheme, fetched)
         }
-        KeyMappingPolicy::SharedVideoSingleAudio => {
-            let has_video = encrypted_renditions
-                .iter()
-                .any(|r| r.track_type == TrackType::Video);
-            let has_audio = encrypted_renditions
-                .iter()
-                .any(|r| r.track_type == TrackType::Audio);
-            if has_video {
-                requested_quality_tiers.push((TrackType::Video, QualityTier::hd()));
-            }
-            if has_audio {
-                requested_quality_tiers.push((TrackType::Audio, QualityTier::sd()));
-            }
-        }
-        KeyMappingPolicy::SharedAll => {
-            requested_quality_tiers.push((TrackType::Video, QualityTier::hd()));
+        None => {
+            info!(
+                content_id = %config.content_id,
+                "All renditions are unencrypted; skipping key acquisition"
+            );
+            KeyPolicyEngine::resolve(
+                &plan,
+                &config.renditions,
+                config.encryption_scheme,
+                KeySet::new(),
+            )
         }
     }
-
-    let drm_systems = if config.drm_systems.is_empty() {
-        vec![DrmSystem::Widevine]
-    } else {
-        config.drm_systems.clone()
-    };
-
-    let encryption_schemes = concrete_schemes(config.encryption_scheme).to_vec();
-
-    info!(content_id = %config.content_id, "Fetching encryption keys from provider");
-    let fetched_set = provider
-        .fetch_keys(&KeyRequest {
-            content_id: config.content_id.clone(),
-            requested_quality_tiers,
-            drm_systems,
-            encryption_schemes,
-        })
-        .await?;
-
-    let mut final_set = KeySet::new();
-
-    match config.key_mapping_policy {
-        KeyMappingPolicy::PerTierAndTrack => {
-            final_set.keys = fetched_set.keys;
-        }
-        KeyMappingPolicy::SharedVideoSingleAudio => {
-            for rendition in &encrypted_renditions {
-                for &scheme in concrete_schemes(config.encryption_scheme) {
-                    let source_tier = if rendition.track_type == TrackType::Video {
-                        QualityTier::hd()
-                    } else {
-                        QualityTier::sd()
-                    };
-                    if let Some(key) = fetched_set.get_key_for_scheme(
-                        scheme,
-                        rendition.track_type,
-                        &source_tier,
-                    ) {
-                        let mut k = key.clone();
-                        k.quality_tier = rendition.quality_tier.clone();
-                        final_set.insert_key(k);
-                    }
-                }
-            }
-        }
-        KeyMappingPolicy::SharedAll => {
-            for rendition in &encrypted_renditions {
-                for &scheme in concrete_schemes(config.encryption_scheme) {
-                    if let Some(key) = fetched_set
-                        .get_key_for_scheme(scheme, TrackType::Video, &QualityTier::hd())
-                        .or_else(|| fetched_set.keys.values().next())
-                    {
-                        let mut k = key.clone();
-                        k.track_type = rendition.track_type;
-                        k.quality_tier = rendition.quality_tier.clone();
-                        final_set.insert_key(k);
-                    }
-                }
-            }
-        }
-    }
-
-    final_set.pssh = fetched_set.pssh;
-    Ok(final_set)
 }
 
 async fn prepare_output_dir(output_dir: &Path, is_dual: bool) -> Result<bool> {
@@ -804,11 +634,14 @@ async fn prepare_output_dir(output_dir: &Path, is_dual: bool) -> Result<bool> {
                     output_dir.display()
                 )));
             }
-            if is_dual && std::fs::read_dir(output_dir)?.next().is_some() {
-                return Err(DrmpackError::InvalidConfig(format!(
-                    "Dual PackagingSession output directory '{}' must be empty",
-                    output_dir.display()
-                )));
+            if is_dual {
+                let mut entries = tokio::fs::read_dir(output_dir).await?;
+                if entries.next_entry().await?.is_some() {
+                    return Err(DrmpackError::InvalidConfig(format!(
+                        "Dual PackagingSession output directory '{}' must be empty",
+                        output_dir.display()
+                    )));
+                }
             }
             Ok(false)
         }
@@ -837,134 +670,29 @@ async fn create_control_dir(config: &PackagingSessionConfig) -> Result<PathBuf> 
     Ok(control_dir)
 }
 
-async fn spawn_representation(
-    config: &PackagingSessionConfig,
-    key_set: &KeySet,
-    scheme: EncryptionScheme,
-    output_dir: &Path,
-    drm_path: &Path,
-) -> Result<Representation> {
-    debug_assert!(matches!(
-        scheme,
-        EncryptionScheme::Cenc | EncryptionScheme::Cbcs
-    ));
-
-    let mut drm_config = GpacDrmConfig::new(scheme);
-    for (index, rendition) in config.renditions.iter().enumerate() {
-        let mut track = crate::gpac::xml::GpacTrackConfig::new(
-            (index + 1) as u32,
-            rendition.track_type,
-            rendition.quality_tier.clone(),
-        );
-        track.encrypted = rendition.encrypted;
-        drm_config.tracks.push(track);
-    }
-    let xml = GpacDrmXmlGenerator::generate(key_set, &drm_config)?;
-    tokio::fs::write(drm_path, xml).await?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(drm_path, std::fs::Permissions::from_mode(0o600)).await?;
-    }
-
-    let mut process_config = GpacProcessConfig::new(drm_path, output_dir)
-        .with_latency_mode(config.latency_mode)
-        .with_segment_duration(config.segment_duration)
-        .with_chunk_duration(config.chunk_duration);
-    if let Some(bin) = &config.gpac_bin {
-        process_config = process_config.with_gpac_bin(bin);
-    }
-
-    Ok(Representation {
-        scheme,
-        gpac: Arc::new(Mutex::new(GpacProcess::spawn(process_config).await?)),
-    })
-}
-
-fn concrete_schemes(mode: EncryptionScheme) -> &'static [EncryptionScheme] {
-    mode.concrete_schemes()
-}
-
-async fn write_representation(
-    representation: &Representation,
-    bytes: &[u8],
-) -> (EncryptionScheme, Result<()>) {
-    (
-        representation.scheme,
-        representation.gpac.lock().await.write_data(bytes).await,
-    )
-}
-
-fn creation_failure(
-    scheme: EncryptionScheme,
-    error: DrmpackError,
-    mut shutdown_failures: Vec<RepresentationFailure>,
-) -> DrmpackError {
-    shutdown_failures.push(RepresentationFailure::new(
-        scheme,
-        PackagingOperation::Create,
-        error,
-    ));
-    DrmpackError::PackagingSession(Arc::new(PackagingSessionFailure::from_failures(
-        shutdown_failures,
-    )))
-}
-
-async fn shutdown_representations(
-    representations: &mut Vec<Representation>,
-    finalization_timeout: Duration,
-) -> Vec<RepresentationFailure> {
-    let mut failures = Vec::new();
-    for representation in representations.drain(..) {
-        let scheme = representation.scheme;
-        if let Err(error) = representation
-            .gpac
-            .lock()
-            .await
-            .close_and_wait(finalization_timeout)
-            .await
-        {
-            failures.push(RepresentationFailure::new(
-                scheme,
-                PackagingOperation::Close,
-                error,
-            ));
-        }
-    }
-    failures
-}
-
-async fn rollback_creation(
-    output_dir: &Path,
-    output_dir_created: bool,
-    control_dir: Option<&Path>,
-) {
-    if let Some(control_dir) = control_dir {
-        let _ = tokio::fs::remove_dir_all(control_dir).await;
-        if let Some(parent) = control_dir.parent() {
-            if parent.file_name().and_then(|n| n.to_str()) == Some("drmpack-control") {
-                let _ = tokio::fs::remove_dir(parent).await;
-            }
-        }
-    }
-    if output_dir_created {
-        let _ = tokio::fs::remove_dir_all(output_dir).await;
-    } else {
-        let _ = tokio::fs::remove_dir_all(output_dir.join("cenc")).await;
-        let _ = tokio::fs::remove_dir_all(output_dir.join("cbcs")).await;
-    }
-}
-
-fn build_watchdog(
+struct WatchdogContext {
     timeout: Option<Duration>,
     finalization_timeout: Duration,
     output_dir_for_cleanup: Option<PathBuf>,
     control_dir: PathBuf,
     lifecycle: Arc<Mutex<Lifecycle>>,
     is_terminal: Arc<AtomicBool>,
-    representations: Vec<(EncryptionScheme, Arc<Mutex<GpacProcess>>)>,
-) -> (Option<mpsc::Sender<()>>, Option<JoinHandle<()>>) {
+    cluster: Arc<RepresentationCluster>,
+    cancellation_token: CancellationToken,
+}
+
+fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<JoinHandle<()>>) {
+    let WatchdogContext {
+        timeout,
+        finalization_timeout,
+        output_dir_for_cleanup,
+        control_dir,
+        lifecycle,
+        is_terminal,
+        cluster,
+        cancellation_token,
+    } = ctx;
+
     let Some(timeout) = timeout else {
         return (None, None);
     };
@@ -973,25 +701,33 @@ fn build_watchdog(
     let handle = tokio::spawn(async move {
         loop {
             tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    debug!("Watchdog received cancellation signal");
+                    break;
+                }
                 heartbeat = rx.recv() => match heartbeat {
                     Some(()) => continue,
                     None => break,
                 },
                 _ = tokio::time::sleep(timeout) => {
-                    warn!(?timeout, "PackagingSession inactivity watchdog elapsed");
-                    {
-                        let mut lifecycle_guard = lifecycle.lock().await;
-                        if lifecycle_guard.state != SessionState::Active {
-                            break;
-                        }
-                        lifecycle_guard.state = SessionState::Failed;
+                    if cancellation_token.is_cancelled() {
+                        break;
                     }
 
-                    let mut failures = representations
-                        .iter()
-                        .map(|(scheme, _)| {
+                    let mut lifecycle_guard = lifecycle.lock().await;
+                    if lifecycle_guard.state != SessionState::Active {
+                        break;
+                    }
+                    lifecycle_guard.state = SessionState::Failed;
+
+                    warn!(?timeout, "PackagingSession inactivity watchdog elapsed");
+
+                    let mut failures = cluster
+                        .schemes()
+                        .into_iter()
+                        .map(|scheme| {
                             RepresentationFailure::new(
-                                *scheme,
+                                scheme,
                                 PackagingOperation::Watchdog,
                                 DrmpackError::Session(
                                     "PackagingSession inactivity watchdog elapsed".into(),
@@ -999,20 +735,15 @@ fn build_watchdog(
                             )
                         })
                         .collect::<Vec<_>>();
-                    for (scheme, process) in representations {
-                        if let Err(error) = process
-                            .lock()
-                            .await
-                            .close_and_wait(finalization_timeout.min(WATCHDOG_FINALIZATION_TIMEOUT))
-                            .await
-                        {
-                            failures.push(RepresentationFailure::new(
-                                scheme,
-                                PackagingOperation::Watchdog,
-                                error,
-                            ));
-                        }
-                    }
+
+                    let close_failures = cluster
+                        .close(
+                            finalization_timeout.min(WATCHDOG_FINALIZATION_TIMEOUT),
+                            PackagingOperation::Watchdog,
+                        )
+                        .await;
+                    failures.extend(close_failures);
+
                     let control_cleanup = tokio::fs::remove_dir_all(&control_dir).await.err().map(|error| {
                         DrmpackError::Io(std::io::Error::new(
                             error.kind(),
@@ -1022,6 +753,7 @@ fn build_watchdog(
                             ),
                         ))
                     });
+
                     let output_cleanup = match output_dir_for_cleanup {
                         Some(output_dir) => tokio::fs::remove_dir_all(&output_dir).await.err().map(|error| {
                             DrmpackError::Io(std::io::Error::new(
@@ -1034,7 +766,7 @@ fn build_watchdog(
                         }),
                         None => None,
                     };
-                    let mut lifecycle_guard = lifecycle.lock().await;
+
                     lifecycle_guard.terminal_failure = Some(Arc::new(
                         PackagingSessionFailure::from_failures(failures)
                             .with_cleanup_failures(output_cleanup, control_cleanup),
@@ -1045,6 +777,7 @@ fn build_watchdog(
             }
         }
     });
+
     (Some(tx), Some(handle))
 }
 
@@ -1214,9 +947,7 @@ mod tests {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
         let config = PackagingSessionConfig::new("test")
             .with_rendition(rendition().clear())
-            .with_rendition(
-                Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2").clear(),
-            )
+            .with_rendition(Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2").clear())
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
 
@@ -1248,9 +979,7 @@ mod tests {
             .with_gpac_bin("gpac");
 
         // provider() only supplies Video HD key. No Audio key is provided.
-        let mut session = PackagingSession::create(config, provider())
-            .await
-            .unwrap();
+        let mut session = PackagingSession::create(config, provider()).await.unwrap();
 
         let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cenc.xml"))
             .await
@@ -1267,7 +996,14 @@ mod tests {
 
     #[tokio::test]
     async fn key_mapping_policy_shared_all() {
-        let video_sd = Rendition::video("v_sd", QualityTier::sd(), 854, 480, 1_500_000, "avc1.4d401f");
+        let video_sd = Rendition::video(
+            "v_sd",
+            QualityTier::sd(),
+            854,
+            480,
+            1_500_000,
+            "avc1.4d401f",
+        );
         let video_hd = rendition();
         let audio = Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2");
 
@@ -1298,7 +1034,14 @@ mod tests {
     #[tokio::test]
     async fn key_mapping_policy_shared_video_single_audio() {
         let video_hd = rendition();
-        let video_sd = Rendition::video("v_sd", QualityTier::sd(), 854, 480, 1_500_000, "avc1.4d401f");
+        let video_sd = Rendition::video(
+            "v_sd",
+            QualityTier::sd(),
+            854,
+            480,
+            1_500_000,
+            "avc1.4d401f",
+        );
         let audio_sd = Rendition::audio("a_sd", QualityTier::sd(), 128_000, "mp4a.40.2");
         let audio_hd = Rendition::audio("a_hd", QualityTier::hd(), 256_000, "mp4a.40.2");
 
@@ -1313,15 +1056,33 @@ mod tests {
         let kid_audio = KeyID::new(Uuid::from_bytes([0x02; 16]));
 
         let provider = RawKeyProvider::new()
-            .with_key(ContentKey::new(kid_video, [0x11; 16], QualityTier::hd(), TrackType::Video))
-            .with_key(ContentKey::new(kid_audio, [0x22; 16], QualityTier::sd(), TrackType::Audio));
+            .with_key(ContentKey::new(
+                kid_video,
+                [0x11; 16],
+                QualityTier::hd(),
+                TrackType::Video,
+            ))
+            .with_key(ContentKey::new(
+                kid_audio,
+                [0x22; 16],
+                QualityTier::sd(),
+                TrackType::Audio,
+            ));
 
         let key_set = fetch_key_set(&config, &provider).await.unwrap();
 
-        let v_hd = key_set.get_key(TrackType::Video, &QualityTier::hd()).unwrap();
-        let v_sd = key_set.get_key(TrackType::Video, &QualityTier::sd()).unwrap();
-        let a_sd = key_set.get_key(TrackType::Audio, &QualityTier::sd()).unwrap();
-        let a_hd = key_set.get_key(TrackType::Audio, &QualityTier::hd()).unwrap();
+        let v_hd = key_set
+            .get_key(TrackType::Video, &QualityTier::hd())
+            .unwrap();
+        let v_sd = key_set
+            .get_key(TrackType::Video, &QualityTier::sd())
+            .unwrap();
+        let a_sd = key_set
+            .get_key(TrackType::Audio, &QualityTier::sd())
+            .unwrap();
+        let a_hd = key_set
+            .get_key(TrackType::Audio, &QualityTier::hd())
+            .unwrap();
 
         assert_eq!(v_hd.kid, kid_video);
         assert_eq!(v_sd.kid, kid_video);
@@ -1332,7 +1093,14 @@ mod tests {
     #[tokio::test]
     async fn key_mapping_policy_per_tier_and_track() {
         let video_hd = rendition();
-        let video_sd = Rendition::video("v_sd", QualityTier::sd(), 854, 480, 1_500_000, "avc1.4d401f");
+        let video_sd = Rendition::video(
+            "v_sd",
+            QualityTier::sd(),
+            854,
+            480,
+            1_500_000,
+            "avc1.4d401f",
+        );
 
         let config = PackagingSessionConfig::new("test")
             .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
@@ -1343,17 +1111,105 @@ mod tests {
         let kid_sd = KeyID::new(Uuid::from_bytes([0x02; 16]));
 
         let provider = RawKeyProvider::new()
-            .with_key(ContentKey::new(kid_hd, [0x11; 16], QualityTier::hd(), TrackType::Video))
-            .with_key(ContentKey::new(kid_sd, [0x22; 16], QualityTier::sd(), TrackType::Video));
+            .with_key(ContentKey::new(
+                kid_hd,
+                [0x11; 16],
+                QualityTier::hd(),
+                TrackType::Video,
+            ))
+            .with_key(ContentKey::new(
+                kid_sd,
+                [0x22; 16],
+                QualityTier::sd(),
+                TrackType::Video,
+            ));
 
         let key_set = fetch_key_set(&config, &provider).await.unwrap();
 
-        let v_hd = key_set.get_key(TrackType::Video, &QualityTier::hd()).unwrap();
-        let v_sd = key_set.get_key(TrackType::Video, &QualityTier::sd()).unwrap();
+        let v_hd = key_set
+            .get_key(TrackType::Video, &QualityTier::hd())
+            .unwrap();
+        let v_sd = key_set
+            .get_key(TrackType::Video, &QualityTier::sd())
+            .unwrap();
 
         assert_eq!(v_hd.kid, kid_hd);
         assert_eq!(v_sd.kid, kid_sd);
         assert_ne!(v_hd.kid, v_sd.kid);
     }
-}
 
+    #[tokio::test]
+    async fn test_watchdog_cancellation_on_close_prevents_race() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(rendition())
+            .with_output_dir(&output_dir)
+            .with_gpac_bin("gpac")
+            .with_session_timeout(Duration::from_millis(50));
+
+        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+
+        // Close immediately, which cancels the token
+        let _ = session.close().await;
+
+        // Sleep longer than the watchdog timeout
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Session must remain Closed, not overwritten by Watchdog failure
+        assert!(session.is_closed());
+        let _ = session.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_inactivity_timeout_triggers_failure() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(rendition())
+            .with_output_dir(&output_dir)
+            .with_gpac_bin("gpac")
+            .with_session_timeout(Duration::from_millis(50));
+
+        let session = PackagingSession::create(config, provider()).await.unwrap();
+
+        // Wait for inactivity watchdog to fire
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let status = session.check_status().await;
+        assert!(status.is_err());
+        let DrmpackError::PackagingSession(failure) = status.unwrap_err() else {
+            panic!("Expected PackagingSession failure from watchdog");
+        };
+        assert!(failure
+            .cenc
+            .iter()
+            .any(|f| f.operation == PackagingOperation::Watchdog));
+        let _ = session.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_watchdog_timeout_concurrent_with_close() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(rendition())
+            .with_output_dir(&output_dir)
+            .with_gpac_bin("gpac")
+            .with_session_timeout(Duration::from_millis(30));
+
+        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+
+        // Sleep sufficiently for watchdog to fire
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let close_res = session.close().await;
+        assert!(close_res.is_err());
+        let DrmpackError::PackagingSession(failure) = close_res.unwrap_err() else {
+            panic!("Expected structured PackagingSession failure on close after watchdog timeout");
+        };
+        assert!(failure
+            .cenc
+            .iter()
+            .any(|f| f.operation == PackagingOperation::Watchdog));
+        assert!(session.is_closed(), "Session must be closed");
+        let _ = session.cleanup().await;
+    }
+}

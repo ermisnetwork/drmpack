@@ -48,6 +48,10 @@ _Avoid_: DRM server, key server, license server
 The pluggable trait for key acquisition. Built-in implementations: CPIX (generic), SPEKE v2 (AWS), Axinom, RawKey (testing/development).
 _Avoid_: Key source, key fetcher
 
+**Axinom KeyProvider**:
+The built-in KeyProvider targeting Axinom's Key Service API via SPEKE v2 over CPIX 2.3 (`https://key-server-management.axprod.net/api/SpekeV2`). Authenticates using HTTP Basic Auth with Tenant ID and Management Key (`Authorization: Basic <base64(tenant_id:management_key)>`), supports `overrideKeyIds` configuration, surfaces `X-AxDRM-ErrorMessage` diagnostics on non-200 responses, and maps homogeneous or dual-scheme requests into scheme-aware `KeySet`.
+_Avoid_: Axinom client, Axinom adapter
+
 **License proxy**:
 An async handler function that forwards a player's license request to the Provider and returns the response. Media-server mounts it on an HTTP route; auth is media-server's responsibility.
 _Avoid_: License server, license endpoint
@@ -60,6 +64,14 @@ _Avoid_: Encryption metadata, DRM tags, key header
 The orchestration policy governing how ContentKeys are assigned across Renditions — `SharedAll` (single key for all tracks, default), `SharedVideoSingleAudio` (one video key, one audio key), or `PerTierAndTrack` (granular key per QualityTier and track type per ADR-0003).
 _Avoid_: Key allocation, key strategy, tier mode
 
+**KeyPolicyEngine**:
+The two-phase planner and resolver that decouples KeyMappingPolicy evaluation, provider key requests, and key replication across Renditions from session lifecycle.
+_Avoid_: Key allocator, key manager
+
+**KeyPlan**:
+The intermediate execution plan computed during Phase 1 of KeyPolicyEngine planning, holding the optional KeyRequest and mapping source criteria.
+_Avoid_: Key blueprint, key spec
+
 **Selective Encryption**:
 The capability to encrypt a subset of Renditions while passing others through unencrypted (Clear Renditions, e.g. unencrypted audio or clear SD preview). Clear Renditions bypass GPAC cecrypt and emit no DRM signaling in manifests.
 _Avoid_: Partial encryption, hybrid DRM, split encryption
@@ -69,6 +81,10 @@ _Avoid_: Partial encryption, hybrid DRM, split encryption
 **Representation**:
 An independently encrypted and packaged form of the same media, identified by a concrete EncryptionScheme. A Dual PackagingSession produces one CENC Representation and one CBCS Representation.
 _Avoid_: Branch, stream
+
+**RepresentationCluster**:
+The coordinated group of one or more active Representations managed together for a PackagingSession (e.g. CENC and CBCS in Dual mode), handling joint media fan-out, lifecycle, and teardown.
+_Avoid_: Pipeline, worker pool, process group, job
 
 **Control directory**:
 Private session-scoped storage for packaging control-plane material, kept separate from the Ramdisk delivery output.

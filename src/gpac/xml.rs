@@ -161,7 +161,12 @@ impl GpacDrmXmlGenerator {
     }
 
     fn write_clear_track(xml: &mut String, track_id: u32) -> Result<()> {
-        writeln!(xml, r#"  <CrypTrack trackID="{}" IsEncrypted="0"/>"#, track_id).unwrap();
+        writeln!(
+            xml,
+            r#"  <CrypTrack trackID="{}" IsEncrypted="0"/>"#,
+            track_id
+        )
+        .unwrap();
         Ok(())
     }
 
@@ -581,9 +586,9 @@ mod tests {
             .with_track(1, TrackType::Video, QualityTier::hd())
             .with_clear_track(2, TrackType::Audio, QualityTier::sd());
 
-        let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation must succeed");
+        let xml =
+            GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation must succeed");
         assert!(xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="1""#));
         assert!(xml.contains(r#"<CrypTrack trackID="2" IsEncrypted="0"/>"#));
     }
 }
-

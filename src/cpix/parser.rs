@@ -370,6 +370,7 @@ impl CpixResponseParser {
             }
         }
 
+        let num_content_keys = content_keys.len();
         let mut key_set = KeySet::new();
 
         for raw_key in content_keys {
@@ -393,7 +394,24 @@ impl CpixResponseParser {
             };
 
             let matching_rule = usage_rule_by_kid.get(&kid).copied();
-            let matching_spec = spec_by_kid.get(&kid).copied();
+            let matching_spec = spec_by_kid.get(&kid).copied().or_else(|| {
+                if let Some(specs) = specs {
+                    if specs.len() == 1 && num_content_keys == 1 {
+                        specs.first()
+                    } else if let Some(scheme) = raw_key.scheme {
+                        let matches: Vec<_> = specs.iter().filter(|s| s.scheme == scheme).collect();
+                        if matches.len() == 1 {
+                            Some(matches[0])
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
 
             let scheme = raw_key.scheme.or_else(|| matching_spec.map(|s| s.scheme));
 
@@ -975,7 +993,9 @@ mod tests {
 
         let keyset = CpixResponseParser::parse(xml, None).unwrap();
         assert_eq!(keyset.len(), 1);
-        let key = keyset.get_key(TrackType::Video, &QualityTier::hd()).unwrap();
+        let key = keyset
+            .get_key(TrackType::Video, &QualityTier::hd())
+            .unwrap();
         assert_eq!(
             key.kid.0,
             Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()

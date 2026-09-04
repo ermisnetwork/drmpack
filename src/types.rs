@@ -159,7 +159,6 @@ pub enum KeyMappingPolicy {
     PerTierAndTrack,
 }
 
-
 /// A single rendition declaration (e.g. 720p@2Mbps).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rendition {

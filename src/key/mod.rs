@@ -11,6 +11,12 @@ use std::fmt;
 #[cfg(feature = "cpix")]
 pub use crate::cpix::CpixProvider;
 
+#[cfg(feature = "axinom")]
+pub use crate::axinom::AxinomProvider;
+
+pub mod policy;
+pub use policy::{KeyPlan, KeyPolicyEngine};
+
 /// 128-bit KeyID (KID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeyID(pub Uuid);
@@ -264,10 +270,7 @@ impl KeySet {
     }
 
     /// Query PSSH data associated with a specific EncryptionScheme.
-    pub fn pssh_for_scheme(
-        &self,
-        scheme: EncryptionScheme,
-    ) -> impl Iterator<Item = &PsshData> {
+    pub fn pssh_for_scheme(&self, scheme: EncryptionScheme) -> impl Iterator<Item = &PsshData> {
         self.pssh
             .iter()
             .filter(move |p| p.encryption_scheme.is_none_or(|s| s == scheme))

@@ -873,15 +873,12 @@ async fn test_cpix_provider_selective_encryption_clear_audio() {
         2_500_000,
         "avc1.4d401f",
     );
-    let audio_rendition = Rendition::audio(
-        "a_clear",
-        QualityTier::sd(),
-        128_000,
-        "mp4a.40.2",
-    ).clear();
+    let audio_rendition =
+        Rendition::audio("a_clear", QualityTier::sd(), 128_000, "mp4a.40.2").clear();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_cpix_selective_{}", Uuid::new_v4()));
-    let control_dir = std::env::temp_dir().join(format!("drmpack_control_selective_{}", Uuid::new_v4()));
+    let control_dir =
+        std::env::temp_dir().join(format!("drmpack_control_selective_{}", Uuid::new_v4()));
 
     let config = PackagingSessionConfig::new("cpix-selective-content")
         .with_rendition(video_rendition)
@@ -907,11 +904,13 @@ async fn test_cpix_provider_selective_encryption_clear_audio() {
     // Verify CPIX request body only requested Video, since Audio is unencrypted
     let requests = server.requests().await;
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].body.contains(r#"intendedTrackType="UHD,HD""#) || requests[0].body.contains(r#"intendedTrackType="HD""#));
+    assert!(
+        requests[0].body.contains(r#"intendedTrackType="UHD,HD""#)
+            || requests[0].body.contains(r#"intendedTrackType="HD""#)
+    );
     assert!(!requests[0].body.contains(r#"intendedTrackType="AUDIO""#));
 
     let _ = session.close().await;
     let _ = session.cleanup().await;
     let _ = tokio::fs::remove_dir_all(&out_dir).await;
 }
-

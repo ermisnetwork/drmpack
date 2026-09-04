@@ -112,11 +112,17 @@ impl CpixRequestBuilder {
                 let system_id = Uuid::from_bytes(drm.system_id()).hyphenated().to_string();
                 writeln!(
                     xml,
-                    r#"    <cpix:DRMSystem kid="{}" systemId="{}"/>"#,
+                    r#"    <cpix:DRMSystem kid="{}" systemId="{}">"#,
                     spec.kid.0.hyphenated(),
                     system_id
                 )
                 .unwrap();
+                if *drm == DrmSystem::FairPlay {
+                    writeln!(xml, "      <cpix:URIExtXKey/>").unwrap();
+                } else {
+                    writeln!(xml, "      <cpix:PSSH/>").unwrap();
+                }
+                writeln!(xml, "    </cpix:DRMSystem>").unwrap();
             }
         }
         writeln!(xml, "  </cpix:DRMSystemList>").unwrap();

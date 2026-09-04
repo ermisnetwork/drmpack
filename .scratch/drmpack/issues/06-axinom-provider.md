@@ -4,9 +4,9 @@
 
 **Blocked by:** 05 (CPIX KeyProvider)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Axinom authentication: HTTP Basic Auth with Tenant ID and Key Service Management Key
-- [ ] Axinom request configuration (`overrideKeyIds` query param, SPEKE v2 headers)
-- [ ] Axinom KeyProvider request/response parsing building upon CPIX 2.3 engine
-- [ ] Integration tests against mock HTTP server replay
+- [x] Axinom authentication: HTTP Basic Auth with Tenant ID and Key Service Management Key
+- [x] Axinom request configuration (`overrideKeyIds` query param, SPEKE v2 headers)
+- [x] Axinom KeyProvider request/response parsing building upon CPIX 2.3 engine
+- [x] Integration tests against mock HTTP server replay
