@@ -32,9 +32,9 @@ pub enum LogSeverity {
 /// All other lines default to `LogSeverity::Debug`.
 pub fn classify_log_severity(line: &str) -> LogSeverity {
     let lower = line.to_ascii_lowercase();
-    if lower.contains("error") || lower.contains("failed to") {
+    if lower.contains("error") || lower.contains("failed to") || lower.contains("fatal") {
         LogSeverity::Error
-    } else if lower.contains("warning") {
+    } else if lower.contains("warning") || lower.contains("warn") {
         LogSeverity::Warn
     } else if lower.contains("info") {
         LogSeverity::Info
@@ -140,7 +140,7 @@ pub struct GpacProcess {
     status_rx: watch::Receiver<Option<ProcessExitStatus>>,
     pub(crate) exit_tx: broadcast::Sender<ProcessExitStatus>,
     pub(crate) kill_token: CancellationToken,
-    supervisor_handle: Option<JoinHandle<()>>,
+    _supervisor_handle: Option<JoinHandle<()>>,
 }
 
 impl GpacProcess {
@@ -179,21 +179,37 @@ impl GpacProcess {
         )));
         let buffer_clone = Arc::clone(&stderr_buffer);
 
-        // Background task to read stderr line-by-line and forward to tracing with severity parsing
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                match classify_log_severity(&line) {
-                    LogSeverity::Error => error!(target: "gpac", "{}", line),
-                    LogSeverity::Warn => warn!(target: "gpac", "{}", line),
-                    LogSeverity::Info => info!(target: "gpac", "{}", line),
-                    LogSeverity::Debug => debug!(target: "gpac", "{}", line),
+        // Background task to read stderr line-by-line using raw byte buffers
+        // to prevent premature reader termination on non-UTF-8 bytes.
+        let stderr_handle = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line_bytes = Vec::new();
+            loop {
+                line_bytes.clear();
+                match reader.read_until(b'\n', &mut line_bytes).await {
+                    Ok(0) => break, // EOF reached
+                    Ok(_) => {
+                        let line_str = String::from_utf8_lossy(&line_bytes);
+                        let trimmed = line_str.trim_end_matches(&['\r', '\n'][..]);
+                        if !trimmed.is_empty() {
+                            match classify_log_severity(trimmed) {
+                                LogSeverity::Error => error!(target: "gpac", "{}", trimmed),
+                                LogSeverity::Warn => warn!(target: "gpac", "{}", trimmed),
+                                LogSeverity::Info => info!(target: "gpac", "{}", trimmed),
+                                LogSeverity::Debug => debug!(target: "gpac", "{}", trimmed),
+                            }
+                            let mut buf = buffer_clone.lock().unwrap();
+                            if buf.len() >= DEFAULT_STDERR_RING_BUFFER_CAPACITY {
+                                buf.pop_front();
+                            }
+                            buf.push_back(trimmed.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Error reading GPAC stderr: {e}");
+                        break;
+                    }
                 }
-                let mut buf = buffer_clone.lock().unwrap();
-                if buf.len() >= DEFAULT_STDERR_RING_BUFFER_CAPACITY {
-                    buf.pop_front();
-                }
-                buf.push_back(line);
             }
         });
 
@@ -234,6 +250,9 @@ impl GpacProcess {
                 }
             };
 
+            // Allow stderr reader task to finish draining remaining buffered stderr lines from the pipe
+            let _ = tokio::time::timeout(Duration::from_millis(200), stderr_handle).await;
+
             is_running_clone.store(false, Ordering::Release);
             let _ = status_tx.send(Some(exit_status.clone()));
             let _ = exit_tx_clone.send(exit_status);
@@ -250,7 +269,7 @@ impl GpacProcess {
             status_rx,
             exit_tx,
             kill_token,
-            supervisor_handle: Some(supervisor_handle),
+            _supervisor_handle: Some(supervisor_handle),
         })
     }
 
@@ -405,9 +424,6 @@ impl Drop for GpacProcess {
         if self.is_running.load(Ordering::Acquire) {
             self.kill_token.cancel();
         }
-        if let Some(handle) = self.supervisor_handle.take() {
-            handle.abort();
-        }
     }
 }
 
@@ -475,8 +491,16 @@ mod tests {
             LogSeverity::Warn
         );
         assert_eq!(
-            classify_log_severity("warning: timestamp discontinuity"),
+            classify_log_severity("[Warn] DTS is smaller than previous PTS"),
             LogSeverity::Warn
+        );
+        assert_eq!(
+            classify_log_severity("warn: timestamp discontinuity"),
+            LogSeverity::Warn
+        );
+        assert_eq!(
+            classify_log_severity("FATAL error in filter chain"),
+            LogSeverity::Error
         );
         assert_eq!(
             classify_log_severity("[Info] Initializing GPAC core"),

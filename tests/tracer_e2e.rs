@@ -442,7 +442,9 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
     assert!(cenc_media_m3u8.contains(&format!(
         "URI=\"data:text/plain;base64,{expected_pssh_base64}\""
     )));
+    assert!(cenc_media_m3u8.contains("#EXT-X-ENDLIST"));
     assert!(cbcs_media_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"));
+    assert!(cbcs_media_m3u8.contains("#EXT-X-ENDLIST"));
 
     for (scheme, init_path, segment_path, expected_scheme) in [
         (

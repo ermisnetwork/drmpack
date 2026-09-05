@@ -279,18 +279,21 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     /// process accepted and flushed the same ordered bytes.
     #[instrument(skip(self, segment), fields(rendition_id = %segment.rendition_id, seq = segment.sequence_number))]
     pub async fn push_segment(&mut self, segment: Segment) -> Result<()> {
-        if !segment.is_init && !segment.data.is_empty() {
-            self.has_pushed_media.store(true, Ordering::Release);
-        }
-        self.push_bytes(&segment.data).await
+        let is_media = !segment.is_init && !segment.data.is_empty();
+        self.push_data(&segment.data, is_media).await
     }
 
     /// Push raw media bytes to every active Representation.
     #[instrument(skip(self, bytes), fields(len = bytes.len()))]
     pub async fn push_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        let is_media = !bytes.is_empty();
+        self.push_data(bytes, is_media).await
+    }
+
+    async fn push_data(&mut self, bytes: &[u8], is_media: bool) -> Result<()> {
         self.ensure_active().await?;
         self.ping_heartbeat();
-        if !bytes.is_empty() {
+        if is_media {
             self.has_pushed_media.store(true, Ordering::Release);
         }
 
@@ -303,6 +306,12 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         {
             let lifecycle = self.lifecycle.lock().await;
             if lifecycle.state == SessionState::Failed {
+                if let Some(ref failure) = lifecycle.terminal_failure {
+                    return Err(DrmpackError::PackagingSession(Arc::clone(failure)));
+                }
+                drop(lifecycle);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                let lifecycle = self.lifecycle.lock().await;
                 return Err(lifecycle.failure_error());
             }
             if lifecycle.state != SessionState::Active {
@@ -325,6 +334,11 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
             SessionState::Closed => return Ok(()),
             SessionState::Closing => return Ok(()),
             SessionState::Failed => {
+                if lifecycle.terminal_failure.is_none() {
+                    drop(lifecycle);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    lifecycle = self.lifecycle.lock().await;
+                }
                 let err = lifecycle.failure_error();
                 drop(lifecycle);
                 let _ = self.cleanup_control_dir().await;
@@ -466,10 +480,36 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     }
 
     async fn ensure_active(&self) -> Result<()> {
+        if self.cancellation_token.is_cancelled() {
+            let lifecycle = self.lifecycle.lock().await;
+            return match lifecycle.state {
+                SessionState::Failed => {
+                    if let Some(ref failure) = lifecycle.terminal_failure {
+                        Err(DrmpackError::PackagingSession(Arc::clone(failure)))
+                    } else {
+                        drop(lifecycle);
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        let lifecycle = self.lifecycle.lock().await;
+                        Err(lifecycle.failure_error())
+                    }
+                }
+                _ => Err(DrmpackError::Session("PackagingSession is closed".into())),
+            };
+        }
+
         let lifecycle = self.lifecycle.lock().await;
         match lifecycle.state {
             SessionState::Active => Ok(()),
-            SessionState::Failed => Err(lifecycle.failure_error()),
+            SessionState::Failed => {
+                if let Some(ref failure) = lifecycle.terminal_failure {
+                    Err(DrmpackError::PackagingSession(Arc::clone(failure)))
+                } else {
+                    drop(lifecycle);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let lifecycle = self.lifecycle.lock().await;
+                    Err(lifecycle.failure_error())
+                }
+            }
             SessionState::Closing | SessionState::Closed => {
                 Err(DrmpackError::Session("PackagingSession is closed".into()))
             }
@@ -486,6 +526,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
 
     async fn fail_close(&self, mut failures: Vec<RepresentationFailure>) -> DrmpackError {
         self.stop_watchdog();
+        self.cancellation_token.cancel();
 
         let mut lifecycle = self.lifecycle.lock().await;
         if lifecycle.state == SessionState::Failed {
@@ -804,11 +845,25 @@ pub async fn verify_hls_endlist(output_dir: &Path) -> Result<()> {
                         content.push('\n');
                     }
                     content.push_str("#EXT-X-ENDLIST\n");
-                    tokio::fs::write(&path, &content).await.map_err(|e| {
+
+                    // Atomic write-then-rename in the same directory to prevent CDN readers
+                    // from reading a partially written or truncated manifest.
+                    let temp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+                    tokio::fs::write(&temp_path, &content).await.map_err(|e| {
                         DrmpackError::Io(std::io::Error::new(
                             e.kind(),
                             format!(
-                                "Failed to write #EXT-X-ENDLIST to '{}': {e}",
+                                "Failed to write temp manifest '{}': {e}",
+                                temp_path.display()
+                            ),
+                        ))
+                    })?;
+                    tokio::fs::rename(&temp_path, &path).await.map_err(|e| {
+                        let _ = std::fs::remove_file(&temp_path);
+                        DrmpackError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!(
+                                "Failed to atomically rename manifest to '{}': {e}",
                                 path.display()
                             ),
                         ))
@@ -884,12 +939,20 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                     if cancellation_token.is_cancelled() {
                         break;
                     }
+                    cancellation_token.cancel();
 
-                    let mut lifecycle_guard = lifecycle.lock().await;
-                    if lifecycle_guard.state != SessionState::Active {
+                    let is_active = {
+                        let mut lifecycle_guard = lifecycle.lock().await;
+                        if lifecycle_guard.state == SessionState::Active {
+                            lifecycle_guard.state = SessionState::Failed;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !is_active {
                         break;
                     }
-                    lifecycle_guard.state = SessionState::Failed;
 
                     warn!(?timeout, "PackagingSession inactivity watchdog elapsed");
 
@@ -926,7 +989,7 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                     });
 
                     let output_cleanup = match output_dir_for_cleanup {
-                        Some(output_dir) => tokio::fs::remove_dir_all(&output_dir).await.err().map(|error| {
+                        Some(ref output_dir) => tokio::fs::remove_dir_all(output_dir).await.err().map(|error| {
                             DrmpackError::Io(std::io::Error::new(
                                 error.kind(),
                                 format!(
@@ -938,10 +1001,13 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                         None => None,
                     };
 
-                    lifecycle_guard.terminal_failure = Some(Arc::new(
-                        PackagingSessionFailure::from_failures(failures)
-                            .with_cleanup_failures(output_cleanup, control_cleanup),
-                    ));
+                    {
+                        let mut lifecycle_guard = lifecycle.lock().await;
+                        lifecycle_guard.terminal_failure = Some(Arc::new(
+                            PackagingSessionFailure::from_failures(failures)
+                                .with_cleanup_failures(output_cleanup, control_cleanup),
+                        ));
+                    }
                     is_terminal.store(true, Ordering::Release);
                     break;
                 }
@@ -949,12 +1015,20 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                     if cancellation_token.is_cancelled() {
                         break;
                     }
-                    let mut lifecycle_guard = lifecycle.lock().await;
-                    if lifecycle_guard.state != SessionState::Active {
+                    cancellation_token.cancel();
+
+                    let is_active = {
+                        let mut lifecycle_guard = lifecycle.lock().await;
+                        if lifecycle_guard.state == SessionState::Active {
+                            lifecycle_guard.state = SessionState::Failed;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !is_active {
                         break;
                     }
-                    lifecycle_guard.state = SessionState::Failed;
-                    cancellation_token.cancel();
 
                     let stderr = cluster.get_recent_stderr(scheme).await;
                     error!(
@@ -977,14 +1051,9 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                         RepresentationFailure::new(scheme, PackagingOperation::Supervisor, crash_error)
                     ];
 
-                    // Dual-mode symmetric fail-fast: immediately teardown remaining representation(s)
-                    let close_failures = cluster
-                        .close(
-                            finalization_timeout.min(WATCHDOG_FINALIZATION_TIMEOUT),
-                            PackagingOperation::Supervisor,
-                        )
-                        .await;
-                    failures.extend(close_failures);
+                    // Dual-mode symmetric fail-fast: immediately teardown remaining peer representation(s)
+                    let peer_failures = cluster.abort_peers(scheme).await;
+                    failures.extend(peer_failures);
 
                     let control_cleanup = tokio::fs::remove_dir_all(&control_dir).await.err().map(|error| {
                         DrmpackError::Io(std::io::Error::new(
@@ -997,7 +1066,7 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                     });
 
                     let output_cleanup = match output_dir_for_cleanup {
-                        Some(output_dir) => tokio::fs::remove_dir_all(&output_dir).await.err().map(|error| {
+                        Some(ref output_dir) => tokio::fs::remove_dir_all(output_dir).await.err().map(|error| {
                             DrmpackError::Io(std::io::Error::new(
                                 error.kind(),
                                 format!(
@@ -1009,10 +1078,13 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                         None => None,
                     };
 
-                    lifecycle_guard.terminal_failure = Some(Arc::new(
-                        PackagingSessionFailure::from_failures(failures)
-                            .with_cleanup_failures(output_cleanup, control_cleanup),
-                    ));
+                    {
+                        let mut lifecycle_guard = lifecycle.lock().await;
+                        lifecycle_guard.terminal_failure = Some(Arc::new(
+                            PackagingSessionFailure::from_failures(failures)
+                                .with_cleanup_failures(output_cleanup, control_cleanup),
+                        ));
+                    }
                     is_terminal.store(true, Ordering::Release);
                     break;
                 }
@@ -1687,8 +1759,68 @@ mod tests {
         let DrmpackError::PackagingSession(failure) = status.unwrap_err() else {
             panic!("Expected structured PackagingSession failure");
         };
-        assert!(failure.cenc.iter().any(|f| f.operation == PackagingOperation::Supervisor));
+        assert_eq!(failure.cenc.len(), 1, "CENC must have exactly 1 crash failure");
+        assert_eq!(failure.cbcs.len(), 1, "CBCS peer must have exactly 1 symmetric abort failure");
+        assert_eq!(failure.cenc[0].operation, PackagingOperation::Supervisor);
+        assert_eq!(failure.cbcs[0].operation, PackagingOperation::Supervisor);
+        assert!(matches!(failure.cenc[0].error, DrmpackError::ProcessCrashed { .. }));
 
         let _ = session.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_push_segment_init_only_does_not_require_endlist() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_init_only_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(rendition())
+            .with_output_dir(&output_dir)
+            .with_gpac_bin("gpac");
+
+        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        assert!(!session.has_pushed_media.load(Ordering::Acquire));
+
+        // Push only an initialization segment (is_init: true)
+        session
+            .push_segment(Segment {
+                rendition_id: "v1".into(),
+                sequence_number: 0,
+                duration_seconds: 0.0,
+                data: bytes::Bytes::new(),
+                is_init: true,
+            })
+            .await
+            .expect("Init segment write must succeed");
+
+        // Init segment must not mark has_pushed_media as true
+        assert!(!session.has_pushed_media.load(Ordering::Acquire));
+
+        let _ = session.close().await;
+        let _ = session.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_verify_hls_endlist_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("drmpack_ro_dir_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let media_path = dir.join("live_1.m3u8");
+        tokio::fs::write(&media_path, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg1.m4s\n")
+            .await
+            .unwrap();
+
+        // Revoke write permission from directory so atomic temp write fails
+        tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .await
+            .unwrap();
+
+        let res = verify_hls_endlist(&dir).await;
+        assert!(res.is_err());
+        assert!(matches!(res.unwrap_err(), DrmpackError::Io(_)));
+
+        // Restore permissions for cleanup
+        let _ = tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).await;
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }

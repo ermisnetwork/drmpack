@@ -317,6 +317,36 @@ impl RepresentationCluster {
             .collect()
     }
 
+    /// Immediately terminate all representations in this cluster via SIGKILL.
+    pub fn kill(&self) {
+        for rep in &self.representations {
+            rep.kill();
+        }
+    }
+
+    /// Perform immediate symmetric teardown when one representation crashes.
+    ///
+    /// The crashed representation is not re-closed. Surviving peer representations
+    /// are immediately killed via SIGKILL and awaited with a short reap timeout (500ms).
+    /// Returns failures for the surviving peer representations indicating they were aborted.
+    pub async fn abort_peers(&self, failed_scheme: EncryptionScheme) -> Vec<RepresentationFailure> {
+        let mut failures = Vec::new();
+        for rep in &self.representations {
+            if rep.scheme != failed_scheme {
+                rep.kill();
+                let _ = rep.close_and_wait(Duration::from_millis(500)).await;
+                failures.push(RepresentationFailure::new(
+                    rep.scheme,
+                    PackagingOperation::Supervisor,
+                    DrmpackError::Session(format!(
+                        "Peer representation '{failed_scheme}' terminated unexpectedly; representation aborted"
+                    )),
+                ));
+            }
+        }
+        failures
+    }
+
     /// Retrieve recent stderr lines captured for a specific representation.
     pub async fn get_recent_stderr(&self, scheme: EncryptionScheme) -> String {
         for rep in &self.representations {
