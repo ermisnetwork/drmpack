@@ -151,8 +151,7 @@ pub const DEFAULT_AXINOM_PLAYREADY_LICENSE_URL: &str =
     "https://drm-playready-licensing.axprod.net/AcquireLicense";
 
 /// Default Axinom FairPlay application certificate endpoint.
-pub const DEFAULT_AXINOM_FAIRPLAY_CERT_URL: &str =
-    "https://tools.axinom.com/FPScert/fairplay.cer";
+pub const DEFAULT_AXINOM_FAIRPLAY_CERT_URL: &str = "https://tools.axinom.com/FPScert/fairplay.cer";
 
 /// Configuration for the Axinom License Proxy endpoints and connection parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -598,9 +597,18 @@ mod tests {
     #[test]
     fn test_axinom_license_config_defaults() {
         let config = AxinomLicenseConfig::default();
-        assert_eq!(config.widevine_license_url, DEFAULT_AXINOM_WIDEVINE_LICENSE_URL);
-        assert_eq!(config.fairplay_license_url, DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL);
-        assert_eq!(config.playready_license_url, DEFAULT_AXINOM_PLAYREADY_LICENSE_URL);
+        assert_eq!(
+            config.widevine_license_url,
+            DEFAULT_AXINOM_WIDEVINE_LICENSE_URL
+        );
+        assert_eq!(
+            config.fairplay_license_url,
+            DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL
+        );
+        assert_eq!(
+            config.playready_license_url,
+            DEFAULT_AXINOM_PLAYREADY_LICENSE_URL
+        );
         assert_eq!(config.fairplay_cert_url, DEFAULT_AXINOM_FAIRPLAY_CERT_URL);
         assert_eq!(config.timeout, Duration::from_secs(10));
         assert!(config.headers.is_empty());
@@ -622,13 +630,28 @@ mod tests {
                 reqwest::header::HeaderValue::from_static("test-track-id"),
             );
 
-        assert_eq!(config.widevine_license_url(), "https://custom.axprod.net/widevine");
-        assert_eq!(config.fairplay_license_url(), "https://custom.axprod.net/fairplay");
-        assert_eq!(config.playready_license_url(), "https://custom.axprod.net/playready");
-        assert_eq!(config.fairplay_cert_url(), "https://custom.axprod.net/cert.cer");
+        assert_eq!(
+            config.widevine_license_url(),
+            "https://custom.axprod.net/widevine"
+        );
+        assert_eq!(
+            config.fairplay_license_url(),
+            "https://custom.axprod.net/fairplay"
+        );
+        assert_eq!(
+            config.playready_license_url(),
+            "https://custom.axprod.net/playready"
+        );
+        assert_eq!(
+            config.fairplay_cert_url(),
+            "https://custom.axprod.net/cert.cer"
+        );
         assert_eq!(config.timeout, Duration::from_secs(25));
         assert_eq!(
-            config.headers.get("x-custom-tracking").and_then(|v| v.to_str().ok()),
+            config
+                .headers
+                .get("x-custom-tracking")
+                .and_then(|v| v.to_str().ok()),
             Some("test-track-id")
         );
     }
@@ -644,7 +667,10 @@ mod tests {
         std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", "https://env.axprod.net/wv");
         std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", "https://env.axprod.net/fp");
         std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", "https://env.axprod.net/pr");
-        std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", "https://env.axprod.net/cert.der");
+        std::env::set_var(
+            "AXINOM_FAIRPLAY_CERT_URL",
+            "https://env.axprod.net/cert.der",
+        );
 
         let cfg = AxinomLicenseConfig::from_env().expect("from_env must succeed");
         assert_eq!(cfg.widevine_license_url, "https://env.axprod.net/wv");
@@ -653,10 +679,26 @@ mod tests {
         assert_eq!(cfg.fairplay_cert_url, "https://env.axprod.net/cert.der");
 
         // Restore
-        if let Some(v) = prev_wv { std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL"); }
-        if let Some(v) = prev_fp { std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL"); }
-        if let Some(v) = prev_pr { std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL"); }
-        if let Some(v) = prev_cert { std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", v); } else { std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL"); }
+        if let Some(v) = prev_wv {
+            std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
+        }
+        if let Some(v) = prev_fp {
+            std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL");
+        }
+        if let Some(v) = prev_pr {
+            std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL");
+        }
+        if let Some(v) = prev_cert {
+            std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
+        }
     }
 
     #[test]
@@ -667,22 +709,47 @@ mod tests {
         let prev_pr = std::env::var("AXINOM_PLAYREADY_LICENSE_URL").ok();
         let prev_cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL").ok();
 
-        std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", "https://override.axprod.net/wv");
+        std::env::set_var(
+            "AXINOM_WIDEVINE_LICENSE_URL",
+            "https://override.axprod.net/wv",
+        );
         std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL");
         std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL");
         std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
 
         let cfg = AxinomLicenseConfig::from_env().expect("partial from_env must succeed");
         assert_eq!(cfg.widevine_license_url, "https://override.axprod.net/wv");
-        assert_eq!(cfg.fairplay_license_url, DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL);
-        assert_eq!(cfg.playready_license_url, DEFAULT_AXINOM_PLAYREADY_LICENSE_URL);
+        assert_eq!(
+            cfg.fairplay_license_url,
+            DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL
+        );
+        assert_eq!(
+            cfg.playready_license_url,
+            DEFAULT_AXINOM_PLAYREADY_LICENSE_URL
+        );
         assert_eq!(cfg.fairplay_cert_url, DEFAULT_AXINOM_FAIRPLAY_CERT_URL);
 
         // Restore
-        if let Some(v) = prev_wv { std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL"); }
-        if let Some(v) = prev_fp { std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL"); }
-        if let Some(v) = prev_pr { std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL"); }
-        if let Some(v) = prev_cert { std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", v); } else { std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL"); }
+        if let Some(v) = prev_wv {
+            std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
+        }
+        if let Some(v) = prev_fp {
+            std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL");
+        }
+        if let Some(v) = prev_pr {
+            std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL");
+        }
+        if let Some(v) = prev_cert {
+            std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
+        }
     }
 
     #[test]
@@ -693,10 +760,17 @@ mod tests {
         std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", "   ");
         let res = AxinomLicenseConfig::from_env();
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("AXINOM_WIDEVINE_LICENSE_URL"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("AXINOM_WIDEVINE_LICENSE_URL"));
 
         // Restore
-        if let Some(v) = prev_wv { std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL"); }
+        if let Some(v) = prev_wv {
+            std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
+        }
     }
 
     #[test]
@@ -710,7 +784,11 @@ mod tests {
         assert!(res.unwrap_err().to_string().contains("http:// or https://"));
 
         // Restore
-        if let Some(v) = prev_wv { std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v); } else { std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL"); }
+        if let Some(v) = prev_wv {
+            std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
+        }
     }
 
     #[test]

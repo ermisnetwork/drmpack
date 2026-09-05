@@ -30,8 +30,7 @@ impl LicenseResponse {
     /// Axinom DRM returns this header with device identification and tracking information.
     pub fn axdrm_message(&self) -> Option<&str> {
         self.headers
-            .get("X-AxDRM-Message")
-            .or_else(|| self.headers.get("x-axdrm-message"))
+            .get("x-axdrm-message")
             .and_then(|v| v.to_str().ok())
     }
 
@@ -121,11 +120,7 @@ mod tests {
     #[test]
     fn test_license_response_into_bytes_and_from() {
         let payload = b"sample-bytes";
-        let resp = LicenseResponse::new(
-            bytes::Bytes::from_static(payload),
-            None,
-            HeaderMap::new(),
-        );
+        let resp = LicenseResponse::new(bytes::Bytes::from_static(payload), None, HeaderMap::new());
 
         let resp_clone = resp.clone();
         assert_eq!(resp, resp_clone);
@@ -159,11 +154,7 @@ mod tests {
 
     #[test]
     fn test_license_response_axdrm_message_missing() {
-        let resp = LicenseResponse::new(
-            bytes::Bytes::from_static(b"data"),
-            None,
-            HeaderMap::new(),
-        );
+        let resp = LicenseResponse::new(bytes::Bytes::from_static(b"data"), None, HeaderMap::new());
 
         assert_eq!(resp.axdrm_message(), None);
     }

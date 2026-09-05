@@ -22,17 +22,6 @@ impl IntoCertUrl for &str {
     }
 }
 
-impl IntoCertUrl for &String {
-    fn into_cert_url(self) -> Option<String> {
-        let trimmed = self.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    }
-}
-
 impl IntoCertUrl for String {
     fn into_cert_url(self) -> Option<String> {
         let trimmed = self.trim();
@@ -44,22 +33,15 @@ impl IntoCertUrl for String {
     }
 }
 
-impl<T: AsRef<str>> IntoCertUrl for Option<T> {
+impl IntoCertUrl for &String {
     fn into_cert_url(self) -> Option<String> {
-        self.and_then(|s| {
-            let trimmed = s.as_ref().trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        })
+        self.as_str().into_cert_url()
     }
 }
 
-impl IntoCertUrl for () {
+impl<T: IntoCertUrl> IntoCertUrl for Option<T> {
     fn into_cert_url(self) -> Option<String> {
-        None
+        self.and_then(|v| v.into_cert_url())
     }
 }
 
@@ -101,7 +83,9 @@ impl LicenseProxy {
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
-            .map_err(|e| DrmpackError::InvalidConfig(format!("Failed to build HTTP client: {e}")))?;
+            .map_err(|e| {
+                DrmpackError::InvalidConfig(format!("Failed to build HTTP client: {e}"))
+            })?;
         Ok(Self::with_client(config, client))
     }
 
@@ -129,12 +113,16 @@ impl LicenseProxy {
         &mut self.config
     }
 
-    /// Return the currently cached FairPlay certificate, if any.
+    /// Return the currently cached FairPlay certificate for the configured endpoint, if any.
     pub async fn cached_fairplay_certificate(&self) -> Option<bytes::Bytes> {
         let lock = self.fairplay_cert_cache.read().await;
-        lock.get(&self.config.fairplay_cert_url)
-            .cloned()
-            .or_else(|| lock.values().next().cloned())
+        lock.get(&self.config.fairplay_cert_url).cloned()
+    }
+
+    /// Return the currently cached FairPlay certificate for a specific URL, if any.
+    pub async fn cached_fairplay_certificate_for(&self, url: &str) -> Option<bytes::Bytes> {
+        let lock = self.fairplay_cert_cache.read().await;
+        lock.get(url.trim()).cloned()
     }
 
     /// Manually populate the FairPlay certificate cache.
@@ -151,10 +139,10 @@ impl LicenseProxy {
 
     /// Preload the FairPlay application certificate into memory from configured endpoint.
     pub async fn preload_fairplay_certificate(&self) -> Result<bytes::Bytes> {
-        self.handle_fairplay_certificate(()).await
+        self.handle_fairplay_certificate(None::<&str>).await
     }
 
-    /// Proxy a Widevine license challenge to the upstream DRM server.
+    /// Proxy a Widevine license challenge to the upstream DRM Provider.
     pub async fn handle_widevine_license(
         &self,
         challenge: impl AsRef<[u8]>,
@@ -170,7 +158,7 @@ impl LicenseProxy {
         .await
     }
 
-    /// Proxy an Apple FairPlay Server Playback Context (SPC) to the upstream DRM server.
+    /// Proxy an Apple FairPlay Server Playback Context (SPC) to the upstream DRM Provider.
     pub async fn handle_fairplay_license(
         &self,
         spc: impl AsRef<[u8]>,
@@ -186,7 +174,7 @@ impl LicenseProxy {
         .await
     }
 
-    /// Proxy a Microsoft PlayReady license challenge to the upstream DRM server.
+    /// Proxy a Microsoft PlayReady license challenge to the upstream DRM Provider.
     pub async fn handle_playready_license(
         &self,
         challenge: impl AsRef<[u8]>,
@@ -224,7 +212,7 @@ impl LicenseProxy {
             )));
         }
 
-        // 1. Check read lock
+        // 1. Check read lock first (fast path)
         {
             let lock = self.fairplay_cert_cache.read().await;
             if let Some(cert) = lock.get(trimmed_url) {
@@ -232,12 +220,7 @@ impl LicenseProxy {
             }
         }
 
-        // 2. Acquire write lock and double check
-        let mut lock = self.fairplay_cert_cache.write().await;
-        if let Some(cert) = lock.get(trimmed_url) {
-            return Ok(cert.clone());
-        }
-
+        // 2. Fetch certificate over network WITHOUT holding any lock to prevent contention
         let mut req = self
             .client
             .get(trimmed_url)
@@ -274,12 +257,16 @@ impl LicenseProxy {
 
         if data.is_empty() {
             return Err(DrmpackError::LicenseProxy {
-                status,
-                message: format!("Received empty FairPlay application certificate from '{trimmed_url}'"),
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: format!(
+                    "Received empty FairPlay application certificate from '{trimmed_url}'"
+                ),
                 diagnostic: None,
             });
         }
 
+        // 3. Briefly acquire write lock solely to insert the fetched certificate
+        let mut lock = self.fairplay_cert_cache.write().await;
         lock.insert(trimmed_url.to_string(), data.clone());
         Ok(data)
     }
@@ -337,7 +324,11 @@ impl LicenseProxy {
             req = req.header(k, v);
         }
 
-        if !self.config.headers.contains_key(reqwest::header::CONTENT_TYPE) {
+        if !self
+            .config
+            .headers
+            .contains_key(reqwest::header::CONTENT_TYPE)
+        {
             req = req.header(reqwest::header::CONTENT_TYPE, default_content_type);
         }
 
@@ -345,7 +336,9 @@ impl LicenseProxy {
 
         let resp = req.send().await.map_err(|e| DrmpackError::LicenseProxy {
             status: e.status().unwrap_or(reqwest::StatusCode::BAD_GATEWAY),
-            message: format!("Failed to send {system_name} license request to '{trimmed_url}': {e}"),
+            message: format!(
+                "Failed to send {system_name} license request to '{trimmed_url}': {e}"
+            ),
             diagnostic: None,
         })?;
 
@@ -362,14 +355,16 @@ impl LicenseProxy {
 
         let data = resp.bytes().await.map_err(|e| DrmpackError::LicenseProxy {
             status: reqwest::StatusCode::BAD_GATEWAY,
-            message: format!("Failed to read {system_name} license response body: {e}"),
+            message: format!("Failed to read {system_name} license payload: {e}"),
             diagnostic: None,
         })?;
 
         if data.is_empty() {
             return Err(DrmpackError::LicenseProxy {
-                status,
-                message: format!("Upstream {system_name} license server returned 200 OK with empty license payload"),
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: format!(
+                    "Upstream {system_name} Provider returned 200 OK with empty license payload"
+                ),
                 diagnostic: None,
             });
         }
@@ -418,7 +413,7 @@ async fn parse_license_error_response(resp: reqwest::Response, context: &str) ->
     }
 }
 
-/// Forward a player's Widevine license challenge to upstream DRM provider.
+/// Forward a player's Widevine license challenge to upstream DRM Provider.
 pub async fn handle_widevine_license(
     proxy: &LicenseProxy,
     challenge: impl AsRef<[u8]>,
@@ -427,7 +422,7 @@ pub async fn handle_widevine_license(
     proxy.handle_widevine_license(challenge, auth_token).await
 }
 
-/// Forward an Apple FairPlay Server Playback Context (SPC) to upstream DRM provider.
+/// Forward an Apple FairPlay Server Playback Context (SPC) to upstream DRM Provider.
 pub async fn handle_fairplay_license(
     proxy: &LicenseProxy,
     spc: impl AsRef<[u8]>,
@@ -436,7 +431,7 @@ pub async fn handle_fairplay_license(
     proxy.handle_fairplay_license(spc, auth_token).await
 }
 
-/// Forward a Microsoft PlayReady license challenge to upstream DRM provider.
+/// Forward a Microsoft PlayReady license challenge to upstream DRM Provider.
 pub async fn handle_playready_license(
     proxy: &LicenseProxy,
     challenge: impl AsRef<[u8]>,
@@ -462,7 +457,7 @@ mod tests {
         let proxy = LicenseProxy::default();
         assert_eq!(proxy.cached_fairplay_certificate().await, None);
 
-        let cert_data = bytes::Bytes::from_static(b"apple-cert-sample");
+        let cert_data = bytes::Bytes::from_static(b"fairplay-cert-sample");
         proxy.set_fairplay_certificate(cert_data.clone()).await;
         assert_eq!(proxy.cached_fairplay_certificate().await, Some(cert_data));
 
@@ -491,20 +486,27 @@ mod tests {
 
     #[test]
     fn test_into_cert_url_implementations() {
-        assert_eq!("https://example.com".into_cert_url(), Some("https://example.com".to_string()));
+        assert_eq!(
+            "https://example.com".into_cert_url(),
+            Some("https://example.com".to_string())
+        );
         assert_eq!("  ".into_cert_url(), None);
         assert_eq!("".into_cert_url(), None);
 
         let s = "https://example.com".to_string();
-        assert_eq!((&s).into_cert_url(), Some("https://example.com".to_string()));
+        assert_eq!(
+            (&s).into_cert_url(),
+            Some("https://example.com".to_string())
+        );
         assert_eq!(s.into_cert_url(), Some("https://example.com".to_string()));
 
         let opt_some = Some("https://example.com");
-        assert_eq!(opt_some.into_cert_url(), Some("https://example.com".to_string()));
+        assert_eq!(
+            opt_some.into_cert_url(),
+            Some("https://example.com".to_string())
+        );
 
         let opt_none: Option<&str> = None;
         assert_eq!(opt_none.into_cert_url(), None);
-
-        assert_eq!(().into_cert_url(), None);
     }
 }
