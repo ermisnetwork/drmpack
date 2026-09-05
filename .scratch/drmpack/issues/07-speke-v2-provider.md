@@ -4,8 +4,8 @@
 
 **Blocked by:** 05 (CPIX KeyProvider)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] SPEKE v2 request builder: wrap CPIX 2.3 request XML per AWS SPEKE v2 specification (`X-Speke-Version: 2.0`)
-- [ ] Authentication layer: support API key (`x-api-key`) and optional AWS SigV4 request signing
-- [ ] Integration test with mock SPEKE v2 endpoint
+- [x] SPEKE v2 request builder: wrap CPIX 2.3 request XML per AWS SPEKE v2 specification (`X-Speke-Version: 2.0`)
+- [x] Authentication layer: support API key (`x-api-key`) and optional AWS SigV4 request signing
+- [x] Integration test with mock SPEKE v2 endpoint

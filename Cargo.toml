@@ -7,14 +7,14 @@ authors = ["ermis-stream"]
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["widevine", "fairplay", "playready", "cpix", "axinom"]
+default = ["widevine", "fairplay", "playready", "cpix", "speke-v2", "axinom"]
 widevine = []
 fairplay = []
 playready = []
 hls-legacy = []
-cpix = ["dep:reqwest", "dep:quick-xml"]
-speke-v2 = ["dep:reqwest", "dep:quick-xml"]
-axinom = ["dep:reqwest", "dep:quick-xml", "cpix"]
+cpix = ["dep:quick-xml"]
+speke-v2 = ["cpix", "dep:reqwest"]
+axinom = ["speke-v2"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -36,3 +36,8 @@ quick-xml = { version = "0.37", features = ["serialize"], optional = true }
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
+
+[[example]]
+name = "inspect_axinom"
+required-features = ["axinom"]
+

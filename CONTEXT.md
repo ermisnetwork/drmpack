@@ -40,16 +40,28 @@ _Avoid_: Encryption key, media key
 UUID identifying a ContentKey. Appears in PSSH boxes and manifest DRM signaling.
 _Avoid_: Key identifier
 
-**Provider**:
-An external DRM service that supplies ContentKeys and serves player licenses (e.g. Axinom). Accessed through the KeyProvider trait.
+**Vendor**:
+An external commercial DRM service partner (e.g. Axinom, BuyDRM, EZDRM) that supplies ContentKeys and serves player licenses. Managed under `drmpack::vendor::*`.
 _Avoid_: DRM server, key server, license server
 
+**CPIX**:
+The DASH-IF Content Protection Information Exchange Format (v2.3/v2.4). Pure XML data serialization format for ContentKeys, KIDs, PSSH boxes, and track usage rules. It is a data format, not a provider or protocol. Implemented in `drmpack::cpix`.
+_Avoid_: CPIX Provider, CPIX Protocol, CPIX Server
+
+**SPEKE**:
+Secure Packager and Encoder Key Exchange (AWS specification v2.0). The REST API wire protocol client (`SpekeClient`, aliased as `SpekeV2Provider` for AWS DRM workflows) operating over HTTPS using CPIX 2.3 XML documents as message payload. Implemented in `drmpack::speke`. Supports standard `x-api-key`, AWS SigV4 signing, and custom signers. It is a wire protocol client, not a DRM provider.
+_Avoid_: SPEKE DRM
+
+**StaticKeySource (RawKeyProvider)**:
+The in-memory test double (Fake) and pre-shared key store supplying manually configured ContentKeys and PSSH boxes for unit/E2E testing and offline packaging without network I/O or XML parsing. Implemented in `drmpack::key::raw`.
+_Avoid_: Raw DRM, Fake Provider, Raw Provider
+
 **KeyProvider**:
-The pluggable trait for key acquisition. Built-in implementations: CPIX (generic), SPEKE v2 (AWS), Axinom, RawKey (testing/development).
+The pluggable trait for key acquisition (`fetch_keys`). Implemented by vendor adapters (`AxinomProvider`), generic protocol clients (`SpekeClient` / `SpekeV2Provider`), and local test doubles (`StaticKeySource`).
 _Avoid_: Key source, key fetcher
 
-**Axinom KeyProvider**:
-The built-in KeyProvider targeting Axinom's Key Service API via SPEKE v2 over CPIX 2.3 (`https://key-server-management.axprod.net/api/SpekeV2`). Authenticates using HTTP Basic Auth with Tenant ID and Management Key (`Authorization: Basic <base64(tenant_id:management_key)>`), supports `overrideKeyIds` configuration, surfaces `X-AxDRM-ErrorMessage` diagnostics on non-200 responses, and maps homogeneous or dual-scheme requests into scheme-aware `KeySet`.
+**Axinom Provider (`AxinomProvider`)**:
+The built-in vendor adapter targeting Axinom's Key Service API via SPEKE v2 over CPIX 2.3 (`https://key-server-management.axprod.net/api/SpekeV2`). Managed under `drmpack::vendor::axinom`. Authenticates using HTTP Basic Auth with Tenant ID and Management Key (`Authorization: Basic <base64(tenant_id:management_key)>`), composes `SpekeClient`, supports `overrideKeyIds` configuration, surfaces `X-AxDRM-ErrorMessage` diagnostics on non-200 responses, and maps homogeneous or dual-scheme requests into scheme-aware `KeySet`.
 _Avoid_: Axinom client, Axinom adapter
 
 **License proxy**:

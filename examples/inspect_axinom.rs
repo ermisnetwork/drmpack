@@ -49,7 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(c) => c.with_override_key_ids(override_key_ids),
         Err(e) => {
             eprintln!("Error loading Axinom credentials: {e}");
-            eprintln!("Please make sure AXINOM_TENANT_ID and AXINOM_MANAGEMENT_KEY are set in .env");
+            eprintln!(
+                "Please make sure AXINOM_TENANT_ID and AXINOM_MANAGEMENT_KEY are set in .env"
+            );
             return Ok(());
         }
     };
@@ -126,7 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("📥 [3] RECEIVED HTTP RESPONSE:");
         println!("  - Status: {status}");
         if let Some(err_msg) = headers.get("x-axdrm-errormessage") {
-            println!("  - X-AxDRM-ErrorMessage: {:?}", err_msg.to_str().unwrap_or(""));
+            println!(
+                "  - X-AxDRM-ErrorMessage: {:?}",
+                err_msg.to_str().unwrap_or("")
+            );
         }
 
         let resp_body = resp.text().await?;

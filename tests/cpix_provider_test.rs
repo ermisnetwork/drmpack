@@ -1,4 +1,5 @@
-#![cfg(feature = "cpix")]
+#![cfg(all(feature = "cpix", feature = "speke-v2"))]
+#![allow(deprecated)]
 
 use bytes::Bytes;
 use drmpack::cpix::{CpixConfig, CpixProvider};

@@ -1,16 +1,16 @@
-use crate::axinom::config::AxinomConfig;
 use crate::cpix::builder::CpixRequestBuilder;
 use crate::cpix::parser::CpixResponseParser;
 use crate::error::{DrmpackError, Result};
 use crate::key::{KeyProvider, KeyRequest, KeySet};
+use crate::speke::{SpekeAuth, SpekeClient, SpekeConfig};
+use crate::vendor::axinom::config::AxinomConfig;
 use async_trait::async_trait;
-use base64::prelude::*;
 use std::fmt;
 
 /// Axinom KeyProvider implementing SPEKE v2 over CPIX 2.3 protocol.
 pub struct AxinomProvider {
     config: AxinomConfig,
-    client: reqwest::Client,
+    speke_client: SpekeClient,
 }
 
 impl fmt::Debug for AxinomProvider {
@@ -24,21 +24,43 @@ impl fmt::Debug for AxinomProvider {
 impl AxinomProvider {
     /// Create a new AxinomProvider with given configuration.
     pub fn new(config: AxinomConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { config, client }
+        let speke_config = SpekeConfig::new(&config.endpoint)
+            .with_timeout(config.timeout)
+            .with_auth(SpekeAuth::basic(&config.tenant_id, &config.management_key))
+            .with_headers(config.headers.clone());
+        let speke_client = SpekeClient::with_config(speke_config);
+        Self {
+            config,
+            speke_client,
+        }
     }
 
     /// Create a new AxinomProvider with custom reqwest client.
     pub fn with_client(config: AxinomConfig, client: reqwest::Client) -> Self {
-        Self { config, client }
+        let speke_config = SpekeConfig::new(&config.endpoint)
+            .with_timeout(config.timeout)
+            .with_auth(SpekeAuth::basic(&config.tenant_id, &config.management_key))
+            .with_headers(config.headers.clone());
+        let speke_client = SpekeClient::with_client(speke_config, client);
+        Self {
+            config,
+            speke_client,
+        }
     }
 
     /// Access provider configuration.
     pub fn config(&self) -> &AxinomConfig {
         &self.config
+    }
+
+    /// Access underlying SPEKE protocol client.
+    pub fn speke_client(&self) -> &SpekeClient {
+        &self.speke_client
+    }
+
+    /// Access underlying reqwest Client.
+    pub fn client(&self) -> &reqwest::Client {
+        self.speke_client.client()
     }
 }
 
@@ -73,72 +95,50 @@ impl AxinomProvider {
     async fn fetch_single_scheme_keys(&self, request: &KeyRequest) -> Result<KeySet> {
         let (xml_request, specs) = CpixRequestBuilder::build_with_specs(request)?;
 
-        // Build Basic Auth header: base64(tenant_id:management_key)
-        let credentials = format!("{}:{}", self.config.tenant_id, self.config.management_key);
-        let auth_value = format!("Basic {}", BASE64_STANDARD.encode(credentials.as_bytes()));
+        let query_params: &[(&str, &str)] = if self.config.override_key_ids {
+            &[("overrideKeyIds", "true")]
+        } else {
+            &[]
+        };
 
-        let mut req = self
-            .client
-            .post(&self.config.endpoint)
-            .header(reqwest::header::AUTHORIZATION, auth_value)
-            .header("X-Speke-Version", "2.0")
-            .header(
-                "X-Speke-User-Agent",
-                concat!("drmpack/", env!("CARGO_PKG_VERSION")),
-            )
-            .header(reqwest::header::CONTENT_TYPE, "application/xml")
-            .header(reqwest::header::ACCEPT, "application/xml")
-            .body(xml_request);
+        let resp = self
+            .speke_client
+            .raw_exchange(&xml_request, query_params, None)
+            .await
+            .map_err(|e| {
+                DrmpackError::KeyProvider(format!(
+                    "Failed to send request to Axinom Key Service at '{}': {}",
+                    self.config.endpoint, e
+                ))
+            })?;
 
-        if self.config.override_key_ids {
-            req = req.query(&[("overrideKeyIds", "true")]);
-        }
-
-        // Apply custom headers if any
-        for (k, v) in &self.config.headers {
-            req = req.header(k, v);
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            DrmpackError::KeyProvider(format!(
-                "Failed to send request to Axinom Key Service at '{}': {}",
-                self.config.endpoint, e
-            ))
-        })?;
-
-        let status = resp.status();
-        if !status.is_success() {
+        if !resp.status.is_success() {
             let ax_err_msg = resp
-                .headers()
-                .get("x-axdrm-errormessage")
-                .and_then(|h| h.to_str().ok())
+                .header("x-axdrm-errormessage")
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
 
-            let error_body = resp.text().await.unwrap_or_default();
+            let error_body = resp.body;
             let detail = match (ax_err_msg, error_body.trim()) {
                 (Some(header_msg), body) if !body.is_empty() && !body.contains(&header_msg) => {
                     format!("{header_msg} ({body})")
                 }
                 (Some(header_msg), _) => header_msg,
                 (None, body) if !body.is_empty() => body.to_string(),
-                (None, _) => status.canonical_reason().unwrap_or("Unknown").to_string(),
+                (None, _) => resp
+                    .status
+                    .canonical_reason()
+                    .unwrap_or("Unknown")
+                    .to_string(),
             };
 
             return Err(DrmpackError::KeyProvider(format!(
                 "Axinom Key Service at '{}' returned HTTP {}: {}",
-                self.config.endpoint, status, detail
+                self.config.endpoint, resp.status, detail
             )));
         }
 
-        let xml_response = resp.text().await.map_err(|e| {
-            DrmpackError::KeyProvider(format!(
-                "Failed to read response from Axinom Key Service at '{}': {}",
-                self.config.endpoint, e
-            ))
-        })?;
-
-        CpixResponseParser::parse(&xml_response, Some(&specs))
+        CpixResponseParser::parse(&resp.body, Some(&specs))
     }
 }
 

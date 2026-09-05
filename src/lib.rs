@@ -11,8 +11,13 @@ pub mod types;
 #[cfg(feature = "cpix")]
 pub mod cpix;
 
+#[cfg(feature = "speke-v2")]
+pub mod speke;
+
+pub mod vendor;
+
 #[cfg(feature = "axinom")]
-pub mod axinom;
+pub use vendor::axinom;
 
 // Re-export primary types
 pub use error::{
@@ -21,6 +26,7 @@ pub use error::{
 pub use gpac::{GpacDrmConfig, GpacDrmXmlGenerator, GpacProcess, GpacProcessConfig};
 pub use key::{
     ContentKey, KeyID, KeyPlan, KeyPolicyEngine, KeyProvider, KeyRequest, KeySet, RawKeyProvider,
+    StaticKeySource,
 };
 pub use session::{
     PackagingSession, PackagingSessionConfig, Representation, RepresentationCluster,
@@ -31,7 +37,17 @@ pub use types::{
 };
 
 #[cfg(feature = "cpix")]
-pub use cpix::{CpixConfig, CpixKeySpec, CpixProvider, CpixRequestBuilder, CpixResponseParser};
+pub use cpix::{CpixKeySpec, CpixRequestBuilder, CpixResponseParser};
+
+#[cfg(all(feature = "cpix", feature = "speke-v2"))]
+#[allow(deprecated)]
+pub use cpix::{CpixConfig, CpixProvider};
+
+#[cfg(feature = "speke-v2")]
+pub use speke::{
+    SpekeAuth, SpekeClient, SpekeConfig, SpekeExchangeResponse, SpekeSigner, SpekeV2Config,
+    SpekeV2Provider,
+};
 
 #[cfg(feature = "axinom")]
-pub use axinom::{AxinomConfig, AxinomProvider, DEFAULT_AXINOM_ENDPOINT};
+pub use vendor::axinom::{AxinomConfig, AxinomProvider, DEFAULT_AXINOM_ENDPOINT};
