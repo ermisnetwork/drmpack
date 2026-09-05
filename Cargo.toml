@@ -37,6 +37,7 @@ quick-xml = { version = "0.37", features = ["serialize"], optional = true }
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
+ring = "0.17"
 
 [[example]]
 name = "inspect_axinom"

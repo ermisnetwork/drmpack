@@ -124,6 +124,7 @@ dependencies = [
  "dotenvy",
  "quick-xml",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "thiserror",

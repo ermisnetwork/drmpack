@@ -766,3 +766,144 @@ fn test_license_response_conversions_and_equality() {
     let vec: Vec<u8> = resp.into();
     assert_eq!(vec.as_slice(), payload);
 }
+
+fn generate_axinom_test_jwt(com_key_id: &str, com_key_b64: &str, kid: &str) -> Option<String> {
+    use base64::prelude::*;
+    let key_bytes = BASE64_STANDARD.decode(com_key_b64).ok()?;
+    let header_json = r#"{"alg":"HS256","typ":"JWT"}"#;
+    let payload_json = format!(
+        r#"{{"version":1,"com_key_id":"{com_key_id}","message":{{"type":"entitlement_message","version":2,"content_keys_source":{{"inline":[{{"id":"{kid}"}}]}}}}}}"#
+    );
+    let h_b64 = BASE64_URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+    let p_b64 = BASE64_URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+    let signing_input = format!("{h_b64}.{p_b64}");
+
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &key_bytes);
+    let tag = ring::hmac::sign(&key, signing_input.as_bytes());
+    let sig_b64 = BASE64_URL_SAFE_NO_PAD.encode(tag.as_ref());
+    Some(format!("{signing_input}.{sig_b64}"))
+}
+
+#[tokio::test]
+async fn test_license_proxy_live_endpoints_roundtrip() {
+    let _ = dotenvy::dotenv();
+
+    let config = match AxinomLicenseConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+
+    if config.widevine_license_url.contains("your-")
+        || config.widevine_license_url.contains("00000000-0000")
+    {
+        return;
+    }
+
+    let proxy = LicenseProxy::new(config);
+
+    // 1. Live Widevine request reaching real Axinom cloud
+    let res_wv = proxy.handle_widevine_license(b"test-challenge", "test-dummy-token").await;
+    assert!(res_wv.is_err());
+    match res_wv.unwrap_err() {
+        DrmpackError::LicenseProxy { status, diagnostic, .. } => {
+            assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED);
+            assert!(diagnostic.is_some(), "Expected X-AxDRM-ErrorMessage from real Axinom Widevine server");
+            let diag = diagnostic.unwrap();
+            assert!(diag.contains("Invalid DRM message") || diag.contains("Invalid JWT"));
+        }
+        other => panic!("Expected LicenseProxy error from live Axinom, got: {:?}", other),
+    }
+
+    // 2. Live PlayReady request reaching real Axinom cloud
+    let res_pr = proxy.handle_playready_license(b"test-challenge", "test-dummy-token").await;
+    assert!(res_pr.is_err());
+    match res_pr.unwrap_err() {
+        DrmpackError::LicenseProxy { status, diagnostic, .. } => {
+            assert!(status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::BAD_REQUEST);
+            assert!(diagnostic.is_some(), "Expected X-AxDRM-ErrorMessage from real Axinom PlayReady server");
+            let diag = diagnostic.unwrap();
+            assert!(diag.contains("Invalid DRM message") || diag.contains("Invalid JWT"));
+        }
+        other => panic!("Expected LicenseProxy error from live Axinom, got: {:?}", other),
+    }
+
+    // 3. Live FairPlay request reaching real Axinom cloud
+    let res_fp = proxy.handle_fairplay_license(b"test-spc", "test-dummy-token").await;
+    assert!(res_fp.is_err());
+    match res_fp.unwrap_err() {
+        DrmpackError::LicenseProxy { status, diagnostic, .. } => {
+            assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED);
+            assert!(diagnostic.is_some(), "Expected X-AxDRM-ErrorMessage from real Axinom FairPlay server");
+            let diag = diagnostic.unwrap();
+            assert!(diag.contains("Invalid DRM message") || diag.contains("Invalid JWT"));
+        }
+        other => panic!("Expected LicenseProxy error from live Axinom, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_license_proxy_live_signed_jwt_roundtrip() {
+    let _ = dotenvy::dotenv();
+
+    let config = match AxinomLicenseConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+
+    let com_key_id = match std::env::var("AXINOM_COMMUNICATION_KEY_ID") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+    let com_key = match std::env::var("AXINOM_COMMUNICATION_KEY") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+
+    let jwt = match generate_axinom_test_jwt(
+        &com_key_id,
+        &com_key,
+        "33333333-3333-3333-3333-333333333333",
+    ) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let proxy = LicenseProxy::new(config);
+
+    // 1. Live Widevine with valid JWT: Axinom verifies JWT and inspects challenge payload
+    let res_wv = proxy.handle_widevine_license(b"test-challenge", &jwt).await;
+    assert!(res_wv.is_err());
+    match res_wv.unwrap_err() {
+        DrmpackError::LicenseProxy { status, diagnostic, .. } => {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let diag = diagnostic.expect("Axinom should report challenge format error");
+            assert!(diag.contains("Widevine request"), "Expected Widevine request format error, got: {diag}");
+        }
+        other => panic!("Expected LicenseProxy error from live Axinom, got: {:?}", other),
+    }
+
+    // 2. Live PlayReady with valid JWT: Axinom verifies JWT and validates XML
+    let res_pr = proxy.handle_playready_license(b"test-challenge", &jwt).await;
+    assert!(res_pr.is_err());
+    match res_pr.unwrap_err() {
+        DrmpackError::LicenseProxy { status, diagnostic, .. } => {
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            let diag = diagnostic.expect("Axinom should report PlayReady XML error");
+            assert!(diag.contains("XML") || diag.contains("PlayReady"), "Expected XML error, got: {diag}");
+        }
+        other => panic!("Expected LicenseProxy error from live Axinom, got: {:?}", other),
+    }
+
+    // 3. Live FairPlay with valid JWT: Axinom verifies JWT and checks SPC size
+    let res_fp = proxy.handle_fairplay_license(b"test-spc", &jwt).await;
+    assert!(res_fp.is_err());
+    match res_fp.unwrap_err() {
+        DrmpackError::LicenseProxy { status, diagnostic, .. } => {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let diag = diagnostic.expect("Axinom should report FairPlay SPC size error");
+            assert!(diag.contains("header size") || diag.contains("FairPlay"), "Expected SPC size error, got: {diag}");
+        }
+        other => panic!("Expected LicenseProxy error from live Axinom, got: {:?}", other),
+    }
+}
+
