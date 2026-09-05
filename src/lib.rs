@@ -14,9 +14,12 @@ pub mod cpix;
 #[cfg(feature = "speke-v2")]
 pub mod speke;
 
+#[cfg(feature = "license-proxy")]
+pub mod license;
+
 pub mod vendor;
 
-#[cfg(feature = "axinom")]
+#[cfg(any(feature = "axinom", feature = "license-proxy"))]
 pub use vendor::axinom;
 
 // Re-export primary types
@@ -47,3 +50,16 @@ pub use speke::{
 
 #[cfg(feature = "axinom")]
 pub use vendor::axinom::{AxinomConfig, AxinomProvider, DEFAULT_AXINOM_ENDPOINT};
+
+#[cfg(any(feature = "axinom", feature = "license-proxy"))]
+pub use vendor::axinom::{
+    AxinomLicenseConfig, DEFAULT_AXINOM_FAIRPLAY_CERT_URL, DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL,
+    DEFAULT_AXINOM_PLAYREADY_LICENSE_URL, DEFAULT_AXINOM_WIDEVINE_LICENSE_URL,
+};
+
+#[cfg(feature = "license-proxy")]
+pub use license::{
+    handle_fairplay_certificate, handle_fairplay_license, handle_playready_license,
+    handle_widevine_license, IntoCertUrl, LicenseProxy, LicenseResponse,
+};
+

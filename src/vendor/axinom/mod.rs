@@ -1,5 +1,7 @@
 pub mod config;
+#[cfg(feature = "axinom")]
 pub mod provider;
 
-pub use config::{AxinomConfig, DEFAULT_AXINOM_ENDPOINT};
+pub use config::*;
+#[cfg(feature = "axinom")]
 pub use provider::AxinomProvider;

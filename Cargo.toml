@@ -7,7 +7,7 @@ authors = ["ermis-stream"]
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["widevine", "fairplay", "playready", "cpix", "speke-v2", "axinom"]
+default = ["widevine", "fairplay", "playready", "cpix", "speke-v2", "axinom", "license-proxy"]
 widevine = []
 fairplay = []
 playready = []
@@ -15,6 +15,7 @@ hls-legacy = []
 cpix = ["dep:reqwest", "dep:quick-xml"]
 speke-v2 = ["cpix", "dep:reqwest"]
 axinom = ["speke-v2"]
+license-proxy = ["dep:reqwest"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

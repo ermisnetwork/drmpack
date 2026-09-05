@@ -28,6 +28,14 @@ pub enum DrmpackError {
 
     #[error("PackagingSession failure: {0}")]
     PackagingSession(std::sync::Arc<PackagingSessionFailure>),
+
+    #[cfg(feature = "license-proxy")]
+    #[error("License proxy error (HTTP {status}): {message}")]
+    LicenseProxy {
+        status: reqwest::StatusCode,
+        message: String,
+        diagnostic: Option<String>,
+    },
 }
 
 /// The lifecycle operation performed on an encryption Representation.
