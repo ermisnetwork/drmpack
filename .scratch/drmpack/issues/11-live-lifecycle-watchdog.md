@@ -4,11 +4,14 @@
 
 **Blocked by:** 01 (Tracer)
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] Background async task monitoring child process exit status
-- [ ] Stderr stream reader with severity parsing forwarding GPAC log lines to `tracing::warn!` / `tracing::error!`
-- [ ] Fail-fast crash propagation: `push_segment()` returns `Err(ProcessCrashed)` immediately if process exited prematurely
-- [ ] Graceful shutdown: `session.close()` closes stdin, awaits process exit with configurable timeout, and verifies exit code 0
-- [ ] Ramdisk cleanup: delete `/dev/shm/<session_id>/` upon session close or drop
-- [ ] Inactivity watchdog: auto-close session if no segments pushed within configurable timeout
+- [x] Add `-logs=ncl` to GPAC command args to disable ANSI color codes
+- [x] Stderr stream reader with severity parsing: forward `error`/`failed to` -> `tracing::error!`, `warning` -> `tracing::warn!`, `info` -> `tracing::info!`, rest -> `tracing::debug!`, maintaining bounded circular buffer of recent lines
+- [x] Background `ProcessSupervisor` task owning `child.wait()` per GPAC subprocess, broadcasting exit notifications across async channel
+- [x] Fail-fast crash propagation: premature exit immediately marks session `Failed`, triggers `CancellationToken`, and causes `push_segment()` to return structured failure immediately
+- [x] Dual-mode symmetric fail-fast: unexpected exit of either CENC or CBCS immediately triggers teardown of the remaining healthy representation and surfaces unified `PackagingSessionFailure`
+- [x] Graceful shutdown with `#EXT-X-ENDLIST` verification: `session.close()` closes stdin, awaits exit with timeout, verifies exit code 0, and validates `#EXT-X-ENDLIST` in HLS manifests for streams with media segments
+- [x] Expose `session.is_alive() -> bool` for non-destructive liveness healthchecks
+- [x] Add `PackagingOperation::Supervisor` in `src/error.rs` and reflect domain model in `CONTEXT.md`
+- [x] Comprehensive unit and integration tests covering premature crash, stderr severity classification, Dual mode abort, and endlist verification

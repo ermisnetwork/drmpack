@@ -1,12 +1,54 @@
 use crate::error::{DrmpackError, Result};
 use crate::types::LatencyMode;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{ChildStdin, Command};
+use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
+
+pub const DEFAULT_STDERR_RING_BUFFER_CAPACITY: usize = 64;
+
+/// Log severity classification for GPAC stderr output lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSeverity {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+/// Classify a stderr line into log severity for structured tracing emission.
+///
+/// Lines containing "error" or "failed to" are classified as `LogSeverity::Error`.
+/// Lines containing "warning" are classified as `LogSeverity::Warn`.
+/// Lines containing "info" are classified as `LogSeverity::Info`.
+/// All other lines default to `LogSeverity::Debug`.
+pub fn classify_log_severity(line: &str) -> LogSeverity {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("failed to") {
+        LogSeverity::Error
+    } else if lower.contains("warning") {
+        LogSeverity::Warn
+    } else if lower.contains("info") {
+        LogSeverity::Info
+    } else {
+        LogSeverity::Debug
+    }
+}
+
+/// Captured exit status of a GPAC child process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessExitStatus {
+    pub code: Option<i32>,
+    pub success: bool,
+}
 
 /// Configuration for launching a GPAC packaging process.
 #[derive(Debug, Clone)]
@@ -55,6 +97,9 @@ impl GpacProcessConfig {
     pub fn build_args(&self) -> Vec<String> {
         let mut args = Vec::new();
 
+        // 0. Disable ANSI color codes for clean machine-readable log parsing
+        args.push("-logs=ncl".into());
+
         // 1. Input filter: read continuous fMP4 from stdin pipe without memory buffering delay
         args.push("-i".into());
         args.push("stdin:ext=mp4:alltk:mstore_samples=0:mstore_purge=0".into());
@@ -85,12 +130,17 @@ impl GpacProcessConfig {
     }
 }
 
-/// Managed GPAC child process instance.
+/// Managed GPAC child process instance monitored by a ProcessSupervisor task.
 pub struct GpacProcess {
     config: GpacProcessConfig,
-    child: Option<Child>,
+    pid: Option<u32>,
     stdin: Option<ChildStdin>,
-    stderr_buffer: Arc<Mutex<Vec<String>>>,
+    stderr_buffer: Arc<Mutex<VecDeque<String>>>,
+    pub(crate) is_running: Arc<AtomicBool>,
+    status_rx: watch::Receiver<Option<ProcessExitStatus>>,
+    pub(crate) exit_tx: broadcast::Sender<ProcessExitStatus>,
+    pub(crate) kill_token: CancellationToken,
+    supervisor_handle: Option<JoinHandle<()>>,
 }
 
 impl GpacProcess {
@@ -114,6 +164,8 @@ impl GpacProcess {
             ))
         })?;
 
+        let pid = child.id();
+
         let stdin = child.stdin.take().ok_or_else(|| {
             DrmpackError::Gpac("Failed to capture stdin pipe for GPAC process".into())
         })?;
@@ -122,29 +174,83 @@ impl GpacProcess {
             DrmpackError::Gpac("Failed to capture stderr pipe for GPAC process".into())
         })?;
 
-        let stderr_buffer = Arc::new(Mutex::new(Vec::with_capacity(64)));
+        let stderr_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(
+            DEFAULT_STDERR_RING_BUFFER_CAPACITY,
+        )));
         let buffer_clone = Arc::clone(&stderr_buffer);
 
-        // Background task to read stderr line-by-line and log to tracing
+        // Background task to read stderr line-by-line and forward to tracing with severity parsing
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                debug!(target: "gpac", "{}", line);
-                let mut buf = buffer_clone.lock().unwrap();
-                if buf.len() >= 64 {
-                    buf.remove(0);
+                match classify_log_severity(&line) {
+                    LogSeverity::Error => error!(target: "gpac", "{}", line),
+                    LogSeverity::Warn => warn!(target: "gpac", "{}", line),
+                    LogSeverity::Info => info!(target: "gpac", "{}", line),
+                    LogSeverity::Debug => debug!(target: "gpac", "{}", line),
                 }
-                buf.push(line);
+                let mut buf = buffer_clone.lock().unwrap();
+                if buf.len() >= DEFAULT_STDERR_RING_BUFFER_CAPACITY {
+                    buf.pop_front();
+                }
+                buf.push_back(line);
             }
         });
 
-        info!(bin = %config.gpac_bin, "GPAC subprocess successfully spawned");
+        let is_running = Arc::new(AtomicBool::new(true));
+        let is_running_clone = Arc::clone(&is_running);
+        let (status_tx, status_rx) = watch::channel(None);
+        let (exit_tx, _) = broadcast::channel(16);
+        let exit_tx_clone = exit_tx.clone();
+        let kill_token = CancellationToken::new();
+        let kill_token_clone = kill_token.clone();
+
+        // Background ProcessSupervisor task owning child.wait()
+        let supervisor_handle = tokio::spawn(async move {
+            let exit_status = tokio::select! {
+                res = child.wait() => {
+                    match res {
+                        Ok(status) => ProcessExitStatus {
+                            code: status.code(),
+                            success: status.success(),
+                        },
+                        Err(e) => {
+                            error!("Error waiting on GPAC child: {e}");
+                            ProcessExitStatus {
+                                code: None,
+                                success: false,
+                            }
+                        }
+                    }
+                }
+                _ = kill_token_clone.cancelled() => {
+                    debug!("ProcessSupervisor received kill signal; terminating child process");
+                    let _ = child.start_kill();
+                    let wait_res = child.wait().await;
+                    ProcessExitStatus {
+                        code: wait_res.ok().and_then(|s| s.code()),
+                        success: false,
+                    }
+                }
+            };
+
+            is_running_clone.store(false, Ordering::Release);
+            let _ = status_tx.send(Some(exit_status.clone()));
+            let _ = exit_tx_clone.send(exit_status);
+        });
+
+        info!(bin = %config.gpac_bin, pid = ?pid, "GPAC subprocess successfully spawned");
 
         Ok(Self {
             config,
-            child: Some(child),
+            pid,
             stdin: Some(stdin),
             stderr_buffer,
+            is_running,
+            status_rx,
+            exit_tx,
+            kill_token,
+            supervisor_handle: Some(supervisor_handle),
         })
     }
 
@@ -152,35 +258,31 @@ impl GpacProcess {
     pub async fn write_data(&mut self, data: &[u8]) -> Result<()> {
         self.check_status()?;
 
-        let stderr_buffer = Arc::clone(&self.stderr_buffer);
-        let get_stderr = move || {
-            let buf = stderr_buffer.lock().unwrap();
-            buf.join("\n")
-        };
-
         if let Some(ref mut stdin) = self.stdin {
-            stdin
-                .write_all(data)
-                .await
-                .map_err(|e| DrmpackError::ProcessCrashed {
-                    exit_code: None,
-                    stderr: format!(
-                        "Failed to write to GPAC stdin: {}. Stderr: {}",
-                        e,
-                        get_stderr()
-                    ),
-                })?;
-            stdin
-                .flush()
-                .await
-                .map_err(|e| DrmpackError::ProcessCrashed {
-                    exit_code: None,
-                    stderr: format!(
-                        "Failed to flush GPAC stdin: {}. Stderr: {}",
-                        e,
-                        get_stderr()
-                    ),
-                })?;
+            if let Err(e) = stdin.write_all(data).await {
+                if self.status_rx.borrow().is_none() {
+                    let mut rx = self.status_rx.clone();
+                    let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+                }
+                let exit_code = self.status_rx.borrow().as_ref().and_then(|s| s.code);
+                let stderr = self.get_recent_stderr();
+                return Err(DrmpackError::ProcessCrashed {
+                    exit_code,
+                    stderr: format!("Failed to write to GPAC stdin: {e}. Stderr: {stderr}"),
+                });
+            }
+            if let Err(e) = stdin.flush().await {
+                if self.status_rx.borrow().is_none() {
+                    let mut rx = self.status_rx.clone();
+                    let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+                }
+                let exit_code = self.status_rx.borrow().as_ref().and_then(|s| s.code);
+                let stderr = self.get_recent_stderr();
+                return Err(DrmpackError::ProcessCrashed {
+                    exit_code,
+                    stderr: format!("Failed to flush GPAC stdin: {e}. Stderr: {stderr}"),
+                });
+            }
             Ok(())
         } else {
             Err(DrmpackError::Session(
@@ -190,28 +292,19 @@ impl GpacProcess {
     }
 
     /// Check if the GPAC process has crashed or terminated unexpectedly.
-    pub fn check_status(&mut self) -> Result<()> {
-        if let Some(ref mut child) = self.child {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let stderr = self.get_recent_stderr();
-                    let code = status.code();
-                    error!(code = ?code, stderr = %stderr, "GPAC process exited unexpectedly");
-                    Err(DrmpackError::ProcessCrashed {
-                        exit_code: code,
-                        stderr: if status.success() {
-                            format!("GPAC exited successfully before PackagingSession::close(). Stderr: {stderr}")
-                        } else {
-                            stderr
-                        },
-                    })
-                }
-                Ok(None) => Ok(()), // Still running
-                Err(e) => Err(DrmpackError::Gpac(format!(
-                    "Failed to check GPAC child process status: {}",
-                    e
-                ))),
-            }
+    pub fn check_status(&self) -> Result<()> {
+        if let Some(ref status) = *self.status_rx.borrow() {
+            let stderr = self.get_recent_stderr();
+            let code = status.code;
+            error!(code = ?code, stderr = %stderr, "GPAC process exited unexpectedly");
+            Err(DrmpackError::ProcessCrashed {
+                exit_code: code,
+                stderr: if status.success {
+                    format!("GPAC exited successfully before PackagingSession::close(). Stderr: {stderr}")
+                } else {
+                    stderr
+                },
+            })
         } else {
             Ok(())
         }
@@ -220,7 +313,7 @@ impl GpacProcess {
     /// Get the most recent stderr log lines captured from the child process.
     pub fn get_recent_stderr(&self) -> String {
         let buf = self.stderr_buffer.lock().unwrap();
-        buf.join("\n")
+        buf.iter().cloned().collect::<Vec<_>>().join("\n")
     }
 
     /// Gracefully close the stdin pipe and await GPAC completion.
@@ -229,60 +322,92 @@ impl GpacProcess {
         self.stdin.take(); // Dropping ChildStdin closes the write pipe
         debug!("Closed GPAC stdin pipe, awaiting graceful finalization");
 
-        // 2. Wait for process exit with timeout
-        if let Some(mut child) = self.child.take() {
-            let wait_future = child.wait();
-            match tokio::time::timeout(timeout, wait_future).await {
-                Ok(Ok(status)) => {
-                    if status.success() {
-                        info!("GPAC process exited successfully with status 0");
-                        Ok(())
-                    } else {
-                        let stderr = self.get_recent_stderr();
-                        error!(code = ?status.code(), stderr = %stderr, "GPAC exited with failure");
-                        Err(DrmpackError::ProcessCrashed {
-                            exit_code: status.code(),
-                            stderr,
-                        })
+        // 2. Await ProcessSupervisor completion with timeout
+        let mut rx = self.status_rx.clone();
+        if rx.borrow().is_none() {
+            let wait_exit = async {
+                while rx.borrow().is_none() {
+                    if rx.changed().await.is_err() {
+                        break;
                     }
                 }
-                Ok(Err(e)) => Err(DrmpackError::Gpac(format!(
-                    "Error awaiting GPAC exit: {}",
-                    e
-                ))),
+            };
+            match tokio::time::timeout(timeout, wait_exit).await {
+                Ok(_) => {}
                 Err(_) => {
                     warn!(
                         "GPAC finalization timed out after {:?}, sending SIGKILL",
                         timeout
                     );
-                    let _ = child.kill().await;
+                    self.kill_token.cancel();
+                    let _ = tokio::time::timeout(Duration::from_millis(500), rx.changed()).await;
                     let stderr = self.get_recent_stderr();
-                    Err(DrmpackError::ProcessCrashed {
+                    return Err(DrmpackError::ProcessCrashed {
                         exit_code: None,
                         stderr: format!(
                             "GPAC process timed out after {:?}. Stderr: {}",
                             timeout, stderr
                         ),
-                    })
+                    });
                 }
             }
-        } else {
+        }
+
+        let status = rx
+            .borrow()
+            .clone()
+            .unwrap_or(ProcessExitStatus {
+                code: None,
+                success: false,
+            });
+
+        if status.success {
+            info!("GPAC process exited successfully with status 0");
             Ok(())
+        } else {
+            let stderr = self.get_recent_stderr();
+            error!(code = ?status.code, stderr = %stderr, "GPAC exited with failure");
+            Err(DrmpackError::ProcessCrashed {
+                exit_code: status.code,
+                stderr,
+            })
         }
     }
 
     /// Check if the child process is currently running.
-    pub fn is_alive(&mut self) -> bool {
-        if let Some(ref mut child) = self.child {
-            matches!(child.try_wait(), Ok(None))
-        } else {
-            false
-        }
+    pub fn is_alive(&self) -> bool {
+        self.is_running.load(Ordering::Acquire)
+    }
+
+    /// Subscribe to exit notifications broadcast by the ProcessSupervisor.
+    pub fn subscribe_exit(&self) -> broadcast::Receiver<ProcessExitStatus> {
+        self.exit_tx.subscribe()
+    }
+
+    /// Process ID of the spawned GPAC child process.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Terminate the child process immediately via SIGKILL.
+    pub fn kill(&self) {
+        self.kill_token.cancel();
     }
 
     /// Access the configuration.
     pub fn config(&self) -> &GpacProcessConfig {
         &self.config
+    }
+}
+
+impl Drop for GpacProcess {
+    fn drop(&mut self) {
+        if self.is_running.load(Ordering::Acquire) {
+            self.kill_token.cancel();
+        }
+        if let Some(handle) = self.supervisor_handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -299,16 +424,17 @@ mod tests {
 
         let args = config.build_args();
 
-        assert_eq!(args[0], "-i");
+        assert_eq!(args[0], "-logs=ncl");
+        assert_eq!(args[1], "-i");
         assert_eq!(
-            args[1],
+            args[2],
             "stdin:ext=mp4:alltk:mstore_samples=0:mstore_purge=0"
         );
-        assert_eq!(args[2], "cecrypt:cfile=/tmp/drm.xml");
-        assert_eq!(args[3], "-o");
-        assert!(args[4].contains("/dev/shm/test_stream/live.mpd:dual"));
-        assert!(args[4].contains("profile=live:dmode=dynamic:segdur=2:pssh=mv"));
-        assert!(args[4].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
+        assert_eq!(args[3], "cecrypt:cfile=/tmp/drm.xml");
+        assert_eq!(args[4], "-o");
+        assert!(args[5].contains("/dev/shm/test_stream/live.mpd:dual"));
+        assert!(args[5].contains("profile=live:dmode=dynamic:segdur=2:pssh=mv"));
+        assert!(args[5].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
     }
 
     #[test]
@@ -319,10 +445,69 @@ mod tests {
 
         let args = config.build_args();
 
-        assert_eq!(args[3], "-o");
-        assert!(args[4].contains("segdur=6:pssh=mv"));
-        // Standard latency does NOT contain LL-HLS or CMAF chunking flags
-        assert!(!args[4].contains(":cdur="));
-        assert!(!args[4].contains(":llhls="));
+        assert_eq!(args[0], "-logs=ncl");
+        assert_eq!(args[4], "-o");
+        assert!(args[5].contains("segdur=6:pssh=mv"));
+        assert!(!args[5].contains(":cdur="));
+        assert!(!args[5].contains(":llhls="));
+    }
+
+    #[test]
+    fn test_classify_log_severity() {
+        assert_eq!(
+            classify_log_severity("[Error] Filter fout failed"),
+            LogSeverity::Error
+        );
+        assert_eq!(
+            classify_log_severity("Failed to setup socket connection"),
+            LogSeverity::Error
+        );
+        assert_eq!(
+            classify_log_severity("ERROR: bad packet"),
+            LogSeverity::Error
+        );
+        assert_eq!(
+            classify_log_severity("FAILED TO initialize context"),
+            LogSeverity::Error
+        );
+        assert_eq!(
+            classify_log_severity("[Warning] DTS is smaller than previous PTS"),
+            LogSeverity::Warn
+        );
+        assert_eq!(
+            classify_log_severity("warning: timestamp discontinuity"),
+            LogSeverity::Warn
+        );
+        assert_eq!(
+            classify_log_severity("[Info] Initializing GPAC core"),
+            LogSeverity::Info
+        );
+        assert_eq!(
+            classify_log_severity("info: DASHER session created"),
+            LogSeverity::Info
+        );
+        assert_eq!(
+            classify_log_severity("GPAC filter engine version 26.07"),
+            LogSeverity::Debug
+        );
+        assert_eq!(
+            classify_log_severity("Processing segment 42"),
+            LogSeverity::Debug
+        );
+    }
+
+    #[test]
+    fn test_bounded_circular_buffer() {
+        let mut buf = VecDeque::with_capacity(3);
+        let cap = 3;
+        for i in 0..5 {
+            if buf.len() >= cap {
+                buf.pop_front();
+            }
+            buf.push_back(format!("line {i}"));
+        }
+        assert_eq!(buf.len(), 3);
+        let slice: Vec<String> = buf.into_iter().collect();
+        assert_eq!(slice, vec!["line 2", "line 3", "line 4"]);
     }
 }

@@ -1,0 +1,41 @@
+# Asynchronous ProcessSupervisor and Fail-Fast Lifecycle
+
+**Status: Accepted**
+
+`drmpack` implements an asynchronous `ProcessSupervisor` per GPAC subprocess, combining immediate crash detection via dedicated `child.wait()` tasks, clean plaintext stderr severity parsing via `-logs=ncl`, symmetric teardown for Dual representations, and strict `#EXT-X-ENDLIST` verification on session close.
+
+## Context & Problem Statement
+
+Packaging fMP4 live media through external GPAC subprocesses over kernel pipes introduces asynchronous lifecycle risks:
+1. **Idle Crash Blindness**: If GPAC crashes during inter-segment intervals (e.g. between live GOP chunks), synchronous status checks inside `push_segment()` only discover the failure on the subsequent write. If upstream video pauses, the crash goes undetected until inactivity watchdog expiry.
+2. **Poll vs Single-Waiter Contention**: In Tokio, `Child::wait()` requires a mutable reference or ownership. Polling via `try_wait()` wastes CPU and adds detection latency, while multiple tasks polling `Child` causes lock contention.
+3. **Stderr Noise & Color Corruption**: GPAC emits ANSI color escape sequences by default, cluttering machine-parsed logs and obscuring root causes. Log severity levels (`Warning`, `Error`) are emitted on stderr without structured tagging.
+4. **HLS Playback Stall Risk**: If an HLS master session terminates without appending `#EXT-X-ENDLIST`, downstream players and CDN edge caches treat the stream as stalled and retry indefinitely.
+
+## Considered Options
+
+- **Option 1: Polling timer (`try_wait()` loop)**: Periodic background tick checking child status. Rejected due to unnecessary CPU overhead and delayed crash detection.
+- **Option 2: Asymmetric partial degradation in Dual mode**: If CBCS crashes, keep CENC running. Rejected per ADR-0006 and Ticket 04; a Dual session is an atomic unit of work.
+- **Option 3: Dedicated `ProcessSupervisor` task with single-waiter ownership**: Accepted. A single task per GPAC process awaits `child.wait()`, broadcasts status changes, and coordinates immediate symmetric teardown.
+
+## Architecture & Decisions
+
+1. **Dedicated `ProcessSupervisor` Task**:
+   - Exactly one background task per GPAC process owns `child.wait()`.
+   - Unexpected process exit immediately transitions `Lifecycle` to `Failed`, triggers `CancellationToken`, and aborts pending writes.
+   - Graceful termination closes `ChildStdin` and awaits the supervisor task's exit status with a configurable finalization timeout.
+2. **Plaintext Stderr Severity Parsing**:
+   - GPAC is invoked with `-logs=ncl` to strip ANSI escape codes.
+   - Stderr stream reader classifies lines into `tracing::error!`, `tracing::warn!`, `tracing::info!`, or `tracing::debug!`.
+   - A bounded ring buffer of recent stderr lines is preserved for diagnostic inclusion in `DrmpackError::ProcessCrashed`.
+3. **Symmetric Teardown for Dual Mode**:
+   - If either the CENC or CBCS representation encounters an unexpected process termination, the cluster immediately terminates the peer process and surfaces a unified `PackagingSessionFailure`.
+4. **Manifest Finalization Verification**:
+   - For streams with media segments pushed, `session.close()` verifies the presence of `#EXT-X-ENDLIST` in the generated `.m3u8` manifest before declaring finalization successful and executing Ramdisk cleanup.
+
+## Consequences
+
+- Media-server receives immediate fail-fast error notifications when GPAC subprocesses terminate unexpectedly.
+- Zero CPU spent on polling timers.
+- Log output from GPAC is clean, uncolored, and properly tiered across `tracing` log levels.
+- HLS clients are protected against playlist stall conditions.

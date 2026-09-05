@@ -46,6 +46,7 @@ pub enum PackagingOperation {
     Status,
     Watchdog,
     Close,
+    Supervisor,
 }
 
 impl std::fmt::Display for PackagingOperation {
@@ -56,6 +57,7 @@ impl std::fmt::Display for PackagingOperation {
             PackagingOperation::Status => write!(f, "status check"),
             PackagingOperation::Watchdog => write!(f, "watchdog shutdown"),
             PackagingOperation::Close => write!(f, "close"),
+            PackagingOperation::Supervisor => write!(f, "supervisor exit"),
         }
     }
 }

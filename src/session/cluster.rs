@@ -1,28 +1,59 @@
 use crate::error::{
     DrmpackError, PackagingOperation, PackagingSessionFailure, RepresentationFailure, Result,
 };
-use crate::gpac::process::{GpacProcess, GpacProcessConfig};
+use crate::gpac::process::{GpacProcess, GpacProcessConfig, ProcessExitStatus};
 use crate::gpac::xml::{GpacDrmConfig, GpacDrmXmlGenerator, GpacTrackConfig};
 use crate::key::KeySet;
 use crate::session::PackagingSessionConfig;
 use crate::types::EncryptionScheme;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// An individual media Representation managed within a `RepresentationCluster`.
 pub struct Representation {
     pub scheme: EncryptionScheme,
     pub gpac: Arc<Mutex<GpacProcess>>,
+    pub(crate) is_running: Arc<AtomicBool>,
+    pub(crate) exit_tx: broadcast::Sender<ProcessExitStatus>,
+    pub(crate) kill_token: CancellationToken,
 }
 
 impl Representation {
     pub fn new(scheme: EncryptionScheme, gpac: GpacProcess) -> Self {
+        let is_running = Arc::clone(&gpac.is_running);
+        let exit_tx = gpac.exit_tx.clone();
+        let kill_token = gpac.kill_token.clone();
         Self {
             scheme,
             gpac: Arc::new(Mutex::new(gpac)),
+            is_running,
+            exit_tx,
+            kill_token,
         }
+    }
+
+    /// Check if the representation's GPAC process is currently running.
+    pub fn is_alive(&self) -> bool {
+        self.is_running.load(Ordering::Acquire)
+    }
+
+    /// Immediately terminate this representation's GPAC process via SIGKILL.
+    pub fn kill(&self) {
+        self.kill_token.cancel();
+    }
+
+    /// Process ID of the spawned GPAC process.
+    pub async fn pid(&self) -> Option<u32> {
+        self.gpac.lock().await.pid()
+    }
+
+    /// Subscribe to exit notifications broadcast by this representation's ProcessSupervisor.
+    pub fn subscribe_exit(&self) -> broadcast::Receiver<ProcessExitStatus> {
+        self.exit_tx.subscribe()
     }
 
     pub async fn write_data(&self, bytes: &[u8]) -> (EncryptionScheme, Result<()>) {
@@ -269,6 +300,31 @@ impl RepresentationCluster {
 
     pub fn representations(&self) -> &[Representation] {
         &self.representations
+    }
+
+    /// Check whether all representations in this cluster are currently running.
+    pub fn is_alive(&self) -> bool {
+        !self.representations.is_empty() && self.representations.iter().all(|r| r.is_alive())
+    }
+
+    /// Subscribe to exit notifications across all representations in this cluster.
+    pub fn subscribe_exits(
+        &self,
+    ) -> Vec<(EncryptionScheme, broadcast::Receiver<ProcessExitStatus>)> {
+        self.representations
+            .iter()
+            .map(|r| (r.scheme, r.subscribe_exit()))
+            .collect()
+    }
+
+    /// Retrieve recent stderr lines captured for a specific representation.
+    pub async fn get_recent_stderr(&self, scheme: EncryptionScheme) -> String {
+        for rep in &self.representations {
+            if rep.scheme == scheme {
+                return rep.gpac.lock().await.get_recent_stderr();
+            }
+        }
+        String::new()
     }
 }
 

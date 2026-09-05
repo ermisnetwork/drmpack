@@ -10,6 +10,10 @@ A Rust library orchestrating DRM packaging and manifest generation for media-ser
 The core controller unit of work. Manages key acquisition, GPAC subprocess lifecycle over anonymous Unix pipes, and manifest delivery into Ramdisk.
 _Avoid_: Job, task, pipeline, worker
 
+**ProcessSupervisor**:
+The asynchronous supervisor task monitoring a GPAC subprocess exit lifecycle and stderr stream, detecting unexpected crashes immediately and distinguishing them from graceful finalization.
+_Avoid_: Process monitor, child watcher, process tracker
+
 **LatencyMode**:
 The streaming delivery latency profile — `LowLatency` (CMAF chunking, LL-HLS, LL-DASH) or `Standard` (traditional 2-6s segments).
 _Avoid_: Stream speed, delay profile
