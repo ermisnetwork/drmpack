@@ -49,8 +49,8 @@ The DASH-IF Content Protection Information Exchange Format (v2.3/v2.4). Pure XML
 _Avoid_: CPIX DRM
 
 **SPEKE**:
-Secure Packager and Encoder Key Exchange (AWS specification v2.0). The REST API wire protocol client (`SpekeClient`, aliased as `SpekeV2Provider` for AWS DRM workflows) operating over HTTPS using CPIX 2.3 XML documents as message payload. Implemented in `drmpack::speke`. Supports standard `x-api-key`, AWS SigV4 signing, and custom signers. It is a wire protocol client, not a DRM provider.
-_Avoid_: SPEKE DRM
+Secure Packager and Encoder Key Exchange (AWS specification v2.0). The REST API wire protocol client (`SpekeClient`, aliased as `SpekeV2Provider` for AWS DRM workflows) operating over HTTPS using CPIX 2.3 XML documents as message payload. Implemented in `drmpack::speke`. It is a wire protocol client, not a DRM provider.
+_Avoid_: SPEKE DRM, SPEKE Provider
 
 **StaticKeySource (RawKeyProvider)**:
 The in-memory test double (Fake) and pre-shared key store supplying manually configured ContentKeys and PSSH boxes for unit/E2E testing and offline packaging without network I/O or XML parsing. Implemented in `drmpack::key::raw`.
