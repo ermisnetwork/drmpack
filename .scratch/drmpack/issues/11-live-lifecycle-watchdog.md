@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 (Tracer)
 
-**Status:** closed
+**Status:** resolved
 
 - [x] Add `-logs=ncl` to GPAC command args to disable ANSI color codes
 - [x] Stderr stream reader with severity parsing: forward `error`/`failed to` -> `tracing::error!`, `warning` -> `tracing::warn!`, `info` -> `tracing::info!`, rest -> `tracing::debug!`, maintaining bounded circular buffer of recent lines

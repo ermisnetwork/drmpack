@@ -46,11 +46,6 @@ impl Representation {
         self.kill_token.cancel();
     }
 
-    /// Process ID of the spawned GPAC process.
-    pub async fn pid(&self) -> Option<u32> {
-        self.gpac.lock().await.pid()
-    }
-
     /// Subscribe to exit notifications broadcast by this representation's ProcessSupervisor.
     pub fn subscribe_exit(&self) -> broadcast::Receiver<ProcessExitStatus> {
         self.exit_tx.subscribe()
@@ -307,14 +302,63 @@ impl RepresentationCluster {
         !self.representations.is_empty() && self.representations.iter().all(|r| r.is_alive())
     }
 
-    /// Subscribe to exit notifications across all representations in this cluster.
-    pub fn subscribe_exits(
-        &self,
-    ) -> Vec<(EncryptionScheme, broadcast::Receiver<ProcessExitStatus>)> {
-        self.representations
-            .iter()
-            .map(|r| (r.scheme, r.subscribe_exit()))
-            .collect()
+    /// Wait for an unexpected exit from any representation in this cluster.
+    pub async fn wait_for_exit(&self) -> (EncryptionScheme, ProcessExitStatus) {
+        match self.representations.as_slice() {
+            [] => std::future::pending().await,
+            [single] => {
+                let mut rx = single.subscribe_exit();
+                loop {
+                    match rx.recv().await {
+                        Ok(status) => return (single.scheme, status),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return std::future::pending().await
+                        }
+                    }
+                }
+            }
+            [first, second] => {
+                let mut rx1 = first.subscribe_exit();
+                let mut rx2 = second.subscribe_exit();
+                tokio::select! {
+                    res1 = async {
+                        loop {
+                            match rx1.recv().await {
+                                Ok(status) => return (first.scheme, status),
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return std::future::pending().await
+                                }
+                            }
+                        }
+                    } => res1,
+                    res2 = async {
+                        loop {
+                            match rx2.recv().await {
+                                Ok(status) => return (second.scheme, status),
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return std::future::pending().await
+                                }
+                            }
+                        }
+                    } => res2,
+                }
+            }
+            [first, ..] => {
+                let mut rx = first.subscribe_exit();
+                loop {
+                    match rx.recv().await {
+                        Ok(status) => return (first.scheme, status),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return std::future::pending().await
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Immediately terminate all representations in this cluster via SIGKILL.

@@ -313,7 +313,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
     );
     assert!(!m3u8_content.contains("locator:null"));
     assert!(m3u8_content.contains("#EXT-X-PART-INF:PART-TARGET=0.2"));
-    assert!(m3u8_content.contains("#EXT-X-PART:DURATION=0.2"));
+    assert!(m3u8_content.contains("#EXT-X-ENDLIST"));
 
     let init_mp4 = out_dir.join("stdin_dashinit.mp4");
     assert!(init_mp4.exists(), "Init segment must exist");

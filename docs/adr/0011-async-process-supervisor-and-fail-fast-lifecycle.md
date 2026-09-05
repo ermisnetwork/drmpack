@@ -7,7 +7,7 @@
 ## Context & Problem Statement
 
 Packaging fMP4 live media through external GPAC subprocesses over kernel pipes introduces asynchronous lifecycle risks:
-1. **Idle Crash Blindness**: If GPAC crashes during inter-segment intervals (e.g. between live GOP chunks), synchronous status checks inside `push_segment()` only discover the failure on the subsequent write. If upstream video pauses, the crash goes undetected until inactivity watchdog expiry.
+1. **Idle Crash Blindness**: If GPAC crashes during inter-segment intervals (e.g. between live GOP segments), synchronous status checks inside `push_segment()` only discover the failure on the subsequent write. If upstream video pauses, the crash goes undetected until inactivity watchdog expiry.
 2. **Poll vs Single-Waiter Contention**: In Tokio, `Child::wait()` requires a mutable reference or ownership. Polling via `try_wait()` wastes CPU and adds detection latency, while multiple tasks polling `Child` causes lock contention.
 3. **Stderr Noise & Color Corruption**: GPAC emits ANSI color escape sequences by default, cluttering machine-parsed logs and obscuring root causes. Log severity levels (`Warning`, `Error`) are emitted on stderr without structured tagging.
 4. **HLS Playback Stall Risk**: If an HLS master session terminates without appending `#EXT-X-ENDLIST`, downstream players and CDN edge caches treat the stream as stalled and retry indefinitely.
@@ -38,4 +38,4 @@ Packaging fMP4 live media through external GPAC subprocesses over kernel pipes i
 - Media-server receives immediate fail-fast error notifications when GPAC subprocesses terminate unexpectedly.
 - Zero CPU spent on polling timers.
 - Log output from GPAC is clean, uncolored, and properly tiered across `tracing` log levels.
-- HLS clients are protected against playlist stall conditions.
+- HLS clients are protected against manifest stall conditions.

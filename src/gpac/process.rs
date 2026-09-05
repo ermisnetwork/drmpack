@@ -110,7 +110,7 @@ impl GpacProcessConfig {
         // 3. Dasher output filter: generate both DASH and HLS manifests in output_dir
         let manifest_path = self.output_dir.join("live.mpd");
         let mut dasher_opt = format!(
-            "{}:dual:profile=live:dmode=dynamic:segdur={}:pssh=mv",
+            "{}:dual:profile=live:dmode=dynauto:segdur={}:pssh=mv",
             manifest_path.display(),
             self.segment_duration
         );
@@ -133,7 +133,6 @@ impl GpacProcessConfig {
 /// Managed GPAC child process instance monitored by a ProcessSupervisor task.
 pub struct GpacProcess {
     config: GpacProcessConfig,
-    pid: Option<u32>,
     stdin: Option<ChildStdin>,
     stderr_buffer: Arc<Mutex<VecDeque<String>>>,
     pub(crate) is_running: Arc<AtomicBool>,
@@ -163,8 +162,6 @@ impl GpacProcess {
                 config.gpac_bin, e
             ))
         })?;
-
-        let pid = child.id();
 
         let stdin = child.stdin.take().ok_or_else(|| {
             DrmpackError::Gpac("Failed to capture stdin pipe for GPAC process".into())
@@ -258,11 +255,10 @@ impl GpacProcess {
             let _ = exit_tx_clone.send(exit_status);
         });
 
-        info!(bin = %config.gpac_bin, pid = ?pid, "GPAC subprocess successfully spawned");
+        info!(bin = %config.gpac_bin, "GPAC subprocess successfully spawned");
 
         Ok(Self {
             config,
-            pid,
             stdin: Some(stdin),
             stderr_buffer,
             is_running,
@@ -279,34 +275,29 @@ impl GpacProcess {
 
         if let Some(ref mut stdin) = self.stdin {
             if let Err(e) = stdin.write_all(data).await {
-                if self.status_rx.borrow().is_none() {
-                    let mut rx = self.status_rx.clone();
-                    let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
-                }
-                let exit_code = self.status_rx.borrow().as_ref().and_then(|s| s.code);
-                let stderr = self.get_recent_stderr();
-                return Err(DrmpackError::ProcessCrashed {
-                    exit_code,
-                    stderr: format!("Failed to write to GPAC stdin: {e}. Stderr: {stderr}"),
-                });
+                return Err(self.map_stdin_io_error("write to", e).await);
             }
             if let Err(e) = stdin.flush().await {
-                if self.status_rx.borrow().is_none() {
-                    let mut rx = self.status_rx.clone();
-                    let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
-                }
-                let exit_code = self.status_rx.borrow().as_ref().and_then(|s| s.code);
-                let stderr = self.get_recent_stderr();
-                return Err(DrmpackError::ProcessCrashed {
-                    exit_code,
-                    stderr: format!("Failed to flush GPAC stdin: {e}. Stderr: {stderr}"),
-                });
+                return Err(self.map_stdin_io_error("flush", e).await);
             }
             Ok(())
         } else {
             Err(DrmpackError::Session(
                 "Cannot write data: GPAC stdin pipe is closed".into(),
             ))
+        }
+    }
+
+    async fn map_stdin_io_error(&self, op: &str, err: std::io::Error) -> DrmpackError {
+        if self.status_rx.borrow().is_none() {
+            let mut rx = self.status_rx.clone();
+            let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        }
+        let exit_code = self.status_rx.borrow().as_ref().and_then(|s| s.code);
+        let stderr = self.get_recent_stderr();
+        DrmpackError::ProcessCrashed {
+            exit_code,
+            stderr: format!("Failed to {op} GPAC stdin: {err}. Stderr: {stderr}"),
         }
     }
 
@@ -403,11 +394,6 @@ impl GpacProcess {
         self.exit_tx.subscribe()
     }
 
-    /// Process ID of the spawned GPAC child process.
-    pub fn pid(&self) -> Option<u32> {
-        self.pid
-    }
-
     /// Terminate the child process immediately via SIGKILL.
     pub fn kill(&self) {
         self.kill_token.cancel();
@@ -449,7 +435,7 @@ mod tests {
         assert_eq!(args[3], "cecrypt:cfile=/tmp/drm.xml");
         assert_eq!(args[4], "-o");
         assert!(args[5].contains("/dev/shm/test_stream/live.mpd:dual"));
-        assert!(args[5].contains("profile=live:dmode=dynamic:segdur=2:pssh=mv"));
+        assert!(args[5].contains("profile=live:dmode=dynauto:segdur=2:pssh=mv"));
         assert!(args[5].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
     }
 

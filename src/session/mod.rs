@@ -286,7 +286,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     /// Push raw media bytes to every active Representation.
     #[instrument(skip(self, bytes), fields(len = bytes.len()))]
     pub async fn push_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        let is_media = !bytes.is_empty();
+        let is_media = bytes.windows(4).any(|w| w == b"moof");
         self.push_data(bytes, is_media).await
     }
 
@@ -306,12 +306,6 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         {
             let lifecycle = self.lifecycle.lock().await;
             if lifecycle.state == SessionState::Failed {
-                if let Some(ref failure) = lifecycle.terminal_failure {
-                    return Err(DrmpackError::PackagingSession(Arc::clone(failure)));
-                }
-                drop(lifecycle);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                let lifecycle = self.lifecycle.lock().await;
                 return Err(lifecycle.failure_error());
             }
             if lifecycle.state != SessionState::Active {
@@ -334,11 +328,6 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
             SessionState::Closed => return Ok(()),
             SessionState::Closing => return Ok(()),
             SessionState::Failed => {
-                if lifecycle.terminal_failure.is_none() {
-                    drop(lifecycle);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                    lifecycle = self.lifecycle.lock().await;
-                }
                 let err = lifecycle.failure_error();
                 drop(lifecycle);
                 let _ = self.cleanup_control_dir().await;
@@ -378,7 +367,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         }
 
         let control_cleanup = self.cleanup_control_dir().await.err();
-        let output_cleanup = if self.config.auto_cleanup {
+        let output_cleanup = if failures.is_empty() && self.config.auto_cleanup {
             self.cleanup_output_dir().await.err()
         } else {
             None
@@ -483,16 +472,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         if self.cancellation_token.is_cancelled() {
             let lifecycle = self.lifecycle.lock().await;
             return match lifecycle.state {
-                SessionState::Failed => {
-                    if let Some(ref failure) = lifecycle.terminal_failure {
-                        Err(DrmpackError::PackagingSession(Arc::clone(failure)))
-                    } else {
-                        drop(lifecycle);
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        let lifecycle = self.lifecycle.lock().await;
-                        Err(lifecycle.failure_error())
-                    }
-                }
+                SessionState::Failed => Err(lifecycle.failure_error()),
                 _ => Err(DrmpackError::Session("PackagingSession is closed".into())),
             };
         }
@@ -500,16 +480,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         let lifecycle = self.lifecycle.lock().await;
         match lifecycle.state {
             SessionState::Active => Ok(()),
-            SessionState::Failed => {
-                if let Some(ref failure) = lifecycle.terminal_failure {
-                    Err(DrmpackError::PackagingSession(Arc::clone(failure)))
-                } else {
-                    drop(lifecycle);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                    let lifecycle = self.lifecycle.lock().await;
-                    Err(lifecycle.failure_error())
-                }
-            }
+            SessionState::Failed => Err(lifecycle.failure_error()),
             SessionState::Closing | SessionState::Closed => {
                 Err(DrmpackError::Session("PackagingSession is closed".into()))
             }
@@ -772,22 +743,7 @@ async fn create_control_dir(config: &PackagingSessionConfig) -> Result<PathBuf> 
         .unwrap_or_else(|| std::env::temp_dir().join("drmpack-control"));
     let control_dir = parent.join(format!("{}-{}", config.content_id, Uuid::new_v4()));
 
-    // Under concurrent execution, retry if parent directory is temporarily being unlinked or modified
-    let mut attempts = 0;
-    loop {
-        match tokio::fs::create_dir_all(&control_dir).await {
-            Ok(()) => break,
-            Err(e)
-                if attempts < 3
-                    && (e.raw_os_error() == Some(22)
-                        || e.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                attempts += 1;
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            Err(e) => return Err(DrmpackError::Io(e)),
-        }
-    }
+    tokio::fs::create_dir_all(&control_dir).await?;
 
     #[cfg(unix)]
     {
@@ -809,12 +765,12 @@ struct WatchdogContext {
     cancellation_token: CancellationToken,
 }
 
-/// Finalize and verify that all HLS media playlists in `output_dir` contain the `#EXT-X-ENDLIST` tag.
+/// Verify that all HLS media manifests in `output_dir` contain the `#EXT-X-ENDLIST` tag.
 ///
-/// In dynamic live packaging (`dmode=dynamic`), GPAC leaves playlists open for live segments.
-/// When finalizing a session where media segments were pushed, this verifies and guarantees
-/// the presence of `#EXT-X-ENDLIST` to prevent player/CDN stall while preserving LL-HLS parts.
-/// Master playlists (containing `#EXT-X-STREAM-INF:` or `#EXT-X-MEDIA:TYPE=AUDIO`)
+/// In dynamic live packaging (`dmode=dynauto`), GPAC moves manifests to static upon EOF on stdin
+/// and appends `#EXT-X-ENDLIST` to HLS media manifests. When finalizing a session where media
+/// segments were pushed, this verifies the presence of `#EXT-X-ENDLIST` to prevent player/CDN stall.
+/// Master manifests (containing `#EXT-X-STREAM-INF:` or `#EXT-X-MEDIA:TYPE=AUDIO`)
 /// do not contain `#EXT-X-ENDLIST` per RFC 8216 and are skipped.
 pub async fn verify_hls_endlist(output_dir: &Path) -> Result<()> {
     if !output_dir.exists() {
@@ -828,47 +784,18 @@ pub async fn verify_hls_endlist(output_dir: &Path) -> Result<()> {
         Ok(d) => d,
         Err(e) => return Err(DrmpackError::Io(e)),
     };
-    let mut media_playlists_found = 0;
+    let mut media_manifests_found = 0;
 
     while let Ok(Some(entry)) = dir.next_entry().await {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("m3u8") {
-            let mut content = tokio::fs::read_to_string(&path).await?;
+            let content = tokio::fs::read_to_string(&path).await?;
             if content.contains("#EXT-X-STREAM-INF:") {
-                // Master playlist - RFC 8216 forbids EXT-X-ENDLIST in master playlists
+                // Master manifest - RFC 8216 forbids EXT-X-ENDLIST in master manifests
                 continue;
             }
             if content.contains("#EXT-X-TARGETDURATION:") || content.contains("#EXTINF:") {
-                media_playlists_found += 1;
-                if !content.contains("#EXT-X-ENDLIST") {
-                    if !content.ends_with('\n') {
-                        content.push('\n');
-                    }
-                    content.push_str("#EXT-X-ENDLIST\n");
-
-                    // Atomic write-then-rename in the same directory to prevent CDN readers
-                    // from reading a partially written or truncated manifest.
-                    let temp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-                    tokio::fs::write(&temp_path, &content).await.map_err(|e| {
-                        DrmpackError::Io(std::io::Error::new(
-                            e.kind(),
-                            format!(
-                                "Failed to write temp manifest '{}': {e}",
-                                temp_path.display()
-                            ),
-                        ))
-                    })?;
-                    tokio::fs::rename(&temp_path, &path).await.map_err(|e| {
-                        let _ = std::fs::remove_file(&temp_path);
-                        DrmpackError::Io(std::io::Error::new(
-                            e.kind(),
-                            format!(
-                                "Failed to atomically rename manifest to '{}': {e}",
-                                path.display()
-                            ),
-                        ))
-                    })?;
-                }
+                media_manifests_found += 1;
                 if !content.contains("#EXT-X-ENDLIST") {
                     return Err(DrmpackError::Session(format!(
                         "HLS media manifest '{}' is missing finalization tag #EXT-X-ENDLIST",
@@ -879,14 +806,44 @@ pub async fn verify_hls_endlist(output_dir: &Path) -> Result<()> {
         }
     }
 
-    if media_playlists_found == 0 {
+    if media_manifests_found == 0 {
         return Err(DrmpackError::Session(format!(
-            "No HLS media playlists found in '{}' to verify #EXT-X-ENDLIST",
+            "No HLS media manifests found in '{}' to verify #EXT-X-ENDLIST",
             output_dir.display()
         )));
     }
 
     Ok(())
+}
+
+async fn cleanup_watchdog_dirs(
+    control_dir: &Path,
+    output_dir_for_cleanup: Option<&PathBuf>,
+) -> (Option<DrmpackError>, Option<DrmpackError>) {
+    let control_cleanup = tokio::fs::remove_dir_all(control_dir).await.err().map(|error| {
+        DrmpackError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Failed to clean up private control directory '{}': {error}",
+                control_dir.display()
+            ),
+        ))
+    });
+
+    let output_cleanup = match output_dir_for_cleanup {
+        Some(output_dir) => tokio::fs::remove_dir_all(output_dir).await.err().map(|error| {
+            DrmpackError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "Failed to clean up Ramdisk output directory '{}': {error}",
+                    output_dir.display()
+                ),
+            ))
+        }),
+        None => None,
+    };
+
+    (control_cleanup, output_cleanup)
 }
 
 fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<JoinHandle<()>>) {
@@ -902,20 +859,6 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
     } = ctx;
 
     let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel(16);
-
-    let (exit_tx, mut exit_rx) =
-        mpsc::channel::<(EncryptionScheme, crate::gpac::process::ProcessExitStatus)>(16);
-    for rep in cluster.representations() {
-        let scheme = rep.scheme;
-        let mut rep_exit_rx = rep.subscribe_exit();
-        let tx = exit_tx.clone();
-        tokio::spawn(async move {
-            if let Ok(status) = rep_exit_rx.recv().await {
-                let _ = tx.send((scheme, status)).await;
-            }
-        });
-    }
-    drop(exit_tx);
 
     let handle = tokio::spawn(async move {
         loop {
@@ -941,10 +884,28 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                     }
                     cancellation_token.cancel();
 
+                    warn!(?timeout, "PackagingSession inactivity watchdog elapsed");
+
                     let is_active = {
                         let mut lifecycle_guard = lifecycle.lock().await;
                         if lifecycle_guard.state == SessionState::Active {
                             lifecycle_guard.state = SessionState::Failed;
+                            let initial_failures = cluster
+                                .schemes()
+                                .into_iter()
+                                .map(|scheme| {
+                                    RepresentationFailure::new(
+                                        scheme,
+                                        PackagingOperation::Watchdog,
+                                        DrmpackError::Session(
+                                            "PackagingSession inactivity watchdog elapsed".into(),
+                                        ),
+                                    )
+                                })
+                                .collect();
+                            lifecycle_guard.terminal_failure = Some(Arc::new(
+                                PackagingSessionFailure::from_failures(initial_failures),
+                            ));
                             true
                         } else {
                             false
@@ -954,55 +915,34 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                         break;
                     }
 
-                    warn!(?timeout, "PackagingSession inactivity watchdog elapsed");
-
-                    let mut failures = cluster
-                        .schemes()
-                        .into_iter()
-                        .map(|scheme| {
-                            RepresentationFailure::new(
-                                scheme,
-                                PackagingOperation::Watchdog,
-                                DrmpackError::Session(
-                                    "PackagingSession inactivity watchdog elapsed".into(),
-                                ),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-
                     let close_failures = cluster
                         .close(
                             finalization_timeout.min(WATCHDOG_FINALIZATION_TIMEOUT),
                             PackagingOperation::Watchdog,
                         )
                         .await;
-                    failures.extend(close_failures);
 
-                    let control_cleanup = tokio::fs::remove_dir_all(&control_dir).await.err().map(|error| {
-                        DrmpackError::Io(std::io::Error::new(
-                            error.kind(),
-                            format!(
-                                "Failed to clean up private control directory '{}': {error}",
-                                control_dir.display()
-                            ),
-                        ))
-                    });
-
-                    let output_cleanup = match output_dir_for_cleanup {
-                        Some(ref output_dir) => tokio::fs::remove_dir_all(output_dir).await.err().map(|error| {
-                            DrmpackError::Io(std::io::Error::new(
-                                error.kind(),
-                                format!(
-                                    "Failed to clean up Ramdisk output directory '{}': {error}",
-                                    output_dir.display()
-                                ),
-                            ))
-                        }),
-                        None => None,
-                    };
+                    let (control_cleanup, output_cleanup) = cleanup_watchdog_dirs(
+                        &control_dir,
+                        output_dir_for_cleanup.as_ref(),
+                    ).await;
 
                     {
                         let mut lifecycle_guard = lifecycle.lock().await;
+                        let mut failures = cluster
+                            .schemes()
+                            .into_iter()
+                            .map(|scheme| {
+                                RepresentationFailure::new(
+                                    scheme,
+                                    PackagingOperation::Watchdog,
+                                    DrmpackError::Session(
+                                        "PackagingSession inactivity watchdog elapsed".into(),
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        failures.extend(close_failures);
                         lifecycle_guard.terminal_failure = Some(Arc::new(
                             PackagingSessionFailure::from_failures(failures)
                                 .with_cleanup_failures(output_cleanup, control_cleanup),
@@ -1011,24 +951,11 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                     is_terminal.store(true, Ordering::Release);
                     break;
                 }
-                Some((scheme, exit_status)) = exit_rx.recv() => {
+                (scheme, exit_status) = cluster.wait_for_exit() => {
                     if cancellation_token.is_cancelled() {
                         break;
                     }
                     cancellation_token.cancel();
-
-                    let is_active = {
-                        let mut lifecycle_guard = lifecycle.lock().await;
-                        if lifecycle_guard.state == SessionState::Active {
-                            lifecycle_guard.state = SessionState::Failed;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if !is_active {
-                        break;
-                    }
 
                     let stderr = cluster.get_recent_stderr(scheme).await;
                     error!(
@@ -1038,50 +965,59 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                         "ProcessSupervisor detected premature GPAC subprocess exit"
                     );
 
-                    let crash_error = DrmpackError::ProcessCrashed {
-                        exit_code: exit_status.code,
-                        stderr: if exit_status.success {
-                            format!("GPAC exited prematurely before PackagingSession::close(). Stderr: {stderr}")
-                        } else {
-                            stderr
-                        },
+                    let crash_msg = if exit_status.success {
+                        format!("GPAC exited prematurely before PackagingSession::close(). Stderr: {stderr}")
+                    } else {
+                        stderr.clone()
                     };
 
-                    let mut failures = vec![
-                        RepresentationFailure::new(scheme, PackagingOperation::Supervisor, crash_error)
-                    ];
+                    let is_active = {
+                        let mut lifecycle_guard = lifecycle.lock().await;
+                        if lifecycle_guard.state == SessionState::Active {
+                            lifecycle_guard.state = SessionState::Failed;
+                            let initial_failure = RepresentationFailure::new(
+                                scheme,
+                                PackagingOperation::Supervisor,
+                                DrmpackError::ProcessCrashed {
+                                    exit_code: exit_status.code,
+                                    stderr: crash_msg.clone(),
+                                },
+                            );
+                            lifecycle_guard.terminal_failure = Some(Arc::new(
+                                PackagingSessionFailure::from_failures(vec![initial_failure]),
+                            ));
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !is_active {
+                        break;
+                    }
 
                     // Dual-mode symmetric fail-fast: immediately teardown remaining peer representation(s)
                     let peer_failures = cluster.abort_peers(scheme).await;
-                    failures.extend(peer_failures);
 
-                    let control_cleanup = tokio::fs::remove_dir_all(&control_dir).await.err().map(|error| {
-                        DrmpackError::Io(std::io::Error::new(
-                            error.kind(),
-                            format!(
-                                "Failed to clean up private control directory '{}': {error}",
-                                control_dir.display()
-                            ),
-                        ))
-                    });
-
-                    let output_cleanup = match output_dir_for_cleanup {
-                        Some(ref output_dir) => tokio::fs::remove_dir_all(output_dir).await.err().map(|error| {
-                            DrmpackError::Io(std::io::Error::new(
-                                error.kind(),
-                                format!(
-                                    "Failed to clean up Ramdisk output directory '{}': {error}",
-                                    output_dir.display()
-                                ),
-                            ))
-                        }),
-                        None => None,
-                    };
+                    let (control_cleanup, output_cleanup) = cleanup_watchdog_dirs(
+                        &control_dir,
+                        output_dir_for_cleanup.as_ref(),
+                    ).await;
 
                     {
                         let mut lifecycle_guard = lifecycle.lock().await;
+                        let mut all_failures = vec![
+                            RepresentationFailure::new(
+                                scheme,
+                                PackagingOperation::Supervisor,
+                                DrmpackError::ProcessCrashed {
+                                    exit_code: exit_status.code,
+                                    stderr: crash_msg,
+                                },
+                            )
+                        ];
+                        all_failures.extend(peer_failures);
                         lifecycle_guard.terminal_failure = Some(Arc::new(
-                            PackagingSessionFailure::from_failures(failures)
+                            PackagingSessionFailure::from_failures(all_failures)
                                 .with_cleanup_failures(output_cleanup, control_cleanup),
                         ));
                     }
@@ -1626,17 +1562,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_hls_endlist_no_media_playlists() {
+    async fn test_verify_hls_endlist_no_media_manifests() {
         let dir = std::env::temp_dir().join(format!("drmpack_no_m3u8_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let res = verify_hls_endlist(&dir).await;
         assert!(res.is_err());
-        assert!(matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("No HLS media playlists found")));
+        assert!(matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("No HLS media manifests found")));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_verify_hls_endlist_skips_master_playlist() {
+    async fn test_verify_hls_endlist_skips_master_manifest() {
         let dir = std::env::temp_dir().join(format!("drmpack_master_only_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let master_path = dir.join("master.m3u8");
@@ -1649,11 +1585,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_hls_endlist_appends_and_verifies() {
-        let dir = std::env::temp_dir().join(format!("drmpack_append_endlist_{}", Uuid::new_v4()));
+    async fn test_verify_hls_endlist_missing_endlist_fails() {
+        let dir = std::env::temp_dir().join(format!("drmpack_missing_endlist_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let media_path = dir.join("live_1.m3u8");
         let initial = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment1.m4s\n";
+        tokio::fs::write(&media_path, initial).await.unwrap();
+
+        let res = verify_hls_endlist(&dir).await;
+        assert!(res.is_err());
+        assert!(matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("missing finalization tag #EXT-X-ENDLIST")));
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_verify_hls_endlist_present_succeeds() {
+        let dir = std::env::temp_dir().join(format!("drmpack_valid_endlist_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let media_path = dir.join("live_1.m3u8");
+        let initial = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment1.m4s\n#EXT-X-ENDLIST\n";
         tokio::fs::write(&media_path, initial).await.unwrap();
 
         let res = verify_hls_endlist(&dir).await;
@@ -1661,14 +1611,6 @@ mod tests {
 
         let content = tokio::fs::read_to_string(&media_path).await.unwrap();
         assert!(content.contains("#EXT-X-ENDLIST"));
-        assert!(content.ends_with("#EXT-X-ENDLIST\n"));
-
-        // Re-verification shouldn't duplicate the tag
-        let res2 = verify_hls_endlist(&dir).await;
-        assert!(res2.is_ok());
-        let content2 = tokio::fs::read_to_string(&media_path).await.unwrap();
-        assert_eq!(content2.matches("#EXT-X-ENDLIST").count(), 1);
-
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
@@ -1806,12 +1748,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drmpack_ro_dir_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let media_path = dir.join("live_1.m3u8");
-        tokio::fs::write(&media_path, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg1.m4s\n")
+        tokio::fs::write(&media_path, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg1.m4s\n#EXT-X-ENDLIST\n")
             .await
             .unwrap();
 
-        // Revoke write permission from directory so atomic temp write fails
-        tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+        // Revoke read permission from directory so read_dir fails
+        tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000))
             .await
             .unwrap();
 
