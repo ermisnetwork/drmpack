@@ -1,5 +1,4 @@
-#![cfg(all(feature = "cpix", feature = "speke-v2"))]
-#![allow(deprecated)]
+#![cfg(feature = "cpix")]
 
 use bytes::Bytes;
 use drmpack::cpix::{CpixConfig, CpixProvider};
@@ -306,6 +305,10 @@ async fn test_cpix_provider_fetch_cenc_keys() {
     assert_eq!(
         requests[0].headers.get("accept").map(|s| s.as_str()),
         Some("application/xml")
+    );
+    assert!(
+        !requests[0].headers.contains_key("x-speke-version"),
+        "Generic CPIX provider must not send X-Speke-Version header"
     );
     assert!(requests[0].body.contains(r#"contentId="mock-content-1""#));
 

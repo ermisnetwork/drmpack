@@ -188,6 +188,68 @@ const SAMPLE_SPEKE_RESPONSE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </cpix:ContentKeyUsageRuleList>
 </cpix:CPIX>"#;
 
+const SAMPLE_SPEKE_RESPONSE_DUAL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<cpix:CPIX xmlns:cpix="urn:dashif:org:cpix" xmlns:pskc="urn:ietf:params:xml:ns:keyprov:pskc" contentId="speke-dual-content">
+  <cpix:ContentKeyList>
+    <cpix:ContentKey kid="11111111-1111-1111-1111-111111111111" commonEncryptionScheme="cenc">
+      <cpix:Data>
+        <pskc:Secret>
+          <pskc:PlainValue>MTExMTExMTExMTExMTExMQ==</pskc:PlainValue>
+        </pskc:Secret>
+      </cpix:Data>
+    </cpix:ContentKey>
+    <cpix:ContentKey kid="22222222-2222-2222-2222-222222222222" commonEncryptionScheme="cbcs">
+      <cpix:Data>
+        <pskc:Secret>
+          <pskc:PlainValue>MjIyMjIyMjIyMjIyMjIyMg==</pskc:PlainValue>
+        </pskc:Secret>
+      </cpix:Data>
+    </cpix:ContentKey>
+  </cpix:ContentKeyList>
+  <cpix:DRMSystemList>
+    <cpix:DRMSystem kid="11111111-1111-1111-1111-111111111111" systemId="edef8ba9-79d6-4ace-a3c8-27dcd51d21ed">
+      <cpix:PSSH>AAAAUHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAADASEJmZmZmZmZmZMzMwAAAAAAMaBU5hZ3JhIg1UZXN0X0tSX0luZGV4OAFI88aJmwY=</cpix:PSSH>
+    </cpix:DRMSystem>
+    <cpix:DRMSystem kid="22222222-2222-2222-2222-222222222222" systemId="94ce86fb-07ff-4f43-adb8-93d2fa968ca2">
+      <cpix:URIExtXKey>skd://22222222-2222-2222-2222-222222222222</cpix:URIExtXKey>
+    </cpix:DRMSystem>
+  </cpix:DRMSystemList>
+  <cpix:ContentKeyUsageRuleList>
+    <cpix:ContentKeyUsageRule kid="11111111-1111-1111-1111-111111111111" intendedTrackType="HD">
+      <cpix:VideoFilter/>
+    </cpix:ContentKeyUsageRule>
+    <cpix:ContentKeyUsageRule kid="22222222-2222-2222-2222-222222222222" intendedTrackType="HD">
+      <cpix:VideoFilter/>
+    </cpix:ContentKeyUsageRule>
+  </cpix:ContentKeyUsageRuleList>
+</cpix:CPIX>"#;
+
+const SAMPLE_SPEKE_RESPONSE_MULTI_TIER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<cpix:CPIX xmlns:cpix="urn:dashif:org:cpix" xmlns:pskc="urn:ietf:params:xml:ns:keyprov:pskc" contentId="speke-multi-tier">
+  <cpix:ContentKeyList>
+    <cpix:ContentKey kid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" commonEncryptionScheme="cenc">
+      <cpix:Data><pskc:Secret><pskc:PlainValue>c2Rfa2V5X2J5dGVzXzEyMw==</pskc:PlainValue></pskc:Secret></cpix:Data>
+    </cpix:ContentKey>
+    <cpix:ContentKey kid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" commonEncryptionScheme="cenc">
+      <cpix:Data><pskc:Secret><pskc:PlainValue>aGRfa2V5X2J5dGVzXzEyMw==</pskc:PlainValue></pskc:Secret></cpix:Data>
+    </cpix:ContentKey>
+    <cpix:ContentKey kid="cccccccc-cccc-cccc-cccc-cccccccccccc" commonEncryptionScheme="cenc">
+      <cpix:Data><pskc:Secret><pskc:PlainValue>NGtfa2V5X2J5dGVzXzEyMw==</pskc:PlainValue></pskc:Secret></cpix:Data>
+    </cpix:ContentKey>
+  </cpix:ContentKeyList>
+  <cpix:ContentKeyUsageRuleList>
+    <cpix:ContentKeyUsageRule kid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" intendedTrackType="SD">
+      <cpix:VideoFilter/>
+    </cpix:ContentKeyUsageRule>
+    <cpix:ContentKeyUsageRule kid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" intendedTrackType="HD">
+      <cpix:VideoFilter/>
+    </cpix:ContentKeyUsageRule>
+    <cpix:ContentKeyUsageRule kid="cccccccc-cccc-cccc-cccc-cccccccccccc" intendedTrackType="4K">
+      <cpix:VideoFilter/>
+    </cpix:ContentKeyUsageRule>
+  </cpix:ContentKeyUsageRuleList>
+</cpix:CPIX>"#;
+
 #[tokio::test]
 async fn test_speke_client_basic_auth_and_headers() {
     let server = SpekeMockServer::start(200, SAMPLE_SPEKE_RESPONSE.into()).await;
@@ -556,7 +618,8 @@ async fn test_speke_v2_provider_sigv4_auth() {
 async fn test_speke_v2_provider_dynamic_signer() {
     let server = SpekeMockServer::start(200, SAMPLE_SPEKE_RESPONSE.into()).await;
     let config = SpekeConfig::new(&server.url).with_signer(
-        |builder: reqwest::RequestBuilder, body: &str| {
+        |builder: reqwest::RequestBuilder, endpoint: &str, body: &str| {
+            assert!(endpoint.contains("/speke"));
             builder.header("x-amz-content-sha256", format!("body-len-{}", body.len()))
         },
     );
@@ -574,6 +637,215 @@ async fn test_speke_v2_provider_dynamic_signer() {
     assert!(r.headers.contains_key("x-amz-content-sha256"));
     let sha_val = r.headers.get("x-amz-content-sha256").unwrap();
     assert!(sha_val.starts_with("body-len-"));
+}
+
+#[tokio::test]
+async fn test_speke_v2_provider_sigv4_with_payload_hash() {
+    let server = SpekeMockServer::start(200, SAMPLE_SPEKE_RESPONSE.into()).await;
+    let config = SpekeConfig::new(&server.url).with_auth(SpekeAuth::sigv4_with_payload_hash(
+        "AWS4-HMAC-SHA256 Credential=AKIA...",
+        Some("session-tok-123"),
+        Some("20260905T150000Z"),
+        Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    ));
+    let client = SpekeClient::with_config(config);
+
+    let req = KeyRequest::new("speke-sigv4-sha")
+        .with_tier(TrackType::Video, QualityTier::hd())
+        .with_encryption_scheme(EncryptionScheme::Cenc);
+
+    client.fetch_keys(&req).await.unwrap();
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 1);
+    let r = &requests[0];
+    assert_eq!(
+        r.headers.get("authorization").map(|s| s.as_str()),
+        Some("AWS4-HMAC-SHA256 Credential=AKIA...")
+    );
+    assert_eq!(
+        r.headers.get("x-amz-security-token").map(|s| s.as_str()),
+        Some("session-tok-123")
+    );
+    assert_eq!(
+        r.headers.get("x-amz-date").map(|s| s.as_str()),
+        Some("20260905T150000Z")
+    );
+    assert_eq!(
+        r.headers.get("x-amz-content-sha256").map(|s| s.as_str()),
+        Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    );
+}
+
+#[tokio::test]
+async fn test_speke_client_dual_scheme_keys() {
+    let server = SpekeMockServer::start(200, SAMPLE_SPEKE_RESPONSE_DUAL.into()).await;
+    let client = SpekeClient::new(&server.url);
+
+    let req = KeyRequest::new("speke-dual-content")
+        .with_tier(TrackType::Video, QualityTier::hd())
+        .with_drm_system(DrmSystem::Widevine)
+        .with_drm_system(DrmSystem::FairPlay)
+        .with_encryption_scheme(EncryptionScheme::Dual);
+
+    let keyset = client.fetch_keys(&req).await.unwrap();
+    assert_eq!(keyset.len(), 2);
+
+    let cenc_key = keyset
+        .get_key_for_scheme(EncryptionScheme::Cenc, TrackType::Video, &QualityTier::hd())
+        .expect("CENC key must be present in SPEKE v2 dual keyset");
+
+    let cbcs_key = keyset
+        .get_key_for_scheme(EncryptionScheme::Cbcs, TrackType::Video, &QualityTier::hd())
+        .expect("CBCS key must be present in SPEKE v2 dual keyset");
+
+    assert_ne!(cenc_key.kid, cbcs_key.kid);
+    assert_ne!(cenc_key.key, cbcs_key.key);
+    assert_eq!(
+        cenc_key.kid.0,
+        Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
+    );
+    assert_eq!(
+        cbcs_key.kid.0,
+        Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap()
+    );
+
+    let fairplay = keyset
+        .pssh
+        .iter()
+        .find(|p| p.drm_system == DrmSystem::FairPlay)
+        .expect("FairPlay signaling must be present");
+    assert_eq!(
+        fairplay.data.as_ref(),
+        b"skd://22222222-2222-2222-2222-222222222222"
+    );
+}
+
+#[tokio::test]
+async fn test_speke_client_multi_tier_keys() {
+    let server = SpekeMockServer::start(200, SAMPLE_SPEKE_RESPONSE_MULTI_TIER.into()).await;
+    let client = SpekeClient::new(&server.url);
+
+    let req = KeyRequest::new("speke-multi-tier")
+        .with_tier(TrackType::Video, QualityTier::sd())
+        .with_tier(TrackType::Video, QualityTier::hd())
+        .with_tier(TrackType::Video, QualityTier::uhd_4k())
+        .with_encryption_scheme(EncryptionScheme::Cenc);
+
+    let keyset = client.fetch_keys(&req).await.unwrap();
+    assert_eq!(keyset.len(), 3);
+
+    let sd = keyset
+        .get_key_for_scheme(EncryptionScheme::Cenc, TrackType::Video, &QualityTier::sd())
+        .unwrap();
+    let hd = keyset
+        .get_key_for_scheme(EncryptionScheme::Cenc, TrackType::Video, &QualityTier::hd())
+        .unwrap();
+    let uhd = keyset
+        .get_key_for_scheme(
+            EncryptionScheme::Cenc,
+            TrackType::Video,
+            &QualityTier::uhd_4k(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        sd.kid.0,
+        Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
+    );
+    assert_eq!(
+        hd.kid.0,
+        Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap()
+    );
+    assert_eq!(
+        uhd.kid.0,
+        Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_speke_client_aws_error_headers() {
+    let server = SpekeMockServer::start_with_headers(
+        400,
+        "Payload does not match schema".into(),
+        vec![("x-amzn-errortype", "InvalidParameterException")],
+    )
+    .await;
+    let client = SpekeClient::new(&server.url);
+
+    let req = KeyRequest::new("speke-content-1")
+        .with_tier(TrackType::Video, QualityTier::hd())
+        .with_encryption_scheme(EncryptionScheme::Cenc);
+
+    let result = client.fetch_keys(&req).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("SPEKE v2 provider"));
+    assert!(err_msg.contains("HTTP 400"));
+    assert!(err_msg.contains("InvalidParameterException"));
+    assert!(err_msg.contains("Payload does not match schema"));
+}
+
+#[tokio::test]
+async fn test_speke_client_signer_header_ordering() {
+    let server = SpekeMockServer::start(200, "<ok/>".into()).await;
+    let config = SpekeConfig::new(&server.url).with_signer(
+        |builder: reqwest::RequestBuilder, _endpoint: &str, _body: &str| {
+            builder.header("x-signed-header", "valid-signature")
+        },
+    );
+    let client = SpekeClient::with_config(config);
+
+    let mut extra = reqwest::header::HeaderMap::new();
+    extra.insert(
+        reqwest::header::HeaderName::from_static("x-extra-caller-header"),
+        reqwest::header::HeaderValue::from_static("caller-val"),
+    );
+
+    let resp = client
+        .raw_exchange("<req/>", &[], Some(&extra))
+        .await
+        .unwrap();
+    assert!(resp.is_success());
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 1);
+    let r = &requests[0];
+    assert_eq!(
+        r.headers.get("x-extra-caller-header").map(|s| s.as_str()),
+        Some("caller-val")
+    );
+    assert_eq!(
+        r.headers.get("x-signed-header").map(|s| s.as_str()),
+        Some("valid-signature")
+    );
+}
+
+#[tokio::test]
+async fn test_speke_config_builder_shorthands() {
+    let config = SpekeConfig::new("http://speke.example.com").with_x_api_key("api-key-test-123");
+    assert_eq!(config.auth, Some(SpekeAuth::x_api_key("api-key-test-123")));
+
+    let config_sig = SpekeConfig::new("http://speke.example.com").with_sigv4(
+        "AWS4-HMAC...",
+        Some("tok"),
+        Some("20260905T000000Z"),
+    );
+    assert!(matches!(config_sig.auth, Some(SpekeAuth::SigV4 { .. })));
+}
+
+#[tokio::test]
+async fn test_speke_exchange_response_parse_keys() {
+    let resp = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::OK,
+        headers: reqwest::header::HeaderMap::new(),
+        body: SAMPLE_SPEKE_RESPONSE.into(),
+    };
+
+    assert!(resp.is_success());
+    let keyset = resp.parse_keys(None).expect("parse_keys must succeed");
+    assert_eq!(keyset.len(), 1);
 }
 
 #[test]

@@ -37,11 +37,7 @@ pub use types::{
 };
 
 #[cfg(feature = "cpix")]
-pub use cpix::{CpixKeySpec, CpixRequestBuilder, CpixResponseParser};
-
-#[cfg(all(feature = "cpix", feature = "speke-v2"))]
-#[allow(deprecated)]
-pub use cpix::{CpixConfig, CpixProvider};
+pub use cpix::{CpixConfig, CpixKeySpec, CpixProvider, CpixRequestBuilder, CpixResponseParser};
 
 #[cfg(feature = "speke-v2")]
 pub use speke::{

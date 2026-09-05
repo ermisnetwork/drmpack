@@ -12,7 +12,7 @@ widevine = []
 fairplay = []
 playready = []
 hls-legacy = []
-cpix = ["dep:quick-xml"]
+cpix = ["dep:reqwest", "dep:quick-xml"]
 speke-v2 = ["cpix", "dep:reqwest"]
 axinom = ["speke-v2"]
 

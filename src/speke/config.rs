@@ -43,6 +43,21 @@ impl SpekeConfig {
         self
     }
 
+    /// Set standard AWS API Key (`x-api-key`) authentication shorthand.
+    pub fn with_x_api_key(self, api_key: impl Into<String>) -> Self {
+        self.with_auth(SpekeAuth::x_api_key(api_key))
+    }
+
+    /// Set standard AWS SigV4 authentication shorthand.
+    pub fn with_sigv4(
+        self,
+        authorization: impl Into<String>,
+        security_token: Option<impl Into<String>>,
+        date: Option<impl Into<String>>,
+    ) -> Self {
+        self.with_auth(SpekeAuth::sigv4(authorization, security_token, date))
+    }
+
     /// Add a custom HTTP header.
     pub fn with_header(
         mut self,
@@ -111,9 +126,32 @@ mod tests {
     }
 
     #[test]
+    fn test_speke_config_auth_shorthands() {
+        let config_api =
+            SpekeConfig::new("https://speke.example.com/api").with_x_api_key("my-api-key");
+        assert_eq!(config_api.auth, Some(SpekeAuth::x_api_key("my-api-key")));
+
+        let config_sigv4 = SpekeConfig::new("https://speke.example.com/api").with_sigv4(
+            "AWS4-HMAC...",
+            Some("token"),
+            Some("date"),
+        );
+        assert_eq!(
+            config_sigv4.auth,
+            Some(SpekeAuth::sigv4(
+                "AWS4-HMAC...",
+                Some("token"),
+                Some("date")
+            ))
+        );
+    }
+
+    #[test]
     fn test_speke_config_signer() {
         let config = SpekeConfig::new("https://speke.example.com/api").with_signer(
-            |req: reqwest::RequestBuilder, _body: &str| req.header("x-signed-by", "custom-signer"),
+            |req: reqwest::RequestBuilder, _endpoint: &str, _body: &str| {
+                req.header("x-signed-by", "custom-signer")
+            },
         );
 
         assert!(config.signer.is_some());

@@ -18,21 +18,34 @@ pub enum SpekeAuth {
         security_token: Option<String>,
         /// Optional `x-amz-date` header value (e.g. `20260905T120000Z`).
         date: Option<String>,
+        /// Optional `x-amz-content-sha256` payload hash header value.
+        content_sha256: Option<String>,
     },
 }
 
 /// Trait for custom or dynamic request signers (e.g. AWS SigV4 signer).
 pub trait SpekeSigner: Send + Sync {
     /// Sign an outgoing HTTP request before sending.
-    fn sign(&self, builder: reqwest::RequestBuilder, body: &str) -> reqwest::RequestBuilder;
+    /// Receives the request builder, the target endpoint URL, and the XML request body.
+    fn sign(
+        &self,
+        builder: reqwest::RequestBuilder,
+        endpoint: &str,
+        body: &str,
+    ) -> reqwest::RequestBuilder;
 }
 
 impl<F> SpekeSigner for F
 where
-    F: Fn(reqwest::RequestBuilder, &str) -> reqwest::RequestBuilder + Send + Sync,
+    F: Fn(reqwest::RequestBuilder, &str, &str) -> reqwest::RequestBuilder + Send + Sync,
 {
-    fn sign(&self, builder: reqwest::RequestBuilder, body: &str) -> reqwest::RequestBuilder {
-        self(builder, body)
+    fn sign(
+        &self,
+        builder: reqwest::RequestBuilder,
+        endpoint: &str,
+        body: &str,
+    ) -> reqwest::RequestBuilder {
+        self(builder, endpoint, body)
     }
 }
 
@@ -73,6 +86,22 @@ impl SpekeAuth {
             authorization: authorization.into(),
             security_token: security_token.map(|s| s.into()),
             date: date.map(|d| d.into()),
+            content_sha256: None,
+        }
+    }
+
+    /// Create AWS SigV4 authorization with `Authorization` header, session token, x-amz-date, and payload hash.
+    pub fn sigv4_with_payload_hash(
+        authorization: impl Into<String>,
+        security_token: Option<impl Into<String>>,
+        date: Option<impl Into<String>>,
+        content_sha256: Option<impl Into<String>>,
+    ) -> Self {
+        Self::SigV4 {
+            authorization: authorization.into(),
+            security_token: security_token.map(|s| s.into()),
+            date: date.map(|d| d.into()),
+            content_sha256: content_sha256.map(|s| s.into()),
         }
     }
 
@@ -95,6 +124,7 @@ impl SpekeAuth {
                 authorization,
                 security_token,
                 date,
+                content_sha256,
             } => {
                 let mut b = builder.header(reqwest::header::AUTHORIZATION, authorization);
                 if let Some(token) = security_token {
@@ -102,6 +132,9 @@ impl SpekeAuth {
                 }
                 if let Some(d) = date {
                     b = b.header("x-amz-date", d);
+                }
+                if let Some(sha) = content_sha256 {
+                    b = b.header("x-amz-content-sha256", sha);
                 }
                 b
             }
@@ -130,6 +163,7 @@ impl fmt::Debug for SpekeAuth {
                 authorization: _,
                 security_token,
                 date,
+                content_sha256,
             } => f
                 .debug_struct("SpekeAuth::SigV4")
                 .field("authorization", &"[REDACTED]")
@@ -138,6 +172,7 @@ impl fmt::Debug for SpekeAuth {
                     &security_token.as_ref().map(|_| "[REDACTED]"),
                 )
                 .field("date", date)
+                .field("content_sha256", content_sha256)
                 .finish(),
         }
     }
@@ -166,16 +201,19 @@ mod tests {
         assert!(!debug_api_key.contains("key-secret-1234"));
         assert!(debug_api_key.contains("x-api-key"));
 
-        let auth_sigv4 = SpekeAuth::sigv4(
+        let auth_sigv4 = SpekeAuth::sigv4_with_payload_hash(
             "AWS4-HMAC-SHA256 Credential=AKIA...",
             Some("session-token-secret"),
             Some("20260905T120000Z"),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
         );
         let debug_sigv4 = format!("{:?}", auth_sigv4);
         assert!(debug_sigv4.contains("[REDACTED]"));
         assert!(!debug_sigv4.contains("AKIA"));
         assert!(!debug_sigv4.contains("session-token-secret"));
         assert!(debug_sigv4.contains("20260905T120000Z"));
+        assert!(debug_sigv4
+            .contains("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
     }
 
     #[test]
