@@ -25,6 +25,60 @@ impl SpekeExchangeResponse {
         self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
+    /// Retrieve the `X-Speke-Version` header value from the key server response if present.
+    pub fn speke_version(&self) -> Option<&str> {
+        self.header("x-speke-version")
+    }
+
+    /// Retrieve the `X-Speke-User-Agent` header value from the key server response if present.
+    pub fn speke_user_agent(&self) -> Option<&str> {
+        self.header("x-speke-user-agent")
+    }
+
+    /// Format non-200 error detail from response headers and body.
+    ///
+    /// Checks for error diagnostic headers in order of precedence:
+    /// - `x-amzn-errortype` (AWS API Gateway / Lambda)
+    /// - `x-speke-error-message` (AWS SPEKE v2)
+    /// - `x-axdrm-errormessage` (Axinom Key Service)
+    ///
+    /// Combines the header message with the response body if the body contains additional context.
+    /// Safely truncates response bodies exceeding 2048 bytes on UTF-8 boundaries to avoid log flooding.
+    pub fn format_error_detail(&self) -> String {
+        let error_header = self
+            .header("x-amzn-errortype")
+            .or_else(|| self.header("x-speke-error-message"))
+            .or_else(|| self.header("x-axdrm-errormessage"))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
+        let body_trim = self.body.trim();
+        let truncated_storage;
+        let body_bounded = if body_trim.len() > 2048 {
+            let mut end = 2048;
+            while !body_trim.is_char_boundary(end) {
+                end -= 1;
+            }
+            truncated_storage = format!("{}...", &body_trim[..end]);
+            truncated_storage.as_str()
+        } else {
+            body_trim
+        };
+
+        match (error_header, body_bounded) {
+            (Some(hdr), body) if !body.is_empty() && !body.eq_ignore_ascii_case(hdr) => {
+                format!("{hdr} ({body})")
+            }
+            (Some(hdr), _) => hdr.to_string(),
+            (None, body) if !body.is_empty() => body.to_string(),
+            (None, _) => self
+                .status
+                .canonical_reason()
+                .unwrap_or("Unknown")
+                .to_string(),
+        }
+    }
+
     /// Parse the XML body of the SPEKE exchange into a KeySet.
     pub fn parse_keys(
         &self,
@@ -83,7 +137,7 @@ impl SpekeClient {
     ///
     /// Automatically attaches:
     /// - `X-Speke-Version: 2.0`
-    /// - `X-Speke-User-Agent: drmpack/<version>`
+    /// - `User-Agent: drmpack/<version>`
     /// - `Content-Type: application/xml`
     /// - `Accept: application/xml`
     /// - Authentication headers configured on `SpekeConfig`
@@ -104,7 +158,7 @@ impl SpekeClient {
             .post(&self.config.endpoint)
             .header("X-Speke-Version", "2.0")
             .header(
-                "X-Speke-User-Agent",
+                reqwest::header::USER_AGENT,
                 concat!("drmpack/", env!("CARGO_PKG_VERSION")),
             )
             .header(reqwest::header::CONTENT_TYPE, "application/xml")
@@ -165,28 +219,9 @@ impl KeyProvider for SpekeClient {
         let resp = self.raw_exchange(&xml_request, &[], None).await?;
 
         if !resp.status.is_success() {
-            let error_header = resp
-                .header("x-amzn-errortype")
-                .or_else(|| resp.header("x-speke-error-message"))
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-
-            let body_trim = resp.body.trim();
-            let detail = match (error_header, body_trim) {
-                (Some(hdr), body) if !body.is_empty() && !body.contains(hdr) => {
-                    format!("{hdr} ({body})")
-                }
-                (Some(hdr), _) => hdr.to_string(),
-                (None, body) if !body.is_empty() => body.to_string(),
-                (None, _) => resp
-                    .status
-                    .canonical_reason()
-                    .unwrap_or("Unknown")
-                    .to_string(),
-            };
-
+            let detail = resp.format_error_detail();
             return Err(DrmpackError::KeyProvider(format!(
-                "SPEKE v2 provider at '{}' returned HTTP {}: {}",
+                "SPEKE v2 endpoint at '{}' returned HTTP {}: {}",
                 self.config.endpoint, resp.status, detail
             )));
         }

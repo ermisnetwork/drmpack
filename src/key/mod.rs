@@ -8,12 +8,14 @@ use uuid::Uuid;
 
 use std::fmt;
 
-#[cfg(all(feature = "cpix", feature = "speke-v2"))]
-#[allow(deprecated)]
+#[cfg(feature = "cpix")]
 pub use crate::cpix::CpixProvider;
 
 #[cfg(feature = "speke-v2")]
-pub use crate::speke::{SpekeClient, SpekeV2Config, SpekeV2Provider};
+pub use crate::speke::{
+    SigV4Credentials, SpekeAuth, SpekeClient, SpekeConfig, SpekeExchangeResponse, SpekeSigner,
+    SpekeV2Config, SpekeV2Provider,
+};
 
 #[cfg(feature = "axinom")]
 pub use crate::vendor::axinom::AxinomProvider;

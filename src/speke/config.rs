@@ -1,4 +1,4 @@
-use crate::speke::auth::{SpekeAuth, SpekeSigner};
+use crate::speke::auth::{SigV4Credentials, SpekeAuth, SpekeSigner};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,10 +52,15 @@ impl SpekeConfig {
     pub fn with_sigv4(
         self,
         authorization: impl Into<String>,
-        security_token: Option<impl Into<String>>,
-        date: Option<impl Into<String>>,
+        security_token: Option<&str>,
+        date: impl Into<String>,
     ) -> Self {
         self.with_auth(SpekeAuth::sigv4(authorization, security_token, date))
+    }
+
+    /// Set AWS SigV4 authentication using pre-built [`SigV4Credentials`].
+    pub fn with_sigv4_credentials(self, credentials: SigV4Credentials) -> Self {
+        self.with_auth(SpekeAuth::SigV4(credentials))
     }
 
     /// Add a custom HTTP header.
@@ -134,16 +139,23 @@ mod tests {
         let config_sigv4 = SpekeConfig::new("https://speke.example.com/api").with_sigv4(
             "AWS4-HMAC...",
             Some("token"),
-            Some("date"),
+            "20260905T120000Z",
         );
         assert_eq!(
             config_sigv4.auth,
             Some(SpekeAuth::sigv4(
                 "AWS4-HMAC...",
                 Some("token"),
-                Some("date")
+                "20260905T120000Z"
             ))
         );
+
+        let creds = SigV4Credentials::new("AWS4-HMAC...", "20260905T120000Z")
+            .with_security_token("token")
+            .with_content_sha256("sha256hash");
+        let config_creds =
+            SpekeConfig::new("https://speke.example.com/api").with_sigv4_credentials(creds.clone());
+        assert_eq!(config_creds.auth, Some(SpekeAuth::SigV4(creds)));
     }
 
     #[test]

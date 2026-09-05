@@ -113,25 +113,7 @@ impl AxinomProvider {
             })?;
 
         if !resp.status.is_success() {
-            let ax_err_msg = resp
-                .header("x-axdrm-errormessage")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            let error_body = resp.body;
-            let detail = match (ax_err_msg, error_body.trim()) {
-                (Some(header_msg), body) if !body.is_empty() && !body.contains(&header_msg) => {
-                    format!("{header_msg} ({body})")
-                }
-                (Some(header_msg), _) => header_msg,
-                (None, body) if !body.is_empty() => body.to_string(),
-                (None, _) => resp
-                    .status
-                    .canonical_reason()
-                    .unwrap_or("Unknown")
-                    .to_string(),
-            };
-
+            let detail = resp.format_error_detail();
             return Err(DrmpackError::KeyProvider(format!(
                 "Axinom Key Service at '{}' returned HTTP {}: {}",
                 self.config.endpoint, resp.status, detail

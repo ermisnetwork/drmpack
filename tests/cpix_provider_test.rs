@@ -918,3 +918,14 @@ async fn test_cpix_provider_selective_encryption_clear_audio() {
     let _ = session.cleanup().await;
     let _ = tokio::fs::remove_dir_all(&out_dir).await;
 }
+
+#[test]
+fn test_cpix_provider_exports() {
+    use drmpack::key::CpixProvider as KeyCpixProvider;
+    use drmpack::CpixProvider as RootCpixProvider;
+
+    let p1 = RootCpixProvider::new("http://example.com/cpix");
+    let p2 = KeyCpixProvider::new("http://example.com/cpix");
+    assert_eq!(p1.config().endpoint, "http://example.com/cpix");
+    assert_eq!(p2.config().endpoint, "http://example.com/cpix");
+}

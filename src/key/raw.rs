@@ -4,14 +4,15 @@ use crate::types::{EncryptionScheme, QualityTier, TrackType};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Static key source supplying manually configured keys for testing and development.
+/// In-memory test double and pre-shared key store supplying manually configured
+/// ContentKeys and PSSH boxes for unit/E2E testing and offline packaging without network I/O.
 #[derive(Debug, Clone, Default)]
 pub struct StaticKeySource {
     keys: HashMap<(Option<EncryptionScheme>, TrackType, QualityTier), ContentKey>,
     pssh: Vec<PsshData>,
 }
 
-/// Backwards compatibility alias for StaticKeySource.
+/// Legacy alias for [`StaticKeySource`]. Prefer using [`StaticKeySource`].
 pub type RawKeyProvider = StaticKeySource;
 
 impl StaticKeySource {
@@ -79,7 +80,7 @@ impl KeyProvider for StaticKeySource {
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "agnostic".into());
                     return Err(DrmpackError::KeyProvider(format!(
-                        "No raw key configured for {:?} / {} (scheme: {})",
+                        "No static key configured for {:?} / {} (scheme: {})",
                         track_type, tier, scheme_desc
                     )));
                 }

@@ -2,7 +2,7 @@ pub mod auth;
 pub mod client;
 pub mod config;
 
-pub use auth::{SpekeAuth, SpekeSigner};
+pub use auth::{SigV4Credentials, SpekeAuth, SpekeSigner};
 pub use client::{SpekeClient, SpekeExchangeResponse};
 pub use config::SpekeConfig;
 

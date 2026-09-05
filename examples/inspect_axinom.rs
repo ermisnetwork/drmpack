@@ -111,7 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .post(&config.endpoint)
             .header(reqwest::header::AUTHORIZATION, auth_value)
             .header("X-Speke-Version", "2.0")
-            .header("X-Speke-User-Agent", "drmpack-inspector/0.1.0")
+            .header(
+                reqwest::header::USER_AGENT,
+                concat!("drmpack-inspector/", env!("CARGO_PKG_VERSION")),
+            )
             .header(reqwest::header::CONTENT_TYPE, "application/xml")
             .header(reqwest::header::ACCEPT, "application/xml")
             .body(xml_request);

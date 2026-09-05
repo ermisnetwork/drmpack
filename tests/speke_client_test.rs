@@ -280,7 +280,7 @@ async fn test_speke_client_basic_auth_and_headers() {
         Some("2.0")
     );
     assert_eq!(
-        r.headers.get("x-speke-user-agent").map(|s| s.as_str()),
+        r.headers.get("user-agent").map(|s| s.as_str()),
         Some("drmpack/0.1.0")
     );
     assert_eq!(
@@ -586,7 +586,7 @@ async fn test_speke_v2_provider_sigv4_auth() {
     let config = SpekeConfig::new(&server.url).with_auth(SpekeAuth::sigv4(
         "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260905/us-east-1/execute-api/aws4_request",
         Some("session-token-xyz"),
-        Some("20260905T120000Z"),
+        "20260905T120000Z",
     ));
     let provider = SpekeV2Provider::with_config(config);
 
@@ -645,7 +645,7 @@ async fn test_speke_v2_provider_sigv4_with_payload_hash() {
     let config = SpekeConfig::new(&server.url).with_auth(SpekeAuth::sigv4_with_payload_hash(
         "AWS4-HMAC-SHA256 Credential=AKIA...",
         Some("session-tok-123"),
-        Some("20260905T150000Z"),
+        "20260905T150000Z",
         Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
     ));
     let client = SpekeClient::with_config(config);
@@ -781,7 +781,7 @@ async fn test_speke_client_aws_error_headers() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     let err_msg = err.to_string();
-    assert!(err_msg.contains("SPEKE v2 provider"));
+    assert!(err_msg.contains("SPEKE v2 endpoint"));
     assert!(err_msg.contains("HTTP 400"));
     assert!(err_msg.contains("InvalidParameterException"));
     assert!(err_msg.contains("Payload does not match schema"));
@@ -830,9 +830,24 @@ async fn test_speke_config_builder_shorthands() {
     let config_sig = SpekeConfig::new("http://speke.example.com").with_sigv4(
         "AWS4-HMAC...",
         Some("tok"),
-        Some("20260905T000000Z"),
+        "20260905T000000Z",
     );
-    assert!(matches!(config_sig.auth, Some(SpekeAuth::SigV4 { .. })));
+    assert!(matches!(config_sig.auth, Some(SpekeAuth::SigV4(_))));
+
+    // Verify calling with_sigv4 and SpekeAuth::sigv4 with None compiles without turbofish
+    let config_sig_none = SpekeConfig::new("http://speke.example.com").with_sigv4(
+        "AWS4-HMAC...",
+        None,
+        "20260905T000000Z",
+    );
+    assert!(matches!(config_sig_none.auth, Some(SpekeAuth::SigV4(_))));
+
+    let auth_sig_none = SpekeAuth::sigv4("AWS4-HMAC...", None, "20260905T000000Z");
+    assert!(matches!(auth_sig_none, SpekeAuth::SigV4(_)));
+
+    let auth_sig_hash_none =
+        SpekeAuth::sigv4_with_payload_hash("AWS4-HMAC...", None, "20260905T000000Z", None);
+    assert!(matches!(auth_sig_hash_none, SpekeAuth::SigV4(_)));
 }
 
 #[tokio::test]
@@ -857,4 +872,164 @@ fn test_speke_v2_exports_at_crate_and_key_module() {
     let p2 = KeySpekeV2Provider::new("http://localhost/speke");
     assert_eq!(p1.config().endpoint, "http://localhost/speke");
     assert_eq!(p2.config().endpoint, "http://localhost/speke");
+}
+
+#[tokio::test]
+async fn test_speke_sigv4_credentials_builder_and_redaction() {
+    let creds = drmpack::speke::SigV4Credentials::new(
+        "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260905/us-east-1/s3/aws4_request",
+        "20260905T120000Z",
+    )
+    .with_security_token("sts-session-token-xyz")
+    .with_content_sha256("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+    assert_eq!(creds.date, "20260905T120000Z");
+    assert_eq!(
+        creds.security_token.as_deref(),
+        Some("sts-session-token-xyz")
+    );
+    assert_eq!(
+        creds.content_sha256.as_deref(),
+        Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    );
+
+    let debug_str = format!("{:?}", creds);
+    assert!(debug_str.contains("[REDACTED]"));
+    assert!(!debug_str.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!debug_str.contains("sts-session-token-xyz"));
+    assert!(debug_str.contains("20260905T120000Z"));
+    assert!(debug_str.contains("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+
+    // Verify SpekeConfig::with_sigv4_credentials
+    let config =
+        SpekeConfig::new("https://speke.example.com").with_sigv4_credentials(creds.clone());
+    assert_eq!(config.auth, Some(SpekeAuth::SigV4(creds.clone())));
+
+    // Verify SpekeAuth::sigv4_credentials constructor
+    let auth_from_creds = SpekeAuth::sigv4_credentials(creds);
+    assert!(matches!(auth_from_creds, SpekeAuth::SigV4(_)));
+}
+
+#[test]
+fn test_speke_exchange_response_speke_user_agent_and_version() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-speke-user-agent"),
+        reqwest::header::HeaderValue::from_static("SpekeKeyServer/2.0.42"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-speke-version"),
+        reqwest::header::HeaderValue::from_static("2.0"),
+    );
+
+    let resp = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::OK,
+        headers,
+        body: "<ok/>".into(),
+    };
+
+    assert_eq!(resp.speke_user_agent(), Some("SpekeKeyServer/2.0.42"));
+    assert_eq!(resp.speke_version(), Some("2.0"));
+
+    let resp_empty = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::OK,
+        headers: reqwest::header::HeaderMap::new(),
+        body: "<ok/>".into(),
+    };
+    assert_eq!(resp_empty.speke_user_agent(), None);
+    assert_eq!(resp_empty.speke_version(), None);
+}
+
+#[test]
+fn test_speke_exchange_response_format_error_detail() {
+    // 1. AWS error header with distinct body
+    let mut h1 = reqwest::header::HeaderMap::new();
+    h1.insert(
+        reqwest::header::HeaderName::from_static("x-amzn-errortype"),
+        reqwest::header::HeaderValue::from_static("InvalidParameterException"),
+    );
+    let r1 = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::BAD_REQUEST,
+        headers: h1,
+        body: "Detailed error in JSON payload".into(),
+    };
+    assert_eq!(
+        r1.format_error_detail(),
+        "InvalidParameterException (Detailed error in JSON payload)"
+    );
+
+    // 2. AWS error header where body contains same string
+    let mut h2 = reqwest::header::HeaderMap::new();
+    h2.insert(
+        reqwest::header::HeaderName::from_static("x-speke-error-message"),
+        reqwest::header::HeaderValue::from_static("Key not found"),
+    );
+    let r2 = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::NOT_FOUND,
+        headers: h2,
+        body: "Key not found".into(),
+    };
+    assert_eq!(r2.format_error_detail(), "Key not found");
+
+    // 3. Axinom error header
+    let mut h3 = reqwest::header::HeaderMap::new();
+    h3.insert(
+        reqwest::header::HeaderName::from_static("x-axdrm-errormessage"),
+        reqwest::header::HeaderValue::from_static("Invalid tenant key"),
+    );
+    let r3 = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::UNAUTHORIZED,
+        headers: h3,
+        body: "Auth failed".into(),
+    };
+    assert_eq!(r3.format_error_detail(), "Invalid tenant key (Auth failed)");
+
+    // 4. Body only
+    let r4 = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        headers: reqwest::header::HeaderMap::new(),
+        body: "Internal server failure".into(),
+    };
+    assert_eq!(r4.format_error_detail(), "Internal server failure");
+
+    // 5. Neither header nor body: falls back to canonical reason
+    let r5 = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::BAD_GATEWAY,
+        headers: reqwest::header::HeaderMap::new(),
+        body: "".into(),
+    };
+    assert_eq!(r5.format_error_detail(), "Bad Gateway");
+
+    // 6. Body mentions the error header substring but contains additional detail - must NOT be dropped!
+    let mut h6 = reqwest::header::HeaderMap::new();
+    h6.insert(
+        reqwest::header::HeaderName::from_static("x-amzn-errortype"),
+        reqwest::header::HeaderValue::from_static("InvalidParameterException"),
+    );
+    let r6 = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::BAD_REQUEST,
+        headers: h6,
+        body: "{\"message\": \"InvalidParameterException: ContentId is required\"}".into(),
+    };
+    assert_eq!(
+        r6.format_error_detail(),
+        "InvalidParameterException ({\"message\": \"InvalidParameterException: ContentId is required\"})"
+    );
+
+    // 7. Enormous body (> 2048 chars) is safely truncated with ellipsis
+    let mut h7 = reqwest::header::HeaderMap::new();
+    h7.insert(
+        reqwest::header::HeaderName::from_static("x-amzn-errortype"),
+        reqwest::header::HeaderValue::from_static("InternalServerError"),
+    );
+    let huge_body = "X".repeat(3000);
+    let r7 = drmpack::speke::SpekeExchangeResponse {
+        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        headers: h7,
+        body: huge_body,
+    };
+    let detail7 = r7.format_error_detail();
+    assert!(detail7.starts_with("InternalServerError ("));
+    assert!(detail7.ends_with("...)"));
+    assert!(detail7.len() <= 2100);
 }

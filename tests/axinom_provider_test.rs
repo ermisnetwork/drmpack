@@ -336,7 +336,7 @@ async fn test_axinom_provider_headers_and_basic_auth() {
         Some("2.0")
     );
     assert_eq!(
-        r.headers.get("x-speke-user-agent").map(|s| s.as_str()),
+        r.headers.get("user-agent").map(|s| s.as_str()),
         Some("drmpack/0.1.0")
     );
 

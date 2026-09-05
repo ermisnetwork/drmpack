@@ -41,8 +41,8 @@ pub use cpix::{CpixConfig, CpixKeySpec, CpixProvider, CpixRequestBuilder, CpixRe
 
 #[cfg(feature = "speke-v2")]
 pub use speke::{
-    SpekeAuth, SpekeClient, SpekeConfig, SpekeExchangeResponse, SpekeSigner, SpekeV2Config,
-    SpekeV2Provider,
+    SigV4Credentials, SpekeAuth, SpekeClient, SpekeConfig, SpekeExchangeResponse, SpekeSigner,
+    SpekeV2Config, SpekeV2Provider,
 };
 
 #[cfg(feature = "axinom")]
