@@ -166,6 +166,7 @@ pub struct Rendition {
     pub track_type: TrackType,
     pub quality_tier: QualityTier,
     pub track_id: Option<u32>,
+    pub language: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub bitrate: u64,
@@ -188,6 +189,7 @@ impl Rendition {
             track_type: TrackType::Video,
             quality_tier,
             track_id: None,
+            language: None,
             width: Some(width),
             height: Some(height),
             bitrate,
@@ -208,6 +210,7 @@ impl Rendition {
             track_type: TrackType::Audio,
             quality_tier,
             track_id: None,
+            language: None,
             width: None,
             height: None,
             bitrate,
@@ -224,6 +227,7 @@ impl Rendition {
             track_type: TrackType::Subtitle,
             quality_tier: QualityTier::new("default"),
             track_id: None,
+            language: None,
             width: None,
             height: None,
             bitrate: 0,
@@ -237,6 +241,17 @@ impl Rendition {
     pub fn with_track_id(mut self, track_id: u32) -> Self {
         self.track_id = Some(track_id);
         self
+    }
+
+    /// Set rendition language tag (e.g. "en", "eng", "spa").
+    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+        self.language = Some(language.into());
+        self
+    }
+
+    /// Returns the configured `track_id`, or falls back to `(index + 1) as u32` (1-based ISO-BMFF convention).
+    pub fn effective_track_id(&self, index: usize) -> u32 {
+        self.track_id.unwrap_or((index + 1) as u32)
     }
 
     /// Mark this rendition as clear (unencrypted), bypassing GPAC cecrypt.
@@ -280,6 +295,7 @@ mod tests {
         assert_eq!(r.track_type, TrackType::Video);
         assert_eq!(r.quality_tier, QualityTier::hd());
         assert_eq!(r.track_id, None);
+        assert_eq!(r.language, None);
         assert_eq!(r.width, Some(1920));
         assert_eq!(r.height, Some(1080));
         assert_eq!(r.bitrate, 2_000_000);
@@ -294,6 +310,7 @@ mod tests {
         assert_eq!(r.track_type, TrackType::Audio);
         assert_eq!(r.quality_tier, QualityTier::sd());
         assert_eq!(r.track_id, None);
+        assert_eq!(r.language, None);
         assert_eq!(r.width, None);
         assert_eq!(r.height, None);
         assert_eq!(r.bitrate, 128_000);
@@ -308,6 +325,7 @@ mod tests {
         assert_eq!(r.track_type, TrackType::Subtitle);
         assert_eq!(r.quality_tier, QualityTier::new("default"));
         assert_eq!(r.track_id, None);
+        assert_eq!(r.language, None);
         assert_eq!(r.width, None);
         assert_eq!(r.height, None);
         assert_eq!(r.bitrate, 0);
@@ -333,6 +351,18 @@ mod tests {
         )
         .with_track_id(1);
         assert_eq!(v.track_id, Some(1));
+    }
+
+    #[test]
+    fn test_rendition_language_and_effective_track_id() {
+        let r_default = Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2");
+        assert_eq!(r_default.effective_track_id(0), 1);
+        assert_eq!(r_default.effective_track_id(2), 3);
+        assert_eq!(r_default.language, None);
+
+        let r_custom = r_default.with_track_id(10).with_language("eng");
+        assert_eq!(r_custom.effective_track_id(0), 10);
+        assert_eq!(r_custom.language.as_deref(), Some("eng"));
     }
 
     #[test]

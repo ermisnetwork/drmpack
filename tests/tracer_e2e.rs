@@ -296,7 +296,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
     );
 
     let live_m3u8 = out_dir.join("live_1.m3u8");
-    assert!(live_m3u8.exists(), "live_1.m3u8 media playlist must exist");
+    assert!(live_m3u8.exists(), "live_1.m3u8 media manifest must exist");
     let m3u8_content = tokio::fs::read_to_string(&live_m3u8).await.unwrap();
     assert!(m3u8_content.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
     assert!(
@@ -432,17 +432,17 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
     assert!(cenc_mpd.contains(&kid.0.hyphenated().to_string()));
     assert!(cbcs_mpd.contains(&kid.0.hyphenated().to_string()));
 
-    let cenc_variant = tokio::fs::read_to_string(out_dir.join("cenc/live_1.m3u8"))
+    let cenc_media_m3u8 = tokio::fs::read_to_string(out_dir.join("cenc/live_1.m3u8"))
         .await
         .unwrap();
-    let cbcs_variant = tokio::fs::read_to_string(out_dir.join("cbcs/live_1.m3u8"))
+    let cbcs_media_m3u8 = tokio::fs::read_to_string(out_dir.join("cbcs/live_1.m3u8"))
         .await
         .unwrap();
-    assert!(cenc_variant.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
-    assert!(cenc_variant.contains(&format!(
+    assert!(cenc_media_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
+    assert!(cenc_media_m3u8.contains(&format!(
         "URI=\"data:text/plain;base64,{expected_pssh_base64}\""
     )));
-    assert!(cbcs_variant.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"));
+    assert!(cbcs_media_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"));
 
     for (scheme, init_path, segment_path, expected_scheme) in [
         (

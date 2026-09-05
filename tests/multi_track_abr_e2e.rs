@@ -371,65 +371,65 @@ async fn test_multi_track_abr_e2e_cenc() {
 
     // 2. Verify HLS Master Manifest
     let m3u8_path = out_dir.join("live.m3u8");
-    assert!(m3u8_path.exists(), "live.m3u8 master playlist must exist");
+    assert!(m3u8_path.exists(), "live.m3u8 master manifest must exist");
     let master = tokio::fs::read_to_string(&m3u8_path).await.unwrap();
 
     assert!(
         master.contains("#EXT-X-STREAM-INF"),
-        "Master playlist must contain variant streams"
+        "Master manifest must contain rendition streams"
     );
     assert!(
         master.contains(r#"AUDIO="audio""#),
-        "Variant streams must link to audio group"
+        "Rendition streams must link to audio group"
     );
     assert!(
         master.contains(r#"SUBTITLES="subs""#),
-        "Variant streams must link to subtitles group"
+        "Rendition streams must link to subtitles group"
     );
     assert!(
         master.contains("#EXT-X-MEDIA:TYPE=AUDIO"),
-        "Master playlist must declare #EXT-X-MEDIA:TYPE=AUDIO"
+        "Master manifest must declare #EXT-X-MEDIA:TYPE=AUDIO"
     );
     assert!(
         master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"),
-        "Master playlist must declare #EXT-X-MEDIA:TYPE=SUBTITLES"
+        "Master manifest must declare #EXT-X-MEDIA:TYPE=SUBTITLES"
     );
 
-    // 3. Verify Media Playlists
-    // Video variant 1 (1080p) must be encrypted
+    // 3. Verify Media Manifests
+    // Video rendition 1 (1080p) must be encrypted
     let v1_m3u8 = tokio::fs::read_to_string(out_dir.join("live_1.m3u8"))
         .await
         .unwrap();
     assert!(
         v1_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"),
-        "Video variant 1 must have SAMPLE-AES-CTR key"
+        "Video rendition 1 must have SAMPLE-AES-CTR key"
     );
 
-    // Video variant 2 (720p) must be encrypted
+    // Video rendition 2 (720p) must be encrypted
     let v2_m3u8 = tokio::fs::read_to_string(out_dir.join("live_2.m3u8"))
         .await
         .unwrap();
     assert!(
         v2_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"),
-        "Video variant 2 must have SAMPLE-AES-CTR key"
+        "Video rendition 2 must have SAMPLE-AES-CTR key"
     );
 
-    // Audio playlist must be encrypted
+    // Audio media manifest must be encrypted
     let a_m3u8 = tokio::fs::read_to_string(out_dir.join("live_3.m3u8"))
         .await
         .unwrap();
     assert!(
         a_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"),
-        "Audio playlist must have SAMPLE-AES-CTR key"
+        "Audio manifest must have SAMPLE-AES-CTR key"
     );
 
-    // Subtitle playlist must be CLEAR (NO #EXT-X-KEY)
+    // Subtitle media manifest must be CLEAR (NO #EXT-X-KEY)
     let s_m3u8 = tokio::fs::read_to_string(out_dir.join("live_4.m3u8"))
         .await
         .unwrap();
     assert!(
         !s_m3u8.contains("#EXT-X-KEY"),
-        "Subtitle playlist must NOT contain #EXT-X-KEY (must be clear text)"
+        "Subtitle manifest must NOT contain #EXT-X-KEY (must be clear text)"
     );
 
     // 4. Verify CMAF Init Boxes with find_box
@@ -583,7 +583,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
 
     // 1. Verify HLS Master Manifest
     let master_path = out_dir.join("live.m3u8");
-    assert!(master_path.exists(), "live.m3u8 master playlist must exist");
+    assert!(master_path.exists(), "live.m3u8 master manifest must exist");
     let master = tokio::fs::read_to_string(&master_path).await.unwrap();
 
     assert!(master.contains("#EXT-X-STREAM-INF"));
@@ -592,21 +592,21 @@ async fn test_multi_track_abr_e2e_cbcs() {
     assert!(master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
     assert!(master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"));
 
-    // 2. Verify HLS Media Playlists (FairPlay SAMPLE-AES)
+    // 2. Verify HLS Media Manifests (FairPlay SAMPLE-AES)
     let v1_m3u8 = tokio::fs::read_to_string(out_dir.join("live_1.m3u8"))
         .await
         .unwrap();
     assert!(
         v1_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"),
-        "CBCS video playlist 1 must have METHOD=SAMPLE-AES"
+        "CBCS video rendition 1 must have METHOD=SAMPLE-AES"
     );
     assert!(
         v1_m3u8.contains(r#"KEYFORMAT="com.apple.streamingkeydelivery""#),
-        "CBCS video playlist 1 must specify FairPlay key format"
+        "CBCS video rendition 1 must specify FairPlay key format"
     );
     assert!(
         v1_m3u8.contains("URI=\"skd://"),
-        "CBCS video playlist 1 must contain skd:// URI"
+        "CBCS video rendition 1 must contain skd:// URI"
     );
 
     let v2_m3u8 = tokio::fs::read_to_string(out_dir.join("live_2.m3u8"))
@@ -614,11 +614,11 @@ async fn test_multi_track_abr_e2e_cbcs() {
         .unwrap();
     assert!(
         v2_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"),
-        "CBCS video playlist 2 must have METHOD=SAMPLE-AES"
+        "CBCS video rendition 2 must have METHOD=SAMPLE-AES"
     );
     assert!(
         v2_m3u8.contains(r#"KEYFORMAT="com.apple.streamingkeydelivery""#),
-        "CBCS video playlist 2 must specify FairPlay key format"
+        "CBCS video rendition 2 must specify FairPlay key format"
     );
 
     let a_m3u8 = tokio::fs::read_to_string(out_dir.join("live_3.m3u8"))
@@ -626,16 +626,16 @@ async fn test_multi_track_abr_e2e_cbcs() {
         .unwrap();
     assert!(
         a_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"),
-        "CBCS audio playlist must have METHOD=SAMPLE-AES"
+        "CBCS audio rendition must have METHOD=SAMPLE-AES"
     );
 
-    // Subtitle playlist must be CLEAR
+    // Subtitle manifest must be CLEAR
     let s_m3u8 = tokio::fs::read_to_string(out_dir.join("live_4.m3u8"))
         .await
         .unwrap();
     assert!(
         !s_m3u8.contains("#EXT-X-KEY"),
-        "Subtitle playlist must NOT contain #EXT-X-KEY (cleartext)"
+        "Subtitle manifest must NOT contain #EXT-X-KEY (cleartext)"
     );
 
     // 3. Verify CMAF Init Boxes with find_box
@@ -1196,11 +1196,15 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
         "avc1.4d401f",
     )
     .with_track_id(2);
-    let r_a_en =
-        Rendition::audio("a_en", QualityTier::new("en"), 128_000, "mp4a.40.2").with_track_id(3);
-    let r_a_es =
-        Rendition::audio("a_es", QualityTier::new("es"), 96_000, "mp4a.40.2").with_track_id(4);
-    let r_sub = Rendition::subtitle("subs_en", "tx3g").with_track_id(5);
+    let r_a_en = Rendition::audio("a_en", QualityTier::new("en"), 128_000, "mp4a.40.2")
+        .with_language("en")
+        .with_track_id(3);
+    let r_a_es = Rendition::audio("a_es", QualityTier::new("es"), 96_000, "mp4a.40.2")
+        .with_language("es")
+        .with_track_id(4);
+    let r_sub = Rendition::subtitle("subs_en", "tx3g")
+        .with_language("en")
+        .with_track_id(5);
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_lang_{}", Uuid::new_v4()));
 
@@ -1280,7 +1284,7 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
         "HLS master must declare subtitles"
     );
 
-    // 3. Verify media playlists
+    // 3. Verify media manifests
     let a_en_m3u8 = tokio::fs::read_to_string(out_dir.join("live_3.m3u8"))
         .await
         .unwrap();

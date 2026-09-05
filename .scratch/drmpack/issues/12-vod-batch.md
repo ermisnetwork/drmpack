@@ -20,7 +20,7 @@
 
 **Blocked by:** 09 (Multi-Track ABR Engine)
 
-**Status:** deferred (backlog — focus on live streaming pipeline first)
+**Status:** deferred (backlog — focus on live streaming session first)
 
 - [ ] Define `VodSource` (`SingleFile(PathBuf)`, `SeparateFiles(Vec<PathBuf>)`)
 - [ ] Define `VodPackagingConfig` (source, output_dir, renditions, scheme, segment_duration, single_file_byterange)

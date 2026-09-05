@@ -99,7 +99,7 @@ impl RepresentationCluster {
             let drm_path = control_dir.join(format!("{scheme}.xml"));
             let mut drm_config = GpacDrmConfig::new(scheme);
             for (index, rendition) in config.renditions.iter().enumerate() {
-                let track_id = rendition.track_id.unwrap_or((index + 1) as u32);
+                let track_id = rendition.effective_track_id(index);
                 let mut track = GpacTrackConfig::new(
                     track_id,
                     rendition.track_type,

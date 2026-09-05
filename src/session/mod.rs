@@ -607,7 +607,7 @@ fn validate_config(config: &PackagingSessionConfig) -> Result<()> {
             ));
         }
 
-        let track_id = rendition.track_id.unwrap_or((index + 1) as u32);
+        let track_id = rendition.effective_track_id(index);
         if track_id == 0 {
             return Err(DrmpackError::InvalidConfig(
                 "track_id cannot be 0 (ISO-BMFF track IDs must be >= 1)".into(),

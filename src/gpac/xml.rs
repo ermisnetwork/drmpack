@@ -91,7 +91,7 @@ impl GpacDrmXmlGenerator {
         writeln!(xml, r#"<GPACDRM type="{}">"#, scheme_str).unwrap();
 
         for pssh in &key_set.pssh {
-            // FairPlay strictly uses HLS playlist signaling and must not emit ISO-BMFF PSSH boxes
+            // FairPlay strictly uses HLS manifest signaling and must not emit ISO-BMFF PSSH boxes
             if pssh.drm_system == DrmSystem::FairPlay {
                 continue;
             }
