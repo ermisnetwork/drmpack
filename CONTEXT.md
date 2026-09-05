@@ -19,8 +19,16 @@ A unit of media input — muxed fMP4 stream pushed into the packaging session.
 _Avoid_: Chunk, fragment, frame
 
 **Rendition**:
-A single quality variant of the content, defined by resolution and bitrate (e.g. 720p@2Mbps). Belongs to exactly one QualityTier.
+A single quality variant of the content, defined by resolution and bitrate (e.g. 720p@2Mbps). Belongs to exactly one QualityTier. Can optionally declare a explicit `TrackID` matching upstream multiplex containers.
 _Avoid_: Variant, profile, level
+
+**TrackID**:
+The 1-based integer identifying a specific elementary stream in the container. Bound to a Rendition to map GPAC encryption keys and usage rules to tracks.
+_Avoid_: Stream index, track number, track index
+
+**Multi-Track ABR**:
+An orchestrated packaging configuration combining multiple video Renditions (quality tiers), distinct audio tracks, and cleartext subtitle tracks within a single continuous multiplex.
+_Avoid_: Adaptive stream, variant ladder
 
 **QualityTier**:
 A named group of Renditions that share a single ContentKey (e.g. SD, HD, 4K). Enables per-tier access policies.
@@ -125,3 +133,7 @@ _Avoid_: Playlist (ambiguous with HLS-specific usage)
 **Manifest format**:
 The delivery protocol of a Manifest: DASH or HLS. It is independent of the concrete EncryptionScheme of a Representation.
 _Avoid_: Output type, playlist type
+
+**VOD Packaging**:
+File-to-file static packaging for on-demand media assets, reading complete source containers from disk and generating static manifests with fixed durations and `#EXT-X-ENDLIST`, decoupled from the live streaming pipe orchestrator.
+_Avoid_: Offline job, batch transcode, file packager

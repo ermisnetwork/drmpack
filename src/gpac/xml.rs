@@ -130,6 +130,14 @@ impl GpacDrmXmlGenerator {
             }
         } else {
             for track in &config.tracks {
+                if track.track_type == TrackType::Subtitle {
+                    // Subtitle / text tracks cannot be encrypted with Common Encryption (CENC/CBCS).
+                    // Under GPAC cecrypt, any PID without a CrypTrack entry passes through unencrypted.
+                    // Emitting a CrypTrack for text PIDs causes GPAC MP4Mux to abort with
+                    // "Missing CENC Key config, cannot mux".
+                    continue;
+                }
+
                 if !track.encrypted {
                     Self::write_clear_track(&mut xml, track.track_id)?;
                     continue;
@@ -590,5 +598,24 @@ mod tests {
             GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation must succeed");
         assert!(xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="1""#));
         assert!(xml.contains(r#"<CrypTrack trackID="2" IsEncrypted="0"/>"#));
+    }
+
+    #[test]
+    fn test_gpac_xml_subtitle_track_omitted() {
+        let kid = KeyID::new(Uuid::from_bytes([0x01; 16]));
+        let key = ContentKey::new(kid, [0xaa; 16], QualityTier::hd(), TrackType::Video);
+
+        let mut key_set = KeySet::new();
+        key_set.insert_key(key);
+
+        let config = GpacDrmConfig::new(EncryptionScheme::Cenc)
+            .with_track(1, TrackType::Video, QualityTier::hd())
+            .with_clear_track(2, TrackType::Subtitle, QualityTier::new("default"));
+
+        let xml =
+            GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation must succeed");
+        assert!(xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="1""#));
+        // Subtitle track 2 must be omitted to prevent GPAC cecrypt failure on text stream
+        assert!(!xml.contains(r#"trackID="2""#));
     }
 }

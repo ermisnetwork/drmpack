@@ -57,7 +57,7 @@ impl GpacProcessConfig {
 
         // 1. Input filter: read continuous fMP4 from stdin pipe without memory buffering delay
         args.push("-i".into());
-        args.push("stdin:ext=mp4:mstore_samples=0:mstore_purge=0".into());
+        args.push("stdin:ext=mp4:alltk:mstore_samples=0:mstore_purge=0".into());
 
         // 2. Encryption filter: cecrypt with generated DRM XML
         args.push(format!("cecrypt:cfile={}", self.drm_xml_path.display()));
@@ -300,7 +300,10 @@ mod tests {
         let args = config.build_args();
 
         assert_eq!(args[0], "-i");
-        assert_eq!(args[1], "stdin:ext=mp4:mstore_samples=0:mstore_purge=0");
+        assert_eq!(
+            args[1],
+            "stdin:ext=mp4:alltk:mstore_samples=0:mstore_purge=0"
+        );
         assert_eq!(args[2], "cecrypt:cfile=/tmp/drm.xml");
         assert_eq!(args[3], "-o");
         assert!(args[4].contains("/dev/shm/test_stream/live.mpd:dual"));

@@ -37,6 +37,7 @@ pub fn find_box<'a>(data: &'a [u8], box_type: &[u8; 4]) -> Option<&'a [u8]> {
                 | b"stbl"
                 | b"stsd"
                 | b"encv"
+                | b"enca"
                 | b"sinf"
                 | b"schi"
                 | b"moof"
@@ -46,6 +47,8 @@ pub fn find_box<'a>(data: &'a [u8], box_type: &[u8; 4]) -> Option<&'a [u8]> {
                 header_size + 8
             } else if current_type == b"encv" {
                 header_size + 78
+            } else if current_type == b"enca" {
+                header_size + 28
             } else {
                 header_size
             };

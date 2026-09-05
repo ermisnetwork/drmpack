@@ -165,6 +165,7 @@ pub struct Rendition {
     pub id: String,
     pub track_type: TrackType,
     pub quality_tier: QualityTier,
+    pub track_id: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub bitrate: u64,
@@ -186,6 +187,7 @@ impl Rendition {
             id: id.into(),
             track_type: TrackType::Video,
             quality_tier,
+            track_id: None,
             width: Some(width),
             height: Some(height),
             bitrate,
@@ -205,6 +207,7 @@ impl Rendition {
             id: id.into(),
             track_type: TrackType::Audio,
             quality_tier,
+            track_id: None,
             width: None,
             height: None,
             bitrate,
@@ -212,6 +215,28 @@ impl Rendition {
             codecs: codecs.into(),
             encrypted: true,
         }
+    }
+
+    /// Construct a clear (unencrypted) subtitle rendition.
+    pub fn subtitle(id: impl Into<String>, codecs: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            track_type: TrackType::Subtitle,
+            quality_tier: QualityTier::new("default"),
+            track_id: None,
+            width: None,
+            height: None,
+            bitrate: 0,
+            frame_rate: None,
+            codecs: codecs.into(),
+            encrypted: false,
+        }
+    }
+
+    /// Set explicit track ID (1-based ISO-BMFF track ID).
+    pub fn with_track_id(mut self, track_id: u32) -> Self {
+        self.track_id = Some(track_id);
+        self
     }
 
     /// Mark this rendition as clear (unencrypted), bypassing GPAC cecrypt.
@@ -235,4 +260,97 @@ pub struct Segment {
     pub duration_seconds: f64,
     pub data: Bytes,
     pub is_init: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rendition_video_constructor() {
+        let r = Rendition::video(
+            "v1",
+            QualityTier::hd(),
+            1920,
+            1080,
+            2_000_000,
+            "avc1.640028",
+        );
+        assert_eq!(r.id, "v1");
+        assert_eq!(r.track_type, TrackType::Video);
+        assert_eq!(r.quality_tier, QualityTier::hd());
+        assert_eq!(r.track_id, None);
+        assert_eq!(r.width, Some(1920));
+        assert_eq!(r.height, Some(1080));
+        assert_eq!(r.bitrate, 2_000_000);
+        assert_eq!(r.codecs, "avc1.640028");
+        assert!(r.encrypted);
+    }
+
+    #[test]
+    fn test_rendition_audio_constructor() {
+        let r = Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2");
+        assert_eq!(r.id, "a1");
+        assert_eq!(r.track_type, TrackType::Audio);
+        assert_eq!(r.quality_tier, QualityTier::sd());
+        assert_eq!(r.track_id, None);
+        assert_eq!(r.width, None);
+        assert_eq!(r.height, None);
+        assert_eq!(r.bitrate, 128_000);
+        assert_eq!(r.codecs, "mp4a.40.2");
+        assert!(r.encrypted);
+    }
+
+    #[test]
+    fn test_rendition_subtitle_constructor() {
+        let r = Rendition::subtitle("subs_en", "tx3g");
+        assert_eq!(r.id, "subs_en");
+        assert_eq!(r.track_type, TrackType::Subtitle);
+        assert_eq!(r.quality_tier, QualityTier::new("default"));
+        assert_eq!(r.track_id, None);
+        assert_eq!(r.width, None);
+        assert_eq!(r.height, None);
+        assert_eq!(r.bitrate, 0);
+        assert_eq!(r.codecs, "tx3g");
+        assert!(
+            !r.encrypted,
+            "Subtitle renditions must default to unencrypted"
+        );
+    }
+
+    #[test]
+    fn test_rendition_with_track_id() {
+        let r = Rendition::subtitle("subs_en", "tx3g").with_track_id(4);
+        assert_eq!(r.track_id, Some(4));
+
+        let v = Rendition::video(
+            "v1",
+            QualityTier::hd(),
+            1920,
+            1080,
+            2_000_000,
+            "avc1.640028",
+        )
+        .with_track_id(1);
+        assert_eq!(v.track_id, Some(1));
+    }
+
+    #[test]
+    fn test_rendition_clear_and_with_encrypted() {
+        let mut r = Rendition::video(
+            "v1",
+            QualityTier::hd(),
+            1920,
+            1080,
+            2_000_000,
+            "avc1.640028",
+        );
+        assert!(r.encrypted);
+
+        r = r.clear();
+        assert!(!r.encrypted);
+
+        r = r.with_encrypted(true);
+        assert!(r.encrypted);
+    }
 }

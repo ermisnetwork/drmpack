@@ -1,14 +1,19 @@
-# 09: Multi-rendition + per-quality-tier keys
+# 09: Multi-Track ABR Packaging Engine (Consolidated 09 + 10)
 
-**What to build:** Support multiple Renditions in a single `PackagingSession`, each mapped to a `QualityTier` (SD/HD/4K). Each (track_type, QualityTier) combination gets a unique `ContentKey`. The session's key request fetches all keys in a single batch call. The GPAC DRM XML generator assigns the correct key and KID to each track. Manifests include multi-bitrate ABR structure (HLS master playlist with variant playlists, DASH MPD with multiple Representations per AdaptationSet).
+**What to build:** Support multi-track ABR packaging combining multiple video Renditions (quality tiers: SD/HD/4K), distinct audio tracks, and cleartext subtitle tracks (WebVTT) within a single continuous multiplexed fMP4 pipe. Add `:alltk` to GPAC's input filter to prevent dropping secondary renditions. Allow caller to specify explicit `track_id` on `Rendition`. Ensure correct DRM XML mapping, scheme-aware key acquisition, and multi-variant HLS/DASH manifest emission.
+
+**Consolidates:** Ticket 09 (Video quality tiers) and Ticket 10 (Audio & Subtitle tracks).
 
 **Blocked by:** 01 (Tracer), 05 (CPIX KeyProvider)
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] `PackagingSessionConfig` accepts a list of `Renditions`, each with resolution, bitrate, codec, and `QualityTier`
-- [ ] `KeyProvider::fetch_keys()` requests keys for all (track_type, QualityTier) combinations in one batch call *(Note: `KeyMappingPolicy` with `SharedAll`, `SharedVideoSingleAudio`, and `PerTierAndTrack` implemented in ADR-0007)*
-- [ ] GPAC DRM XML maps each track ID to its tier's `ContentKey` and `KeyID`
-- [ ] Multi-rendition HLS master manifest generated with correct bandwidth and codec tags
-- [ ] Multi-Representation DASH MPD generated with correct adaptation sets
+- [x] Add `:alltk` to GPAC input filter (`stdin:ext=mp4:alltk:mstore_samples=0:mstore_purge=0`) in `src/gpac/process.rs`
+- [x] Add `pub track_id: Option<u32>` and `.with_track_id(u32)` to `Rendition` in `src/types.rs`
+- [x] Add `Rendition::subtitle(id, codecs)` constructor helper in `src/types.rs`
+- [x] Bind `track_id` (fallback to 1-based index) in `src/session/cluster.rs` when building `GpacTrackConfig`
+- [x] GPAC DRM XML maps each track ID to its tier's `ContentKey` and `KeyID` (and unencrypted for subtitles)
+- [x] Multi-rendition HLS master manifest generated with `#EXT-X-STREAM-INF`, `#EXT-X-MEDIA:TYPE=AUDIO`, `#EXT-X-MEDIA:TYPE=SUBTITLES`
+- [x] Multi-Representation DASH MPD generated with distinct video AdaptationSet (multiple Representations) and Audio/Subtitle AdaptationSets
+- [x] Comprehensive multi-track ABR E2E test in `tests/multi_track_abr_e2e.rs` (feeding synthetic multi-track fMP4)
 

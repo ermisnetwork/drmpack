@@ -4,8 +4,8 @@
 
 **Blocked by:** 11 (Process Lifecycle)
 
-**Status:** ready-for-agent
+**Status:** wontfix (per ADR-0010: Standardize on Dual CMAF over Legacy MPEG-2 TS SAMPLE-AES)
 
-- [ ] Add `enable_hls_ts_legacy` flag to `PackagingSessionConfig` (behind Cargo feature flag `hls-legacy`)
-- [ ] GPAC filter configuration to output MPEG-2 TS segments (`.ts`) with SAMPLE-AES
-- [ ] Generate corresponding TS-based HLS manifest
+- [x] Declining MPEG-2 TS SAMPLE-AES support; Apple ecosystem standardized on CMAF fMP4 `cbcs` since iOS 10 (2016), and SmartTVs use CENC fMP4 over DASH.
+- [x] Removed `hls-legacy` feature flag from `Cargo.toml`.
+- [x] Full rationale and industry survey documented in `docs/adr/0010-cmaf-only-over-legacy-hls-ts.md`.

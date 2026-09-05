@@ -7,6 +7,7 @@ use crate::error::{
 use crate::key::{KeyPolicyEngine, KeyProvider, KeySet};
 use crate::types::{
     DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, Rendition, Segment,
+    TrackType,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -589,6 +590,37 @@ fn validate_config(config: &PackagingSessionConfig) -> Result<()> {
             "finalization_timeout must be greater than zero".into(),
         ));
     }
+
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_track_ids = std::collections::HashSet::new();
+    for (index, rendition) in config.renditions.iter().enumerate() {
+        if !seen_ids.insert(&rendition.id) {
+            return Err(DrmpackError::InvalidConfig(format!(
+                "Duplicate rendition id '{}' across renditions",
+                rendition.id
+            )));
+        }
+
+        if rendition.track_type == TrackType::Subtitle && rendition.encrypted {
+            return Err(DrmpackError::InvalidConfig(
+                "Subtitle renditions must be unencrypted (Common Encryption does not support text tracks)".into(),
+            ));
+        }
+
+        let track_id = rendition.track_id.unwrap_or((index + 1) as u32);
+        if track_id == 0 {
+            return Err(DrmpackError::InvalidConfig(
+                "track_id cannot be 0 (ISO-BMFF track IDs must be >= 1)".into(),
+            ));
+        }
+        if !seen_track_ids.insert(track_id) {
+            return Err(DrmpackError::InvalidConfig(format!(
+                "Duplicate track_id {} across renditions",
+                track_id
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -1211,5 +1243,95 @@ mod tests {
             .any(|f| f.operation == PackagingOperation::Watchdog));
         assert!(session.is_closed(), "Session must be closed");
         let _ = session.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_rejects_encrypted_subtitle() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let mut sub = Rendition::subtitle("sub1", "tx3g");
+        sub.encrypted = true;
+
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(rendition())
+            .with_rendition(sub)
+            .with_output_dir(&output_dir);
+
+        let err = PackagingSession::create(config, provider())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("Subtitle renditions must be unencrypted"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_rejects_track_id_zero() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let r = rendition().with_track_id(0);
+
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(r)
+            .with_output_dir(&output_dir);
+
+        let err = PackagingSession::create(config, provider())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("track_id cannot be 0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_rejects_duplicate_track_ids() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let r1 = Rendition::video(
+            "v1",
+            QualityTier::hd(),
+            1920,
+            1080,
+            2_000_000,
+            "avc1.640028",
+        )
+        .with_track_id(1);
+        let r2 = Rendition::video("v2", QualityTier::sd(), 1280, 720, 1_000_000, "avc1.4d401f")
+            .with_track_id(1);
+
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(r1)
+            .with_rendition(r2)
+            .with_output_dir(&output_dir);
+
+        let err = PackagingSession::create(config, provider())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("Duplicate track_id 1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_rejects_duplicate_rendition_ids() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let r1 = Rendition::video(
+            "v1",
+            QualityTier::hd(),
+            1920,
+            1080,
+            2_000_000,
+            "avc1.640028",
+        );
+        let r2 = Rendition::video("v1", QualityTier::sd(), 1280, 720, 1_000_000, "avc1.4d401f");
+
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(r1)
+            .with_rendition(r2)
+            .with_output_dir(&output_dir);
+
+        let err = PackagingSession::create(config, provider())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("Duplicate rendition id 'v1'"))
+        );
     }
 }
