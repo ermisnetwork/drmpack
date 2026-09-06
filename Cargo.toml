@@ -59,3 +59,7 @@ required-features = ["axinom"]
 name = "05_license_proxy_service"
 required-features = ["license-proxy"]
 
+[[example]]
+name = "06_e2e_live_playback"
+required-features = ["axinom", "license-proxy"]
+

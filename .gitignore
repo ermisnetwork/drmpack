@@ -11,3 +11,4 @@ coverage/
 /target
 repomix-output.xml
 .agents/
+scratch/
