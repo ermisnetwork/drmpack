@@ -42,3 +42,20 @@ ring = "0.17"
 name = "inspect_axinom"
 required-features = ["axinom"]
 
+[[example]]
+name = "01_basic_live_cenc"
+
+[[example]]
+name = "02_low_latency_dual_cmaf"
+
+[[example]]
+name = "03_multitrack_abr_tiers"
+
+[[example]]
+name = "04_axinom_key_provider"
+required-features = ["axinom"]
+
+[[example]]
+name = "05_license_proxy_service"
+required-features = ["license-proxy"]
+

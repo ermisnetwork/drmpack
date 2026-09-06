@@ -125,7 +125,7 @@ impl RepresentationCluster {
             let drm_path = control_dir.join(format!("{scheme}.xml"));
             let mut drm_config = GpacDrmConfig::new(scheme);
             for (index, rendition) in config.renditions.iter().enumerate() {
-                let track_id = rendition.effective_track_id(index);
+                let track_id = rendition.effective_container_track_id(index);
                 let mut track = GpacTrackConfig::new(
                     track_id,
                     rendition.track_type,
@@ -478,14 +478,7 @@ mod tests {
         tokio::fs::create_dir_all(&control_dir).await.unwrap();
 
         let config = PackagingSessionConfig::new("cluster-test")
-            .with_rendition(Rendition::video(
-                "v1",
-                QualityTier::hd(),
-                1920,
-                1080,
-                5_000_000,
-                "avc1.640028",
-            ))
+            .with_rendition(Rendition::video_hd())
             .with_encryption_scheme(EncryptionScheme::Dual)
             .with_output_dir(&output_dir)
             .with_gpac_bin("nonexistent-gpac-bin");
@@ -520,14 +513,7 @@ mod tests {
         tokio::fs::create_dir_all(&control_dir).await.unwrap();
 
         let config = PackagingSessionConfig::new("cluster-partial-test")
-            .with_rendition(Rendition::video(
-                "v1",
-                QualityTier::hd(),
-                1920,
-                1080,
-                5_000_000,
-                "avc1.640028",
-            ))
+            .with_rendition(Rendition::video_hd())
             .with_encryption_scheme(EncryptionScheme::Dual)
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");

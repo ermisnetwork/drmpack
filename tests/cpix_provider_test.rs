@@ -1,13 +1,10 @@
 #![cfg(feature = "cpix")]
 
-use bytes::Bytes;
 use drmpack::cpix::{CpixConfig, CpixProvider};
 use drmpack::error::DrmpackError;
 use drmpack::key::{KeyProvider, KeyRequest};
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
-use drmpack::types::{
-    DrmSystem, EncryptionScheme, LatencyMode, QualityTier, Rendition, Segment, TrackType,
-};
+use drmpack::types::{DrmSystem, EncryptionScheme, LatencyMode, QualityTier, Rendition, TrackType};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -537,14 +534,7 @@ async fn test_cpix_provider_in_packaging_session_lifecycle() {
     let server = MockServer::start(200, SAMPLE_CPIX_RESPONSE_CENC.into()).await;
     let provider = CpixProvider::new(&server.url);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_cpix_session_{}", Uuid::new_v4()));
 
@@ -558,7 +548,7 @@ async fn test_cpix_provider_in_packaging_session_lifecycle() {
     // 1. Fetch keys from the CPIX provider (succeeds!)
     // 2. Prepare output and attempt to spawn GPAC process (fails due to fake binary)
     // This cleanly proves the PackagingSession <-> CpixProvider interaction seam!
-    let result = PackagingSession::create(config, provider).await;
+    let result = PackagingSession::create(config, &provider).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -591,14 +581,7 @@ async fn test_cpix_provider_e2e_real_packaging_cenc() {
     let server = MockServer::start(200, SAMPLE_CPIX_RESPONSE_CENC.into()).await;
     let provider = CpixProvider::new(&server.url);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_cpix_e2e_cenc_{}", Uuid::new_v4()));
 
@@ -611,22 +594,16 @@ async fn test_cpix_provider_e2e_real_packaging_cenc() {
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession with CpixProvider");
 
     let sample_bytes = generate_sample_mp4("sample_cpix_cenc").await;
 
     session
-        .push_segment(Segment {
-            rendition_id: "v720p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
-        .expect("Failed to push Segment into session");
+        .expect("Failed to push chunk into CENC session");
 
     session
         .close()
@@ -667,14 +644,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
     let server = MockServer::start(200, SAMPLE_CPIX_RESPONSE_DUAL.into()).await;
     let provider = CpixProvider::new(&server.url);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_cpix_e2e_dual_{}", Uuid::new_v4()));
 
@@ -688,22 +658,16 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
         .with_drm_system(DrmSystem::Widevine)
         .with_drm_system(DrmSystem::FairPlay);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create Dual PackagingSession with CpixProvider");
 
     let sample_bytes = generate_sample_mp4("sample_cpix_dual").await;
 
     session
-        .push_segment(Segment {
-            rendition_id: "v720p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
-        .expect("Failed to push Segment into Dual session");
+        .expect("Failed to push chunk into Dual session");
 
     session
         .close()
@@ -869,16 +833,8 @@ async fn test_cpix_provider_selective_encryption_clear_audio() {
     let server = MockServer::start(200, SAMPLE_CPIX_RESPONSE_CENC.into()).await;
     let provider = CpixProvider::new(&server.url);
 
-    let video_rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
-    let audio_rendition =
-        Rendition::audio("a_clear", QualityTier::sd(), 128_000, "mp4a.40.2").clear();
+    let video_rendition = Rendition::video_hd();
+    let audio_rendition = Rendition::audio().clear();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_cpix_selective_{}", Uuid::new_v4()));
     let control_dir =
@@ -892,7 +848,7 @@ async fn test_cpix_provider_selective_encryption_clear_audio() {
         .with_control_dir(&control_dir)
         .with_gpac_bin("gpac");
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("PackagingSession::create must succeed for selective encryption with CPIX");
 

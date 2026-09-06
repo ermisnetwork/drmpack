@@ -3,9 +3,7 @@ use bytes::Bytes;
 use drmpack::error::DrmpackError;
 use drmpack::key::{ContentKey, KeyID, PsshData, RawKeyProvider};
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
-use drmpack::types::{
-    DrmSystem, EncryptionScheme, LatencyMode, QualityTier, Rendition, Segment, TrackType,
-};
+use drmpack::types::{DrmSystem, EncryptionScheme, LatencyMode, QualityTier, Rendition, TrackType};
 use uuid::Uuid;
 
 mod common;
@@ -107,14 +105,7 @@ async fn wait_for_path(path: &std::path::Path) {
 #[tokio::test]
 async fn test_tracer_session_detects_missing_gpac() {
     let (provider, _) = create_test_key_provider();
-    let rendition = Rendition::video(
-        "v1080p",
-        QualityTier::hd(),
-        1920,
-        1080,
-        5_000_000,
-        "avc1.640028",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_test_missing_{}", Uuid::new_v4()));
 
@@ -123,7 +114,7 @@ async fn test_tracer_session_detects_missing_gpac() {
         .with_output_dir(&out_dir)
         .with_gpac_bin("non_existent_gpac_binary_xyz_123");
 
-    let result = PackagingSession::create(config, provider).await;
+    let result = PackagingSession::create(config, &provider).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -160,14 +151,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
     }
 
     let (provider, kid) = create_test_key_provider();
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_gpac_e2e_{}", Uuid::new_v4()));
 
@@ -180,7 +164,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession with real GPAC");
 
@@ -238,17 +222,10 @@ async fn test_tracer_gpac_e2e_live_packaging() {
     let sample_bytes = tokio::fs::read(&sample_mp4_path).await.unwrap();
     let _ = tokio::fs::remove_file(&sample_mp4_path).await;
 
-    // Push a Segment through the public session API into the GPAC pipe.
     session
-        .push_segment(Segment {
-            rendition_id: "v720p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
-        .expect("Failed to push fMP4 Segment into GPAC pipe");
+        .expect("Failed to push fMP4 into GPAC pipe");
 
     // Verify artifacts become available in Ramdisk during active push before session is closed
     let init_path = out_dir.join("stdin_dashinit.mp4");
@@ -352,14 +329,7 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
     }
 
     let (provider, kid) = create_test_key_provider();
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
     let out_dir = std::env::temp_dir().join(format!("drmpack_gpac_dual_{}", Uuid::new_v4()));
     let config = PackagingSessionConfig::new("e2e-dual-live-stream")
         .with_rendition(rendition)
@@ -370,7 +340,7 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
         .with_encryption_scheme(EncryptionScheme::Dual)
         .with_drm_system(DrmSystem::Widevine);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create Dual PackagingSession with real GPAC");
 
@@ -402,15 +372,9 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
 
     let sample_bytes = generate_sample_mp4("sample_dual").await;
     session
-        .push_segment(Segment {
-            rendition_id: "v720p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
-        .expect("Failed to fan out fMP4 Segment to both Dual Representations");
+        .expect("Failed to fan out fMP4 to both Dual Representations");
 
     let cenc_init = out_dir.join("cenc/stdin_dashinit.mp4");
     let cbcs_init = out_dir.join("cbcs/stdin_dashinit.mp4");
@@ -520,14 +484,7 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
         .with_pssh(fairplay_pssh)
         .with_pssh(widevine_pssh);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_gpac_cbcs_{}", Uuid::new_v4()));
 
@@ -540,7 +497,7 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
         .with_encryption_scheme(EncryptionScheme::Cbcs)
         .with_drm_system(DrmSystem::FairPlay);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession with CBCS encryption");
 
@@ -589,17 +546,10 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
     let sample_bytes = tokio::fs::read(&sample_mp4_path).await.unwrap();
     let _ = tokio::fs::remove_file(&sample_mp4_path).await;
 
-    // Push Segment into session
     session
-        .push_segment(Segment {
-            rendition_id: "v720p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
-        .expect("Failed to push Segment into GPAC CBCS session");
+        .expect("Failed to push chunk into GPAC CBCS session");
 
     // Close session gracefully
     session

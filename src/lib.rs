@@ -32,11 +32,12 @@ pub use key::{
     StaticKeySource,
 };
 pub use session::{
-    PackagingSession, PackagingSessionConfig, Representation, RepresentationCluster,
+    PackagingResult, PackagingSession, PackagingSessionConfig, Representation,
+    RepresentationCluster,
 };
 pub use types::{
     DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, QualityTier,
-    Rendition, Segment, TrackType,
+    Rendition, TrackType,
 };
 
 #[cfg(feature = "cpix")]

@@ -498,14 +498,7 @@ async fn test_speke_client_packaging_session_lifecycle() {
     let server = SpekeMockServer::start(200, SAMPLE_SPEKE_RESPONSE.into()).await;
     let client = SpekeClient::new(&server.url);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_speke_session_{}", Uuid::new_v4()));
     let control_dir =
@@ -518,7 +511,7 @@ async fn test_speke_client_packaging_session_lifecycle() {
         .with_control_dir(&control_dir)
         .with_gpac_bin("gpac");
 
-    let mut session = PackagingSession::create(config, client)
+    let mut session = PackagingSession::create(config, &client)
         .await
         .expect("PackagingSession::create with SpekeClient must succeed");
 

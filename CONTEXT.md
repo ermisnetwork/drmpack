@@ -19,15 +19,19 @@ The streaming delivery latency profile — `LowLatency` (CMAF chunking, LL-HLS, 
 _Avoid_: Stream speed, delay profile
 
 **Segment**:
-A unit of media input — muxed fMP4 stream pushed into the packaging session.
+A packaged media output file (`.m4s`) produced by GPAC for HLS/DASH streaming delivery.
 _Avoid_: Chunk, fragment, frame
 
 **Rendition**:
-A single quality variant of the content, defined by resolution and bitrate (e.g. 720p@2Mbps). Belongs to exactly one QualityTier. Can optionally declare a explicit `TrackID` matching upstream multiplex containers.
-_Avoid_: Variant, profile, level
+A declared track configuration bound to a QualityTier for DRM key association. Uniquely identified by a system-generated logical `track_id` (`track_{type}_{uuid}`) and bound to an optional `container_track_id`. All stream metadata (codecs, resolution, bitrate, language) is extracted automatically from the container by GPAC.
+_Avoid_: Variant, profile, level, stream
 
-**TrackID**:
-The 1-based integer identifying a specific elementary stream in the container. Bound to a Rendition to map GPAC encryption keys and usage rules to tracks.
+**track_id**:
+The unique logical identifier string for a track within the packaging session (format: `track_{type}_{uuid}`, collision-free UUID). Distinguishes distinct Renditions sharing the same QualityTier without naming collisions.
+_Avoid_: Track name, rendition ID, stream ID
+
+**container_track_id**:
+The 1-based ISO-BMFF track integer (`u32 >= 1`) in the `tkhd` box, mapped to GPAC `cecrypt` `<CrypTrack trackID="...">`. Defaults to 1-based declaration index (`1, 2, 3...`).
 _Avoid_: Stream index, track number, track index
 
 **Multi-Track ABR**:

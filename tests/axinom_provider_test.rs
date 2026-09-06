@@ -1,14 +1,11 @@
 #![cfg(feature = "axinom")]
 
 use base64::prelude::*;
-use bytes::Bytes;
 use drmpack::axinom::{AxinomConfig, AxinomProvider};
 use drmpack::error::DrmpackError;
 use drmpack::key::{KeyProvider, KeyRequest};
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
-use drmpack::types::{
-    DrmSystem, EncryptionScheme, LatencyMode, QualityTier, Rendition, Segment, TrackType,
-};
+use drmpack::types::{DrmSystem, EncryptionScheme, LatencyMode, QualityTier, Rendition, TrackType};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -564,14 +561,7 @@ async fn test_axinom_provider_packaging_session_lifecycle() {
     let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
     let provider = AxinomProvider::new(config);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_axinom_session_{}", Uuid::new_v4()));
 
@@ -582,7 +572,7 @@ async fn test_axinom_provider_packaging_session_lifecycle() {
         .with_gpac_bin("non_existent_gpac_binary_so_spawn_fails");
 
     // Creating session fetches keys from AxinomProvider, then fails at GPAC spawn
-    let result = PackagingSession::create(session_config, provider).await;
+    let result = PackagingSession::create(session_config, &provider).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
 
@@ -899,14 +889,7 @@ async fn test_axinom_provider_e2e_real_packaging_cenc() {
     let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
     let provider = AxinomProvider::new(config);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_axinom_e2e_cenc_{}", Uuid::new_v4()));
 
@@ -919,22 +902,16 @@ async fn test_axinom_provider_e2e_real_packaging_cenc() {
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine);
 
-    let mut session = PackagingSession::create(session_config, provider)
+    let mut session = PackagingSession::create(session_config, &provider)
         .await
         .expect("Failed to create PackagingSession with AxinomProvider");
 
     let sample_bytes = generate_sample_mp4("sample_axinom_cenc").await;
 
     session
-        .push_segment(Segment {
-            rendition_id: "v720p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
-        .expect("Failed to push Segment into session");
+        .expect("Failed to push chunk into session");
 
     session
         .close()
@@ -976,14 +953,7 @@ async fn test_axinom_provider_e2e_real_packaging_dual() {
     let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
     let provider = AxinomProvider::new(config);
 
-    let rendition = Rendition::video(
-        "v720p",
-        QualityTier::hd(),
-        1280,
-        720,
-        2_500_000,
-        "avc1.4d401f",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_axinom_e2e_dual_{}", Uuid::new_v4()));
 
@@ -997,22 +967,16 @@ async fn test_axinom_provider_e2e_real_packaging_dual() {
         .with_drm_system(DrmSystem::Widevine)
         .with_drm_system(DrmSystem::FairPlay);
 
-    let mut session = PackagingSession::create(session_config, provider)
+    let mut session = PackagingSession::create(session_config, &provider)
         .await
         .expect("Failed to create Dual PackagingSession with AxinomProvider");
 
     let sample_bytes = generate_sample_mp4("sample_axinom_dual").await;
 
     session
-        .push_segment(Segment {
-            rendition_id: "v720p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
-        .expect("Failed to push Segment into Dual session");
+        .expect("Failed to push chunk into Dual session");
 
     session
         .close()

@@ -363,13 +363,10 @@ impl GpacProcess {
             }
         }
 
-        let status = rx
-            .borrow()
-            .clone()
-            .unwrap_or(ProcessExitStatus {
-                code: None,
-                success: false,
-            });
+        let status = rx.borrow().clone().unwrap_or(ProcessExitStatus {
+            code: None,
+            success: false,
+        });
 
         if status.success {
             info!("GPAC process exited successfully with status 0");

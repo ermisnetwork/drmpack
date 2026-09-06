@@ -1,5 +1,5 @@
 use crate::error::{DrmpackError, Result};
-use crate::key::{ContentKey, KeyProvider, KeyRequest, KeySet, PsshData};
+use crate::key::{ContentKey, KeyID, KeyProvider, KeyRequest, KeySet, PsshData};
 use crate::types::{EncryptionScheme, QualityTier, TrackType};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 pub struct StaticKeySource {
     keys: HashMap<(Option<EncryptionScheme>, TrackType, QualityTier), ContentKey>,
     pssh: Vec<PsshData>,
+    shared_fallback: Option<(KeyID, [u8; 16])>,
 }
 
 /// Legacy alias for [`StaticKeySource`]. Prefer using [`StaticKeySource`].
@@ -18,6 +19,33 @@ pub type RawKeyProvider = StaticKeySource;
 impl StaticKeySource {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a test provider with a single shared ContentKey for all tracks/tiers
+    /// and default Widevine PSSH box.
+    pub fn shared_key(key_bytes: [u8; 16]) -> Self {
+        let kid = crate::key::KeyID::new(uuid::Uuid::from_bytes(key_bytes));
+        let pssh = PsshData::new(
+            crate::types::DrmSystem::Widevine,
+            crate::types::DrmSystem::Widevine.system_id(),
+            bytes::Bytes::from_static(b"widevine-pssh-payload"),
+        );
+        let mut source = Self::new()
+            .with_key(ContentKey::new(
+                kid,
+                key_bytes,
+                QualityTier::hd(),
+                TrackType::Video,
+            ))
+            .with_key(ContentKey::new(
+                kid,
+                key_bytes,
+                QualityTier::sd(),
+                TrackType::Audio,
+            ))
+            .with_pssh(pssh);
+        source.shared_fallback = Some((kid, key_bytes));
+        source
     }
 
     pub fn with_key(mut self, key: ContentKey) -> Self {
@@ -58,19 +86,23 @@ impl KeyProvider for StaticKeySource {
                     .keys
                     .get(&(*scheme_opt, *track_type, tier.clone()))
                     .or_else(|| self.keys.get(&(None, *track_type, tier.clone())))
+                    .cloned()
                     .or_else(|| {
                         if scheme_opt.is_none() {
                             self.keys
                                 .iter()
                                 .find(|((_, t, q), _)| *t == *track_type && q == tier)
-                                .map(|(_, k)| k)
+                                .map(|(_, k)| k.clone())
                         } else {
                             None
                         }
+                    })
+                    .or_else(|| {
+                        self.shared_fallback
+                            .map(|(kid, kb)| ContentKey::new(kid, kb, tier.clone(), *track_type))
                     });
 
-                if let Some(key) = key {
-                    let mut k = key.clone();
+                if let Some(mut k) = key {
                     if k.encryption_scheme.is_none() && scheme_opt.is_some() {
                         k.encryption_scheme = *scheme_opt;
                     }
@@ -156,5 +188,31 @@ mod tests {
         assert!(keyset
             .get_key_for_scheme(EncryptionScheme::Cbcs, TrackType::Video, &QualityTier::hd())
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_raw_key_provider_shared_key() {
+        let key_bytes = [0x42; 16];
+        let provider = StaticKeySource::shared_key(key_bytes);
+
+        // Test with arbitrary tiers and track types
+        let req = KeyRequest::new("stream-42")
+            .with_tier(TrackType::Video, QualityTier::uhd_4k())
+            .with_tier(TrackType::Video, QualityTier::hd())
+            .with_tier(TrackType::Audio, QualityTier::new("custom_audio"))
+            .with_encryption_scheme(EncryptionScheme::Cenc);
+
+        let keyset = provider.fetch_keys(&req).await.unwrap();
+        assert!(keyset
+            .get_key(TrackType::Video, &QualityTier::uhd_4k())
+            .is_some());
+        assert!(keyset
+            .get_key(TrackType::Video, &QualityTier::hd())
+            .is_some());
+        assert!(keyset
+            .get_key(TrackType::Audio, &QualityTier::new("custom_audio"))
+            .is_some());
+        assert_eq!(keyset.pssh.len(), 1);
+        assert_eq!(keyset.pssh[0].drm_system, DrmSystem::Widevine);
     }
 }

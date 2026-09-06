@@ -27,14 +27,7 @@ fn create_test_key_provider() -> (RawKeyProvider, KeyID) {
 #[tokio::test]
 async fn test_packaging_session_detects_missing_gpac_binary() {
     let (provider, _) = create_test_key_provider();
-    let rendition = Rendition::video(
-        "v1080p",
-        QualityTier::hd(),
-        1920,
-        1080,
-        5_000_000,
-        "avc1.640028",
-    );
+    let rendition = Rendition::video_hd();
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_test_missing_{}", Uuid::new_v4()));
 
@@ -43,7 +36,7 @@ async fn test_packaging_session_detects_missing_gpac_binary() {
         .with_output_dir(&out_dir)
         .with_gpac_bin("non_existent_gpac_binary_xyz_123");
 
-    let result = PackagingSession::create(config, provider).await;
+    let result = PackagingSession::create(config, &provider).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();

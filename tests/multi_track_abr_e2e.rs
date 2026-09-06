@@ -3,7 +3,7 @@ use drmpack::key::{ContentKey, KeyID, PsshData, RawKeyProvider};
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
 use drmpack::types::{
     DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, QualityTier,
-    Rendition, Segment, TrackType,
+    Rendition, TrackType,
 };
 use uuid::Uuid;
 
@@ -266,27 +266,10 @@ async fn test_multi_track_abr_e2e_cenc() {
 
     let (provider, kid_v_hd, kid_v_sd, kid_audio) = create_multi_track_key_provider();
 
-    let r_v_hd = Rendition::video(
-        "v1080p",
-        QualityTier::hd(),
-        1920,
-        1080,
-        2_000_000,
-        "avc1.640028",
-    )
-    .with_track_id(1);
-    let r_v_sd = Rendition::video(
-        "v720p",
-        QualityTier::sd(),
-        1280,
-        720,
-        1_000_000,
-        "avc1.4d401f",
-    )
-    .with_track_id(2);
-    let r_audio =
-        Rendition::audio("a128k", QualityTier::sd(), 128_000, "mp4a.40.2").with_track_id(3);
-    let r_sub = Rendition::subtitle("subs_en", "tx3g").with_track_id(4);
+    let r_v_hd = Rendition::video_hd().with_container_track_id(1);
+    let r_v_sd = Rendition::video(QualityTier::sd()).with_container_track_id(2);
+    let r_audio = Rendition::audio().with_container_track_id(3);
+    let r_sub = Rendition::subtitle().with_container_track_id(4);
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_cenc_{}", Uuid::new_v4()));
 
@@ -303,20 +286,14 @@ async fn test_multi_track_abr_e2e_cenc() {
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession for multi-track CENC");
 
     // Feed synthetic 4-track fMP4
     let sample_bytes = generate_multi_track_fmp4(4);
     session
-        .push_segment(Segment {
-            rendition_id: "v1080p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
         .expect("Failed to push 4-track fMP4 into CENC session");
 
@@ -523,27 +500,10 @@ async fn test_multi_track_abr_e2e_cbcs() {
 
     let (provider, kid_v_hd, kid_v_sd, kid_audio) = create_multi_track_key_provider();
 
-    let r_v_hd = Rendition::video(
-        "v1080p",
-        QualityTier::hd(),
-        1920,
-        1080,
-        2_000_000,
-        "avc1.640028",
-    )
-    .with_track_id(1);
-    let r_v_sd = Rendition::video(
-        "v720p",
-        QualityTier::sd(),
-        1280,
-        720,
-        1_000_000,
-        "avc1.4d401f",
-    )
-    .with_track_id(2);
-    let r_audio =
-        Rendition::audio("a128k", QualityTier::sd(), 128_000, "mp4a.40.2").with_track_id(3);
-    let r_sub = Rendition::subtitle("subs_en", "tx3g").with_track_id(4);
+    let r_v_hd = Rendition::video_hd().with_container_track_id(1);
+    let r_v_sd = Rendition::video(QualityTier::sd()).with_container_track_id(2);
+    let r_audio = Rendition::audio().with_container_track_id(3);
+    let r_sub = Rendition::subtitle().with_container_track_id(4);
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_cbcs_{}", Uuid::new_v4()));
 
@@ -560,19 +520,13 @@ async fn test_multi_track_abr_e2e_cbcs() {
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession for multi-track CBCS");
 
     let sample_bytes = generate_multi_track_fmp4(4);
     session
-        .push_segment(Segment {
-            rendition_id: "v1080p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
         .expect("Failed to push 4-track fMP4 into CBCS session");
 
@@ -728,27 +682,10 @@ async fn test_multi_track_abr_e2e_dual() {
 
     let (provider, kid_v_hd, kid_v_sd, _) = create_multi_track_key_provider();
 
-    let r_v_hd = Rendition::video(
-        "v1080p",
-        QualityTier::hd(),
-        1920,
-        1080,
-        2_000_000,
-        "avc1.640028",
-    )
-    .with_track_id(1);
-    let r_v_sd = Rendition::video(
-        "v720p",
-        QualityTier::sd(),
-        1280,
-        720,
-        1_000_000,
-        "avc1.4d401f",
-    )
-    .with_track_id(2);
-    let r_audio =
-        Rendition::audio("a128k", QualityTier::sd(), 128_000, "mp4a.40.2").with_track_id(3);
-    let r_sub = Rendition::subtitle("subs_en", "tx3g").with_track_id(4);
+    let r_v_hd = Rendition::video_hd().with_container_track_id(1);
+    let r_v_sd = Rendition::video(QualityTier::sd()).with_container_track_id(2);
+    let r_audio = Rendition::audio().with_container_track_id(3);
+    let r_sub = Rendition::subtitle().with_container_track_id(4);
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_dual_{}", Uuid::new_v4()));
 
@@ -766,7 +703,7 @@ async fn test_multi_track_abr_e2e_dual() {
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession for multi-track Dual");
 
@@ -798,13 +735,7 @@ async fn test_multi_track_abr_e2e_dual() {
 
     let sample_bytes = generate_multi_track_fmp4(4);
     session
-        .push_segment(Segment {
-            rendition_id: "v1080p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
         .expect("Failed to push 4-track fMP4 into Dual session");
 
@@ -1024,30 +955,16 @@ async fn test_multi_track_abr_e2e_fallback_track_id() {
 
     let (provider, kid_v_hd, kid_v_sd, kid_audio) = create_multi_track_key_provider();
 
-    // Do NOT specify with_track_id; verify fallback to 1-based index (1, 2, 3, 4)
-    let r_v_hd = Rendition::video(
-        "v1080p",
-        QualityTier::hd(),
-        1920,
-        1080,
-        2_000_000,
-        "avc1.640028",
-    );
-    let r_v_sd = Rendition::video(
-        "v720p",
-        QualityTier::sd(),
-        1280,
-        720,
-        1_000_000,
-        "avc1.4d401f",
-    );
-    let r_audio = Rendition::audio("a128k", QualityTier::sd(), 128_000, "mp4a.40.2");
-    let r_sub = Rendition::subtitle("subs_en", "tx3g");
+    // Do NOT specify with_container_track_id; verify fallback to 1-based index (1, 2, 3, 4)
+    let r_v_hd = Rendition::video_hd();
+    let r_v_sd = Rendition::video(QualityTier::sd());
+    let r_audio = Rendition::audio();
+    let r_sub = Rendition::subtitle();
 
-    assert_eq!(r_v_hd.track_id, None);
-    assert_eq!(r_v_sd.track_id, None);
-    assert_eq!(r_audio.track_id, None);
-    assert_eq!(r_sub.track_id, None);
+    assert_eq!(r_v_hd.container_track_id, None);
+    assert_eq!(r_v_sd.container_track_id, None);
+    assert_eq!(r_audio.container_track_id, None);
+    assert_eq!(r_sub.container_track_id, None);
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_fallback_{}", Uuid::new_v4()));
 
@@ -1064,19 +981,13 @@ async fn test_multi_track_abr_e2e_fallback_track_id() {
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession with fallback track IDs");
 
     let sample_bytes = generate_multi_track_fmp4(4);
     session
-        .push_segment(Segment {
-            rendition_id: "v1080p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
         .expect("Failed to push 4-track fMP4 with fallback track IDs");
 
@@ -1178,33 +1089,11 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
         .with_key(key_a_es)
         .with_pssh(widevine_pssh);
 
-    let r_v_hd = Rendition::video(
-        "v1080p",
-        QualityTier::hd(),
-        1920,
-        1080,
-        2_000_000,
-        "avc1.640028",
-    )
-    .with_track_id(1);
-    let r_v_sd = Rendition::video(
-        "v720p",
-        QualityTier::sd(),
-        1280,
-        720,
-        1_000_000,
-        "avc1.4d401f",
-    )
-    .with_track_id(2);
-    let r_a_en = Rendition::audio("a_en", QualityTier::new("en"), 128_000, "mp4a.40.2")
-        .with_language("en")
-        .with_track_id(3);
-    let r_a_es = Rendition::audio("a_es", QualityTier::new("es"), 96_000, "mp4a.40.2")
-        .with_language("es")
-        .with_track_id(4);
-    let r_sub = Rendition::subtitle("subs_en", "tx3g")
-        .with_language("en")
-        .with_track_id(5);
+    let r_v_hd = Rendition::video_hd().with_container_track_id(1);
+    let r_v_sd = Rendition::video(QualityTier::sd()).with_container_track_id(2);
+    let r_a_en = Rendition::audio_tier(QualityTier::new("en")).with_container_track_id(3);
+    let r_a_es = Rendition::audio_tier(QualityTier::new("es")).with_container_track_id(4);
+    let r_sub = Rendition::subtitle().with_container_track_id(5);
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_lang_{}", Uuid::new_v4()));
 
@@ -1222,19 +1111,13 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
 
-    let mut session = PackagingSession::create(config, provider)
+    let mut session = PackagingSession::create(config, &provider)
         .await
         .expect("Failed to create PackagingSession for multi-language stream");
 
     let sample_bytes = generate_5track_fmp4(4);
     session
-        .push_segment(Segment {
-            rendition_id: "v1080p".into(),
-            sequence_number: 0,
-            duration_seconds: 4.0,
-            data: Bytes::from(sample_bytes),
-            is_init: false,
-        })
+        .push(sample_bytes)
         .await
         .expect("Failed to push 5-track fMP4 into multi-language session");
 

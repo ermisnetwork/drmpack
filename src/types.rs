@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -159,99 +158,79 @@ pub enum KeyMappingPolicy {
     PerTierAndTrack,
 }
 
-/// A single rendition declaration (e.g. 720p@2Mbps).
+/// A single rendition declaration bound to a QualityTier for DRM key association.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rendition {
-    pub id: String,
+    pub track_id: String,
     pub track_type: TrackType,
     pub quality_tier: QualityTier,
-    pub track_id: Option<u32>,
-    pub language: Option<String>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub bitrate: u64,
-    pub frame_rate: Option<f64>,
-    pub codecs: String,
+    pub container_track_id: Option<u32>,
     pub encrypted: bool,
 }
 
+fn generate_track_identifier(track_type: TrackType) -> String {
+    let short_uuid = &uuid::Uuid::new_v4().simple().to_string()[..8];
+    format!("track_{}_{}", track_type, short_uuid)
+}
+
 impl Rendition {
-    pub fn video(
-        id: impl Into<String>,
-        quality_tier: QualityTier,
-        width: u32,
-        height: u32,
-        bitrate: u64,
-        codecs: impl Into<String>,
-    ) -> Self {
+    /// Construct an encrypted video rendition with the specified quality tier.
+    pub fn video(quality_tier: QualityTier) -> Self {
         Self {
-            id: id.into(),
+            track_id: generate_track_identifier(TrackType::Video),
             track_type: TrackType::Video,
             quality_tier,
-            track_id: None,
-            language: None,
-            width: Some(width),
-            height: Some(height),
-            bitrate,
-            frame_rate: None,
-            codecs: codecs.into(),
+            container_track_id: None,
             encrypted: true,
         }
     }
 
-    pub fn audio(
-        id: impl Into<String>,
-        quality_tier: QualityTier,
-        bitrate: u64,
-        codecs: impl Into<String>,
-    ) -> Self {
+    /// Construct an encrypted video rendition with the standard HD quality tier.
+    pub fn video_hd() -> Self {
+        Self::video(QualityTier::hd())
+    }
+
+    /// Construct an encrypted video rendition with the UHD 4K quality tier.
+    pub fn video_4k() -> Self {
+        Self::video(QualityTier::uhd_4k())
+    }
+
+    /// Construct an encrypted audio rendition with the default SD quality tier.
+    pub fn audio() -> Self {
+        Self::audio_tier(QualityTier::sd())
+    }
+
+    /// Construct an encrypted audio rendition with the specified quality tier.
+    pub fn audio_tier(quality_tier: QualityTier) -> Self {
         Self {
-            id: id.into(),
+            track_id: generate_track_identifier(TrackType::Audio),
             track_type: TrackType::Audio,
             quality_tier,
-            track_id: None,
-            language: None,
-            width: None,
-            height: None,
-            bitrate,
-            frame_rate: None,
-            codecs: codecs.into(),
+            container_track_id: None,
             encrypted: true,
         }
     }
 
     /// Construct a clear (unencrypted) subtitle rendition.
-    pub fn subtitle(id: impl Into<String>, codecs: impl Into<String>) -> Self {
+    pub fn subtitle() -> Self {
         Self {
-            id: id.into(),
+            track_id: generate_track_identifier(TrackType::Subtitle),
             track_type: TrackType::Subtitle,
             quality_tier: QualityTier::new("default"),
-            track_id: None,
-            language: None,
-            width: None,
-            height: None,
-            bitrate: 0,
-            frame_rate: None,
-            codecs: codecs.into(),
+            container_track_id: None,
             encrypted: false,
         }
     }
 
-    /// Set explicit track ID (1-based ISO-BMFF track ID).
-    pub fn with_track_id(mut self, track_id: u32) -> Self {
-        self.track_id = Some(track_id);
+    /// Set explicit container track ID (1-based ISO-BMFF track ID).
+    pub fn with_container_track_id(mut self, track_id: u32) -> Self {
+        self.container_track_id = Some(track_id);
         self
     }
 
-    /// Set rendition language tag (e.g. "en", "eng", "spa").
-    pub fn with_language(mut self, language: impl Into<String>) -> Self {
-        self.language = Some(language.into());
-        self
-    }
-
-    /// Returns the configured `track_id`, or falls back to `(index + 1) as u32` (1-based ISO-BMFF convention).
-    pub fn effective_track_id(&self, index: usize) -> u32 {
-        self.track_id.unwrap_or((index + 1) as u32)
+    /// Returns the configured `container_track_id`, or falls back to `(index + 1) as u32` (1-based ISO-BMFF convention).
+    pub fn effective_container_track_id(&self, index: usize) -> u32 {
+        self.container_track_id.unwrap_or((index + 1) as u32)
     }
 
     /// Mark this rendition as clear (unencrypted), bypassing GPAC cecrypt.
@@ -267,69 +246,52 @@ impl Rendition {
     }
 }
 
-/// A media segment to be packaged.
-#[derive(Debug, Clone)]
-pub struct Segment {
-    pub rendition_id: String,
-    pub sequence_number: u64,
-    pub duration_seconds: f64,
-    pub data: Bytes,
-    pub is_init: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_rendition_video_constructor() {
-        let r = Rendition::video(
-            "v1",
-            QualityTier::hd(),
-            1920,
-            1080,
-            2_000_000,
-            "avc1.640028",
-        );
-        assert_eq!(r.id, "v1");
+        let r = Rendition::video(QualityTier::hd());
+        assert!(r.track_id.starts_with("track_video_"));
         assert_eq!(r.track_type, TrackType::Video);
         assert_eq!(r.quality_tier, QualityTier::hd());
-        assert_eq!(r.track_id, None);
-        assert_eq!(r.language, None);
-        assert_eq!(r.width, Some(1920));
-        assert_eq!(r.height, Some(1080));
-        assert_eq!(r.bitrate, 2_000_000);
-        assert_eq!(r.codecs, "avc1.640028");
+        assert_eq!(r.container_track_id, None);
         assert!(r.encrypted);
+    }
+
+    #[test]
+    fn test_rendition_video_presets() {
+        let hd = Rendition::video_hd();
+        assert!(hd.track_id.starts_with("track_video_"));
+        assert_eq!(hd.quality_tier, QualityTier::hd());
+
+        let uhd = Rendition::video_4k();
+        assert!(uhd.track_id.starts_with("track_video_"));
+        assert_eq!(uhd.quality_tier, QualityTier::uhd_4k());
     }
 
     #[test]
     fn test_rendition_audio_constructor() {
-        let r = Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2");
-        assert_eq!(r.id, "a1");
+        let r = Rendition::audio();
+        assert!(r.track_id.starts_with("track_audio_"));
         assert_eq!(r.track_type, TrackType::Audio);
         assert_eq!(r.quality_tier, QualityTier::sd());
-        assert_eq!(r.track_id, None);
-        assert_eq!(r.language, None);
-        assert_eq!(r.width, None);
-        assert_eq!(r.height, None);
-        assert_eq!(r.bitrate, 128_000);
-        assert_eq!(r.codecs, "mp4a.40.2");
+        assert_eq!(r.container_track_id, None);
         assert!(r.encrypted);
+
+        let r_tier = Rendition::audio_tier(QualityTier::new("lossless"));
+        assert!(r_tier.track_id.starts_with("track_audio_"));
+        assert_eq!(r_tier.quality_tier, QualityTier::new("lossless"));
     }
 
     #[test]
     fn test_rendition_subtitle_constructor() {
-        let r = Rendition::subtitle("subs_en", "tx3g");
-        assert_eq!(r.id, "subs_en");
+        let r = Rendition::subtitle();
+        assert!(r.track_id.starts_with("track_subtitle_"));
         assert_eq!(r.track_type, TrackType::Subtitle);
         assert_eq!(r.quality_tier, QualityTier::new("default"));
-        assert_eq!(r.track_id, None);
-        assert_eq!(r.language, None);
-        assert_eq!(r.width, None);
-        assert_eq!(r.height, None);
-        assert_eq!(r.bitrate, 0);
-        assert_eq!(r.codecs, "tx3g");
+        assert_eq!(r.container_track_id, None);
         assert!(
             !r.encrypted,
             "Subtitle renditions must default to unencrypted"
@@ -337,44 +299,27 @@ mod tests {
     }
 
     #[test]
-    fn test_rendition_with_track_id() {
-        let r = Rendition::subtitle("subs_en", "tx3g").with_track_id(4);
-        assert_eq!(r.track_id, Some(4));
+    fn test_rendition_with_container_track_id() {
+        let r = Rendition::subtitle().with_container_track_id(4);
+        assert_eq!(r.container_track_id, Some(4));
 
-        let v = Rendition::video(
-            "v1",
-            QualityTier::hd(),
-            1920,
-            1080,
-            2_000_000,
-            "avc1.640028",
-        )
-        .with_track_id(1);
-        assert_eq!(v.track_id, Some(1));
+        let v = Rendition::video_hd().with_container_track_id(1);
+        assert_eq!(v.container_track_id, Some(1));
     }
 
     #[test]
-    fn test_rendition_language_and_effective_track_id() {
-        let r_default = Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2");
-        assert_eq!(r_default.effective_track_id(0), 1);
-        assert_eq!(r_default.effective_track_id(2), 3);
-        assert_eq!(r_default.language, None);
+    fn test_rendition_effective_container_track_id() {
+        let r_default = Rendition::audio();
+        assert_eq!(r_default.effective_container_track_id(0), 1);
+        assert_eq!(r_default.effective_container_track_id(2), 3);
 
-        let r_custom = r_default.with_track_id(10).with_language("eng");
-        assert_eq!(r_custom.effective_track_id(0), 10);
-        assert_eq!(r_custom.language.as_deref(), Some("eng"));
+        let r_custom = r_default.with_container_track_id(10);
+        assert_eq!(r_custom.effective_container_track_id(0), 10);
     }
 
     #[test]
     fn test_rendition_clear_and_with_encrypted() {
-        let mut r = Rendition::video(
-            "v1",
-            QualityTier::hd(),
-            1920,
-            1080,
-            2_000_000,
-            "avc1.640028",
-        );
+        let mut r = Rendition::video_hd();
         assert!(r.encrypted);
 
         r = r.clear();
@@ -382,5 +327,31 @@ mod tests {
 
         r = r.with_encrypted(true);
         assert!(r.encrypted);
+    }
+
+    #[test]
+    fn test_multiple_renditions_same_tier_no_id_collision() {
+        let r1 = Rendition::video(QualityTier::hd());
+        let r2 = Rendition::video(QualityTier::hd());
+        assert_ne!(
+            r1.track_id, r2.track_id,
+            "Renditions sharing the same tier must have distinct IDs"
+        );
+        assert_eq!(r1.effective_container_track_id(0), 1);
+        assert_eq!(r2.effective_container_track_id(1), 2);
+    }
+
+    #[test]
+    fn test_rendition_serde_json() {
+        let mut r = Rendition::video_hd().with_container_track_id(1);
+        r.track_id = "track_video_custom123".to_string();
+
+        let json = serde_json::to_string(&r).expect("Serialization failed");
+        assert!(json.contains(r#""track_id":"track_video_custom123""#));
+        assert!(json.contains(r#""container_track_id":1"#));
+        assert!(json.contains(r#""encrypted":true"#));
+
+        let deserialized: Rendition = serde_json::from_str(&json).expect("Deserialization failed");
+        assert_eq!(r, deserialized);
     }
 }

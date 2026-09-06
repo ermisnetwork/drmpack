@@ -14,22 +14,32 @@ pub struct KeyPlan {
     pub shared_audio_tier: Option<QualityTier>,
 }
 
-fn video_tier_rank(rendition: &Rendition) -> (u32, u64) {
-    let height = rendition.height.unwrap_or_else(|| {
-        let name = rendition.quality_tier.0.to_uppercase();
-        if name.contains("4K") || name.contains("UHD") {
-            2160
-        } else if name.contains("1080") || name.contains("FHD") {
-            1080
-        } else if name.contains("HD") || name.contains("720") {
-            720
-        } else if name.contains("SD") || name.contains("480") || name.contains("360") {
-            480
-        } else {
-            0
-        }
-    });
-    (height, rendition.bitrate)
+fn video_tier_rank(rendition: &Rendition) -> u32 {
+    let name = rendition.quality_tier.0.to_uppercase();
+    if name.contains("8K") {
+        4320
+    } else if name.contains("4K") || name.contains("UHD") {
+        2160
+    } else if name.contains("1080") || name.contains("FHD") {
+        1080
+    } else if name.contains("HD") || name.contains("720") {
+        720
+    } else if name.contains("SD") || name.contains("480") || name.contains("360") {
+        480
+    } else {
+        0
+    }
+}
+
+fn audio_tier_rank(rendition: &Rendition) -> u32 {
+    let name = rendition.quality_tier.0.to_uppercase();
+    if name.contains("HD") || name.contains("HIGH") {
+        256
+    } else if name.contains("SD") || name.contains("STANDARD") {
+        128
+    } else {
+        64
+    }
 }
 
 /// Orchestrates key planning and resolution across renditions and mapping policies.
@@ -99,7 +109,10 @@ impl KeyPolicyEngine {
                         .collect();
 
                     if !audio_renditions.is_empty() {
-                        let best_audio = audio_renditions.iter().max_by_key(|r| r.bitrate).unwrap();
+                        let best_audio = audio_renditions
+                            .iter()
+                            .max_by_key(|r| audio_tier_rank(r))
+                            .unwrap();
                         (TrackType::Audio, best_audio.quality_tier.clone())
                     } else {
                         let first = encrypted_renditions[0];
@@ -146,7 +159,10 @@ impl KeyPolicyEngine {
                     {
                         QualityTier::sd()
                     } else {
-                        let best = audio_renditions.iter().max_by_key(|r| r.bitrate).unwrap();
+                        let best = audio_renditions
+                            .iter()
+                            .max_by_key(|r| audio_tier_rank(r))
+                            .unwrap();
                         best.quality_tier.clone()
                     };
                     requested_quality_tiers.push((TrackType::Audio, a_tier.clone()));
@@ -362,40 +378,19 @@ mod tests {
     use bytes::Bytes;
 
     fn rendition_hd() -> Rendition {
-        Rendition::video(
-            "v_hd",
-            QualityTier::hd(),
-            1920,
-            1080,
-            5_000_000,
-            "avc1.640028",
-        )
+        Rendition::video_hd()
     }
 
     fn rendition_4k() -> Rendition {
-        Rendition::video(
-            "v_4k",
-            QualityTier::uhd_4k(),
-            3840,
-            2160,
-            15_000_000,
-            "hev1.1.6.L150.90",
-        )
+        Rendition::video_4k()
     }
 
     fn rendition_sd() -> Rendition {
-        Rendition::video(
-            "v_sd",
-            QualityTier::sd(),
-            854,
-            480,
-            1_500_000,
-            "avc1.4d401f",
-        )
+        Rendition::video(QualityTier::sd())
     }
 
     fn rendition_audio() -> Rendition {
-        Rendition::audio("a_sd", QualityTier::sd(), 128_000, "mp4a.40.2")
+        Rendition::audio()
     }
 
     #[test]
@@ -549,8 +544,8 @@ mod tests {
 
     #[test]
     fn test_plan_shared_all_audio_only() {
-        let audio_low = Rendition::audio("a_low", QualityTier::sd(), 64_000, "mp4a.40.2");
-        let audio_high = Rendition::audio("a_high", QualityTier::hd(), 256_000, "mp4a.40.2");
+        let audio_low = Rendition::audio_tier(QualityTier::sd());
+        let audio_high = Rendition::audio_tier(QualityTier::hd());
         let renditions = vec![audio_low, audio_high];
 
         let plan = KeyPolicyEngine::plan(
@@ -672,7 +667,7 @@ mod tests {
             rendition_hd(),
             rendition_sd(),
             rendition_audio(),
-            Rendition::audio("a_hd", QualityTier::hd(), 256_000, "mp4a.40.2"),
+            Rendition::audio_tier(QualityTier::hd()),
         ];
 
         let plan = KeyPolicyEngine::plan(

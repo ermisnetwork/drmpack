@@ -1,13 +1,3 @@
-//! Tool to inspect raw Axinom SPEKE v2 / CPIX 2.3 XML requests and responses.
-//!
-//! Run with:
-//! ```bash
-//! cargo run --example inspect_axinom
-//! cargo run --example inspect_axinom -- --scheme cbcs
-//! cargo run --example inspect_axinom -- --scheme dual --override-key-ids
-//! cargo run --example inspect_axinom -- --multi-tier
-//! ```
-
 use base64::prelude::*;
 use drmpack::axinom::AxinomConfig;
 use drmpack::cpix::builder::CpixRequestBuilder;
@@ -18,7 +8,6 @@ use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Load .env file
     let _ = dotenvy::dotenv();
 
     println!("============================================================");
@@ -44,7 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 2. Load configuration from environment (.env)
     let config = match AxinomConfig::from_env() {
         Ok(c) => c.with_override_key_ids(override_key_ids),
         Err(e) => {
@@ -64,7 +52,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Selected Scheme: {scheme:?}");
     println!("  - Multi-tier Mode: {is_multi_tier}\n");
 
-    // 3. Build KeyRequest based on desired configuration
     let content_id = format!("inspect-{}", uuid::Uuid::new_v4());
     let mut req = KeyRequest::new(&content_id);
 
@@ -100,10 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let (xml_request, specs) = CpixRequestBuilder::build_with_specs(&sub_req)?;
 
-        println!("📤 [1] OUTGOING CPIX 2.3 XML REQUEST:");
+        println!("[1] OUTGOING CPIX 2.3 XML REQUEST:");
         println!("{xml_request}\n");
 
-        // Basic Auth header
         let credentials = format!("{}:{}", config.tenant_id, config.management_key);
         let auth_value = format!("Basic {}", BASE64_STANDARD.encode(credentials.as_bytes()));
 
@@ -123,12 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             http_req = http_req.query(&[("overrideKeyIds", "true")]);
         }
 
-        println!("📡 [2] SENDING HTTP POST TO AXINOM...");
+        println!("[2] SENDING HTTP POST TO AXINOM...");
         let resp = http_req.send().await?;
         let status = resp.status();
         let headers = resp.headers().clone();
 
-        println!("📥 [3] RECEIVED HTTP RESPONSE:");
+        println!("[3] RECEIVED HTTP RESPONSE:");
         println!("  - Status: {status}");
         if let Some(err_msg) = headers.get("x-axdrm-errormessage") {
             println!(
@@ -138,11 +124,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let resp_body = resp.text().await?;
-        println!("\n📥 [4] RAW CPIX 2.3 XML RESPONSE FROM AXINOM:");
+        println!("\n[4] RAW CPIX 2.3 XML RESPONSE FROM AXINOM:");
         println!("{resp_body}\n");
 
         if status.is_success() {
-            println!("🔑 [5] PARSED KEYSET SUMMARY:");
+            println!("[5] PARSED KEYSET SUMMARY:");
             let key_set = CpixResponseParser::parse(&resp_body, Some(&specs))?;
             println!("  Total Keys Acquired: {}", key_set.len());
             for key in key_set.all_keys() {
@@ -164,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         } else {
-            eprintln!("❌ Request failed with HTTP {status}!");
+            eprintln!("Request failed with HTTP {status}!");
         }
         println!();
     }

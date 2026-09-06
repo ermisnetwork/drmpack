@@ -6,9 +6,10 @@ use crate::error::{
 };
 use crate::key::{KeyPolicyEngine, KeyProvider, KeySet};
 use crate::types::{
-    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, Rendition, Segment,
+    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, Rendition,
     TrackType,
 };
+use bytes::Bytes;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -46,15 +47,15 @@ pub struct PackagingSessionConfig {
     pub segment_duration: f64,
     pub chunk_duration: f64,
     pub output_dir: PathBuf,
+    pub is_custom_output_dir: bool,
+    pub preserve_output: bool,
     /// Parent directory for private, session-scoped GPAC DRM XML files.
     pub control_dir: Option<PathBuf>,
     /// Inactivity timeout for input. This is distinct from `finalization_timeout`.
     pub session_timeout: Option<Duration>,
     /// Per-Representation deadline for GPAC finalization after stdin closes.
     pub finalization_timeout: Duration,
-    pub is_live: bool,
     pub gpac_bin: Option<String>,
-    pub auto_cleanup: bool,
     pub key_mapping_policy: KeyMappingPolicy,
 }
 
@@ -63,6 +64,8 @@ impl PackagingSessionConfig {
         let cid = content_id.into();
         Self {
             output_dir: default_output_dir(&cid),
+            is_custom_output_dir: false,
+            preserve_output: false,
             content_id: cid,
             renditions: Vec::new(),
             encryption_scheme: EncryptionScheme::Cenc,
@@ -73,15 +76,80 @@ impl PackagingSessionConfig {
             control_dir: None,
             session_timeout: None,
             finalization_timeout: DEFAULT_FINALIZATION_TIMEOUT,
-            is_live: true,
             gpac_bin: None,
-            auto_cleanup: false,
+            key_mapping_policy: KeyMappingPolicy::default(),
+        }
+    }
+
+    /// Preconfigured preset for standard live CENC streaming (Widevine + PlayReady, LowLatency).
+    pub fn cenc(content_id: impl Into<String>) -> Self {
+        let cid = content_id.into();
+        Self {
+            output_dir: default_output_dir(&cid),
+            is_custom_output_dir: false,
+            preserve_output: false,
+            content_id: cid,
+            renditions: Vec::new(),
+            encryption_scheme: EncryptionScheme::Cenc,
+            drm_systems: vec![DrmSystem::Widevine, DrmSystem::PlayReady],
+            latency_mode: LatencyMode::LowLatency,
+            segment_duration: 2.0,
+            chunk_duration: 0.2,
+            control_dir: None,
+            session_timeout: None,
+            finalization_timeout: DEFAULT_FINALIZATION_TIMEOUT,
+            gpac_bin: None,
+            key_mapping_policy: KeyMappingPolicy::default(),
+        }
+    }
+
+    /// Preconfigured preset for dual-scheme low-latency streaming (CENC + CBCS, Widevine + FairPlay + PlayReady).
+    pub fn low_latency_dual(content_id: impl Into<String>) -> Self {
+        let cid = content_id.into();
+        Self {
+            output_dir: default_output_dir(&cid),
+            is_custom_output_dir: false,
+            preserve_output: false,
+            content_id: cid,
+            renditions: Vec::new(),
+            encryption_scheme: EncryptionScheme::Dual,
+            drm_systems: vec![
+                DrmSystem::Widevine,
+                DrmSystem::FairPlay,
+                DrmSystem::PlayReady,
+            ],
+            latency_mode: LatencyMode::LowLatency,
+            segment_duration: 2.0,
+            chunk_duration: 0.2,
+            control_dir: None,
+            session_timeout: None,
+            finalization_timeout: DEFAULT_FINALIZATION_TIMEOUT,
+            gpac_bin: None,
             key_mapping_policy: KeyMappingPolicy::default(),
         }
     }
 
     pub fn with_rendition(mut self, rendition: Rendition) -> Self {
         self.renditions.push(rendition);
+        self
+    }
+
+    pub fn with_renditions(mut self, renditions: impl IntoIterator<Item = Rendition>) -> Self {
+        self.renditions.extend(renditions);
+        self
+    }
+
+    /// Enable all primary DRM systems (Widevine, FairPlay, PlayReady).
+    pub fn with_all_drm(mut self) -> Self {
+        for drm in [
+            DrmSystem::Widevine,
+            DrmSystem::FairPlay,
+            DrmSystem::PlayReady,
+        ] {
+            if !self.drm_systems.contains(&drm) {
+                self.drm_systems.push(drm);
+            }
+        }
         self
     }
 
@@ -120,6 +188,19 @@ impl PackagingSessionConfig {
 
     pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.output_dir = dir.into();
+        self.is_custom_output_dir = true;
+        self
+    }
+
+    /// Preserve output files upon Drop, preventing automatic deletion of auto-allocated directories.
+    pub fn preserve_output(mut self) -> Self {
+        self.preserve_output = true;
+        self
+    }
+
+    /// Explicitly control output preservation upon Drop.
+    pub fn with_preserve_output(mut self, preserve: bool) -> Self {
+        self.preserve_output = preserve;
         self
     }
 
@@ -139,18 +220,8 @@ impl PackagingSessionConfig {
         self
     }
 
-    pub fn with_live(mut self, is_live: bool) -> Self {
-        self.is_live = is_live;
-        self
-    }
-
     pub fn with_gpac_bin(mut self, bin: impl Into<String>) -> Self {
         self.gpac_bin = Some(bin.into());
-        self
-    }
-
-    pub fn with_auto_cleanup(mut self, auto_cleanup: bool) -> Self {
-        self.auto_cleanup = auto_cleanup;
         self
     }
 }
@@ -185,6 +256,63 @@ impl Lifecycle {
     }
 }
 
+/// Output manifest paths and packaging statistics returned by `PackagingSession::run_to_completion`.
+#[derive(Debug, Clone)]
+pub struct PackagingResult {
+    pub segments_ingested: u64,
+    pub output_dir: PathBuf,
+    pub manifests: Vec<PathBuf>,
+    pub hls_manifest: Option<PathBuf>,
+    pub dash_manifest: Option<PathBuf>,
+    pub cenc_hls: Option<PathBuf>,
+    pub cenc_dash: Option<PathBuf>,
+    pub cbcs_hls: Option<PathBuf>,
+    pub cbcs_dash: Option<PathBuf>,
+}
+
+impl PackagingResult {
+    pub fn manifest_path(
+        &self,
+        scheme: EncryptionScheme,
+        format: ManifestFormat,
+    ) -> Option<PathBuf> {
+        match (scheme, format) {
+            (EncryptionScheme::Cenc, ManifestFormat::Hls) => {
+                self.cenc_hls.clone().or_else(|| self.hls_manifest.clone())
+            }
+            (EncryptionScheme::Cenc, ManifestFormat::Dash) => self
+                .cenc_dash
+                .clone()
+                .or_else(|| self.dash_manifest.clone()),
+            (EncryptionScheme::Cbcs, ManifestFormat::Hls) => {
+                self.cbcs_hls.clone().or_else(|| self.hls_manifest.clone())
+            }
+            (EncryptionScheme::Cbcs, ManifestFormat::Dash) => self
+                .cbcs_dash
+                .clone()
+                .or_else(|| self.dash_manifest.clone()),
+            (EncryptionScheme::Dual, _) => None,
+        }
+    }
+
+    pub async fn cleanup(&self) -> Result<()> {
+        if self.output_dir.exists() {
+            tokio::fs::remove_dir_all(&self.output_dir)
+                .await
+                .map_err(|error| {
+                    DrmpackError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "Failed to clean up Ramdisk output directory '{}': {error}",
+                            self.output_dir.display()
+                        ),
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+}
+
 /// A stateful packaging session that orchestrates DRM key acquisition,
 /// GPAC child process lifecycle, and low-latency manifest/chunk generation into Ramdisk.
 ///
@@ -192,9 +320,8 @@ impl Lifecycle {
 /// `EncryptionScheme::Dual` queries scheme-aware keys for both CENC and CBCS Representations
 /// (`KeyRequest::encryption_schemes`). When supplied by a scheme-aware KeyProvider (such as CPIX),
 /// each Representation receives distinct ContentKeys and KIDs per ADR-0006.
-pub struct PackagingSession<P: KeyProvider + 'static> {
+pub struct PackagingSession {
     config: PackagingSessionConfig,
-    _key_provider: P,
     key_set: KeySet,
     cluster: Arc<RepresentationCluster>,
     control_dir: PathBuf,
@@ -204,9 +331,10 @@ pub struct PackagingSession<P: KeyProvider + 'static> {
     heartbeat_tx: Option<mpsc::Sender<()>>,
     cancellation_token: CancellationToken,
     watchdog_handle: Option<JoinHandle<()>>,
+    preserve_output: bool,
 }
 
-impl<P: KeyProvider + 'static> std::fmt::Debug for PackagingSession<P> {
+impl std::fmt::Debug for PackagingSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PackagingSession")
             .field("config", &self.config)
@@ -215,13 +343,16 @@ impl<P: KeyProvider + 'static> std::fmt::Debug for PackagingSession<P> {
     }
 }
 
-impl<P: KeyProvider + 'static> PackagingSession<P> {
+impl PackagingSession {
     /// Create a new packaging session, fetching its KeySet once and spawning one GPAC process
     /// per concrete Representation.
     #[instrument(skip(key_provider), fields(content_id = %config.content_id))]
-    pub async fn create(config: PackagingSessionConfig, key_provider: P) -> Result<Self> {
+    pub async fn create<P: KeyProvider>(
+        config: PackagingSessionConfig,
+        key_provider: &P,
+    ) -> Result<Self> {
         validate_config(&config)?;
-        let key_set = fetch_key_set(&config, &key_provider).await?;
+        let key_set = fetch_key_set(&config, key_provider).await?;
         let is_dual = config.encryption_scheme == EncryptionScheme::Dual;
         let output_dir_created = prepare_output_dir(&config.output_dir, is_dual).await?;
         let control_dir = match create_control_dir(&config).await {
@@ -246,7 +377,6 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         let (heartbeat_tx, watchdog_handle) = build_watchdog(WatchdogContext {
             timeout: config.session_timeout,
             finalization_timeout: config.finalization_timeout,
-            output_dir_for_cleanup: config.auto_cleanup.then(|| config.output_dir.clone()),
             control_dir: control_dir.clone(),
             lifecycle: Arc::clone(&lifecycle),
             is_terminal: Arc::clone(&is_terminal),
@@ -254,9 +384,10 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
             cancellation_token: cancellation_token.clone(),
         });
 
+        let preserve_output = config.preserve_output;
+
         Ok(Self {
             config,
-            _key_provider: key_provider,
             key_set,
             cluster,
             control_dir,
@@ -266,6 +397,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
             heartbeat_tx,
             cancellation_token,
             watchdog_handle,
+            preserve_output,
         })
     }
 
@@ -275,12 +407,18 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         }
     }
 
-    /// Push a media Segment to every active Representation. A successful return means every
-    /// process accepted and flushed the same ordered bytes.
-    #[instrument(skip(self, segment), fields(rendition_id = %segment.rendition_id, seq = segment.sequence_number))]
-    pub async fn push_segment(&mut self, segment: Segment) -> Result<()> {
-        let is_media = !segment.is_init && !segment.data.is_empty();
-        self.push_data(&segment.data, is_media).await
+    /// Mark output files to be preserved upon Drop, preventing automatic cleanup.
+    pub fn preserve_output(&mut self) {
+        self.preserve_output = true;
+    }
+
+    /// Push raw media bytes or chunk to every active Representation.
+    /// Primary push API accepting `impl Into<Bytes>` (e.g. `Bytes`, `Vec<u8>`, `&'static [u8]`).
+    #[instrument(skip(self, bytes))]
+    pub async fn push(&mut self, bytes: impl Into<Bytes>) -> Result<()> {
+        let data: Bytes = bytes.into();
+        let is_media = data.windows(4).any(|w| w == b"moof");
+        self.push_data(&data, is_media).await
     }
 
     /// Push raw media bytes to every active Representation.
@@ -288,6 +426,66 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     pub async fn push_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         let is_media = bytes.windows(4).any(|w| w == b"moof");
         self.push_data(bytes, is_media).await
+    }
+
+    /// Stream media chunks from an async channel to stdin until EOF, returning total chunk count.
+    pub async fn ingest_stream(&mut self, mut rx: mpsc::Receiver<Bytes>) -> Result<u64> {
+        let mut count = 0u64;
+        while let Some(chunk) = rx.recv().await {
+            self.push(chunk).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Ingest an entire stream channel and cleanly close the session, returning manifest paths.
+    pub async fn run_to_completion(mut self, rx: mpsc::Receiver<Bytes>) -> Result<PackagingResult> {
+        let segments_ingested = self.ingest_stream(rx).await?;
+        let output_dir = self.config.output_dir.clone();
+        let is_dual = self.config.encryption_scheme == EncryptionScheme::Dual;
+
+        let (hls_manifest, dash_manifest, cenc_hls, cenc_dash, cbcs_hls, cbcs_dash, manifests) =
+            if is_dual {
+                let c_hls = output_dir.join("cenc").join("live.m3u8");
+                let c_dash = output_dir.join("cenc").join("live.mpd");
+                let cb_hls = output_dir.join("cbcs").join("live.m3u8");
+                let cb_dash = output_dir.join("cbcs").join("live.mpd");
+                let all = vec![
+                    c_hls.clone(),
+                    c_dash.clone(),
+                    cb_hls.clone(),
+                    cb_dash.clone(),
+                ];
+                (
+                    None,
+                    None,
+                    Some(c_hls),
+                    Some(c_dash),
+                    Some(cb_hls),
+                    Some(cb_dash),
+                    all,
+                )
+            } else {
+                let hls = output_dir.join("live.m3u8");
+                let dash = output_dir.join("live.mpd");
+                let all = vec![hls.clone(), dash.clone()];
+                (Some(hls), Some(dash), None, None, None, None, all)
+            };
+
+        self.close().await?;
+        self.preserve_output = true;
+
+        Ok(PackagingResult {
+            segments_ingested,
+            output_dir,
+            manifests,
+            hls_manifest,
+            dash_manifest,
+            cenc_hls,
+            cenc_dash,
+            cbcs_hls,
+            cbcs_dash,
+        })
     }
 
     async fn push_data(&mut self, bytes: &[u8], is_media: bool) -> Result<()> {
@@ -318,7 +516,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     }
 
     /// Gracefully finalize every Representation. Both subprocesses are always attempted,
-    /// even when an earlier finalization fails.
+    /// even when an earlier finalization fails. Output files on Ramdisk are preserved.
     #[instrument(skip(self))]
     pub async fn close(&mut self) -> Result<()> {
         self.cancellation_token.cancel();
@@ -331,9 +529,6 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
                 let err = lifecycle.failure_error();
                 drop(lifecycle);
                 let _ = self.cleanup_control_dir().await;
-                if self.config.auto_cleanup {
-                    let _ = self.cleanup_output_dir().await;
-                }
                 return Err(err);
             }
             SessionState::Active => {
@@ -367,13 +562,8 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
         }
 
         let control_cleanup = self.cleanup_control_dir().await.err();
-        let output_cleanup = if failures.is_empty() && self.config.auto_cleanup {
-            self.cleanup_output_dir().await.err()
-        } else {
-            None
-        };
 
-        if failures.is_empty() && control_cleanup.is_none() && output_cleanup.is_none() {
+        if failures.is_empty() && control_cleanup.is_none() {
             lifecycle.state = SessionState::Closed;
             self.is_terminal.store(true, Ordering::Release);
             info!("PackagingSession closed successfully");
@@ -382,7 +572,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
             lifecycle.state = SessionState::Failed;
             let failure = Arc::new(
                 PackagingSessionFailure::from_failures(failures)
-                    .with_cleanup_failures(output_cleanup, control_cleanup),
+                    .with_cleanup_failures(None, control_cleanup),
             );
             lifecycle.terminal_failure = Some(Arc::clone(&failure));
             self.is_terminal.store(true, Ordering::Release);
@@ -511,14 +701,9 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
                 .await,
         );
         let control_cleanup = self.cleanup_control_dir().await.err();
-        let output_cleanup = if self.config.auto_cleanup {
-            self.cleanup_output_dir().await.err()
-        } else {
-            None
-        };
         let failure = Arc::new(
             PackagingSessionFailure::from_failures(failures)
-                .with_cleanup_failures(output_cleanup, control_cleanup),
+                .with_cleanup_failures(None, control_cleanup),
         );
         lifecycle.terminal_failure = Some(Arc::clone(&failure));
         self.is_terminal.store(true, Ordering::Release);
@@ -596,7 +781,7 @@ impl<P: KeyProvider + 'static> PackagingSession<P> {
     }
 }
 
-impl<P: KeyProvider + 'static> Drop for PackagingSession<P> {
+impl Drop for PackagingSession {
     fn drop(&mut self) {
         self.cancellation_token.cancel();
         if let Some(handle) = &self.watchdog_handle {
@@ -612,7 +797,10 @@ impl<P: KeyProvider + 'static> Drop for PackagingSession<P> {
                 }
             }
         }
-        if self.config.auto_cleanup && self.config.output_dir.exists() {
+        if !self.config.is_custom_output_dir
+            && !self.preserve_output
+            && self.config.output_dir.exists()
+        {
             if let Err(error) = std::fs::remove_dir_all(&self.config.output_dir) {
                 debug!(path = %self.config.output_dir.display(), %error, "Failed to remove output directory during drop");
             }
@@ -642,13 +830,18 @@ fn validate_config(config: &PackagingSessionConfig) -> Result<()> {
         ));
     }
 
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut seen_track_ids = std::collections::HashSet::new();
+    let mut seen_logical_ids = std::collections::HashSet::new();
+    let mut seen_container_ids = std::collections::HashSet::new();
     for (index, rendition) in config.renditions.iter().enumerate() {
-        if !seen_ids.insert(&rendition.id) {
+        if rendition.track_id.trim().is_empty() {
+            return Err(DrmpackError::InvalidConfig(
+                "track_id cannot be empty".into(),
+            ));
+        }
+        if !seen_logical_ids.insert(&rendition.track_id) {
             return Err(DrmpackError::InvalidConfig(format!(
-                "Duplicate rendition id '{}' across renditions",
-                rendition.id
+                "Duplicate track_id '{}' across renditions",
+                rendition.track_id
             )));
         }
 
@@ -658,16 +851,16 @@ fn validate_config(config: &PackagingSessionConfig) -> Result<()> {
             ));
         }
 
-        let track_id = rendition.effective_track_id(index);
-        if track_id == 0 {
+        let container_track_id = rendition.effective_container_track_id(index);
+        if container_track_id == 0 {
             return Err(DrmpackError::InvalidConfig(
-                "track_id cannot be 0 (ISO-BMFF track IDs must be >= 1)".into(),
+                "container_track_id cannot be 0 (ISO-BMFF track IDs must be >= 1)".into(),
             ));
         }
-        if !seen_track_ids.insert(track_id) {
+        if !seen_container_ids.insert(container_track_id) {
             return Err(DrmpackError::InvalidConfig(format!(
-                "Duplicate track_id {} across renditions",
-                track_id
+                "Duplicate container_track_id {} across renditions",
+                container_track_id
             )));
         }
     }
@@ -757,7 +950,6 @@ async fn create_control_dir(config: &PackagingSessionConfig) -> Result<PathBuf> 
 struct WatchdogContext {
     timeout: Option<Duration>,
     finalization_timeout: Duration,
-    output_dir_for_cleanup: Option<PathBuf>,
     control_dir: PathBuf,
     lifecycle: Arc<Mutex<Lifecycle>>,
     is_terminal: Arc<AtomicBool>,
@@ -816,41 +1008,25 @@ pub async fn verify_hls_endlist(output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn cleanup_watchdog_dirs(
-    control_dir: &Path,
-    output_dir_for_cleanup: Option<&PathBuf>,
-) -> (Option<DrmpackError>, Option<DrmpackError>) {
-    let control_cleanup = tokio::fs::remove_dir_all(control_dir).await.err().map(|error| {
-        DrmpackError::Io(std::io::Error::new(
-            error.kind(),
-            format!(
-                "Failed to clean up private control directory '{}': {error}",
-                control_dir.display()
-            ),
-        ))
-    });
-
-    let output_cleanup = match output_dir_for_cleanup {
-        Some(output_dir) => tokio::fs::remove_dir_all(output_dir).await.err().map(|error| {
+async fn cleanup_watchdog_dirs(control_dir: &Path) -> Option<DrmpackError> {
+    tokio::fs::remove_dir_all(control_dir)
+        .await
+        .err()
+        .map(|error| {
             DrmpackError::Io(std::io::Error::new(
                 error.kind(),
                 format!(
-                    "Failed to clean up Ramdisk output directory '{}': {error}",
-                    output_dir.display()
+                    "Failed to clean up private control directory '{}': {error}",
+                    control_dir.display()
                 ),
             ))
-        }),
-        None => None,
-    };
-
-    (control_cleanup, output_cleanup)
+        })
 }
 
 fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<JoinHandle<()>>) {
     let WatchdogContext {
         timeout,
         finalization_timeout,
-        output_dir_for_cleanup,
         control_dir,
         lifecycle,
         is_terminal,
@@ -922,10 +1098,7 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                         )
                         .await;
 
-                    let (control_cleanup, output_cleanup) = cleanup_watchdog_dirs(
-                        &control_dir,
-                        output_dir_for_cleanup.as_ref(),
-                    ).await;
+                    let control_cleanup = cleanup_watchdog_dirs(&control_dir).await;
 
                     {
                         let mut lifecycle_guard = lifecycle.lock().await;
@@ -943,10 +1116,10 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                             })
                             .collect::<Vec<_>>();
                         failures.extend(close_failures);
-                        lifecycle_guard.terminal_failure = Some(Arc::new(
+                        lifecycle_guard.terminal_failure = Some(Arc::clone(&failure_ptr(
                             PackagingSessionFailure::from_failures(failures)
-                                .with_cleanup_failures(output_cleanup, control_cleanup),
-                        ));
+                                .with_cleanup_failures(None, control_cleanup),
+                        )));
                     }
                     is_terminal.store(true, Ordering::Release);
                     break;
@@ -998,10 +1171,7 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                     // Dual-mode symmetric fail-fast: immediately teardown remaining peer representation(s)
                     let peer_failures = cluster.abort_peers(scheme).await;
 
-                    let (control_cleanup, output_cleanup) = cleanup_watchdog_dirs(
-                        &control_dir,
-                        output_dir_for_cleanup.as_ref(),
-                    ).await;
+                    let control_cleanup = cleanup_watchdog_dirs(&control_dir).await;
 
                     {
                         let mut lifecycle_guard = lifecycle.lock().await;
@@ -1018,7 +1188,7 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
                         all_failures.extend(peer_failures);
                         lifecycle_guard.terminal_failure = Some(Arc::new(
                             PackagingSessionFailure::from_failures(all_failures)
-                                .with_cleanup_failures(output_cleanup, control_cleanup),
+                                .with_cleanup_failures(None, control_cleanup),
                         ));
                     }
                     is_terminal.store(true, Ordering::Release);
@@ -1031,6 +1201,10 @@ fn build_watchdog(ctx: WatchdogContext) -> (Option<mpsc::Sender<()>>, Option<Joi
     (Some(heartbeat_tx), Some(handle))
 }
 
+fn failure_ptr(f: PackagingSessionFailure) -> Arc<PackagingSessionFailure> {
+    Arc::new(f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1039,14 +1213,7 @@ mod tests {
     use uuid::Uuid;
 
     fn rendition() -> Rendition {
-        Rendition::video(
-            "v1080p",
-            QualityTier::hd(),
-            1920,
-            1080,
-            5_000_000,
-            "avc1.640028",
-        )
+        Rendition::video_hd()
     }
 
     fn provider() -> RawKeyProvider {
@@ -1061,7 +1228,7 @@ mod tests {
     #[tokio::test]
     async fn session_config_requires_a_rendition() {
         let result =
-            PackagingSession::create(PackagingSessionConfig::new("test"), provider()).await;
+            PackagingSession::create(PackagingSessionConfig::new("test"), &provider()).await;
         assert!(matches!(result, Err(DrmpackError::InvalidConfig(_))));
     }
 
@@ -1085,7 +1252,7 @@ mod tests {
             .with_encryption_scheme(EncryptionScheme::Dual)
             .with_output_dir(&output_dir);
 
-        let result = PackagingSession::create(config, provider()).await;
+        let result = PackagingSession::create(config, &provider()).await;
         assert!(matches!(result, Err(DrmpackError::InvalidConfig(_))));
         tokio::fs::remove_dir_all(output_dir).await.unwrap();
     }
@@ -1099,7 +1266,7 @@ mod tests {
             .with_output_dir(&output_dir)
             .with_gpac_bin("missing-gpac-for-rollback-test");
 
-        let result = PackagingSession::create(config, provider()).await;
+        let result = PackagingSession::create(config, &provider()).await;
         let Err(DrmpackError::PackagingSession(failure)) = result else {
             panic!("creation failure must be reported as PackagingSession failure");
         };
@@ -1119,7 +1286,7 @@ mod tests {
             .with_output_dir(&output_dir)
             .with_control_dir(&control_parent)
             .with_gpac_bin("gpac");
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
 
         assert_eq!(
             session
@@ -1158,7 +1325,7 @@ mod tests {
             .with_rendition(rendition())
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
 
         let first_error = session.close().await.unwrap_err();
         let DrmpackError::PackagingSession(failure) = first_error else {
@@ -1180,7 +1347,7 @@ mod tests {
             .with_rendition(rendition())
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
 
         assert!(matches!(
             session.cleanup().await,
@@ -1197,13 +1364,13 @@ mod tests {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
         let config = PackagingSessionConfig::new("test")
             .with_rendition(rendition().clear())
-            .with_rendition(Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2").clear())
+            .with_rendition(Rendition::audio().clear())
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
 
         // RawKeyProvider is empty (no keys). If fetch_keys were called, it would error.
         let empty_provider = RawKeyProvider::new();
-        let mut session = PackagingSession::create(config, empty_provider)
+        let mut session = PackagingSession::create(config, &empty_provider)
             .await
             .unwrap();
 
@@ -1222,14 +1389,12 @@ mod tests {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
         let config = PackagingSessionConfig::new("test")
             .with_rendition(rendition()) // encrypted video HD
-            .with_rendition(
-                Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2").clear(), // clear audio
-            )
+            .with_rendition(Rendition::audio().clear()) // clear audio
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
 
         // provider() only supplies Video HD key. No Audio key is provided.
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
 
         let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cenc.xml"))
             .await
@@ -1246,16 +1411,9 @@ mod tests {
 
     #[tokio::test]
     async fn key_mapping_policy_shared_all() {
-        let video_sd = Rendition::video(
-            "v_sd",
-            QualityTier::sd(),
-            854,
-            480,
-            1_500_000,
-            "avc1.4d401f",
-        );
+        let video_sd = Rendition::video(QualityTier::sd());
         let video_hd = rendition();
-        let audio = Rendition::audio("a1", QualityTier::sd(), 128_000, "mp4a.40.2");
+        let audio = Rendition::audio();
 
         let config = PackagingSessionConfig::new("test")
             .with_key_mapping_policy(KeyMappingPolicy::SharedAll)
@@ -1284,16 +1442,9 @@ mod tests {
     #[tokio::test]
     async fn key_mapping_policy_shared_video_single_audio() {
         let video_hd = rendition();
-        let video_sd = Rendition::video(
-            "v_sd",
-            QualityTier::sd(),
-            854,
-            480,
-            1_500_000,
-            "avc1.4d401f",
-        );
-        let audio_sd = Rendition::audio("a_sd", QualityTier::sd(), 128_000, "mp4a.40.2");
-        let audio_hd = Rendition::audio("a_hd", QualityTier::hd(), 256_000, "mp4a.40.2");
+        let video_sd = Rendition::video(QualityTier::sd());
+        let audio_sd = Rendition::audio();
+        let audio_hd = Rendition::audio_tier(QualityTier::hd());
 
         let config = PackagingSessionConfig::new("test")
             .with_key_mapping_policy(KeyMappingPolicy::SharedVideoSingleAudio)
@@ -1343,14 +1494,7 @@ mod tests {
     #[tokio::test]
     async fn key_mapping_policy_per_tier_and_track() {
         let video_hd = rendition();
-        let video_sd = Rendition::video(
-            "v_sd",
-            QualityTier::sd(),
-            854,
-            480,
-            1_500_000,
-            "avc1.4d401f",
-        );
+        let video_sd = Rendition::video(QualityTier::sd());
 
         let config = PackagingSessionConfig::new("test")
             .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
@@ -1397,7 +1541,7 @@ mod tests {
             .with_gpac_bin("gpac")
             .with_session_timeout(Duration::from_millis(50));
 
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
 
         // Close immediately, which cancels the token
         let _ = session.close().await;
@@ -1419,7 +1563,7 @@ mod tests {
             .with_gpac_bin("gpac")
             .with_session_timeout(Duration::from_millis(50));
 
-        let session = PackagingSession::create(config, provider()).await.unwrap();
+        let session = PackagingSession::create(config, &provider()).await.unwrap();
 
         // Wait for inactivity watchdog to fire
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1445,7 +1589,7 @@ mod tests {
             .with_gpac_bin("gpac")
             .with_session_timeout(Duration::from_millis(30));
 
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
 
         // Sleep sufficiently for watchdog to fire
         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -1466,7 +1610,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_config_rejects_encrypted_subtitle() {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
-        let mut sub = Rendition::subtitle("sub1", "tx3g");
+        let mut sub = Rendition::subtitle();
         sub.encrypted = true;
 
         let config = PackagingSessionConfig::new("test")
@@ -1474,7 +1618,7 @@ mod tests {
             .with_rendition(sub)
             .with_output_dir(&output_dir);
 
-        let err = PackagingSession::create(config, provider())
+        let err = PackagingSession::create(config, &provider())
             .await
             .unwrap_err();
         assert!(
@@ -1485,72 +1629,115 @@ mod tests {
     #[tokio::test]
     async fn test_validate_config_rejects_track_id_zero() {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
-        let r = rendition().with_track_id(0);
+        let r = rendition().with_container_track_id(0);
 
         let config = PackagingSessionConfig::new("test")
             .with_rendition(r)
             .with_output_dir(&output_dir);
 
-        let err = PackagingSession::create(config, provider())
+        let err = PackagingSession::create(config, &provider())
             .await
             .unwrap_err();
         assert!(
-            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("track_id cannot be 0"))
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("container_track_id cannot be 0"))
         );
     }
 
     #[tokio::test]
     async fn test_validate_config_rejects_duplicate_track_ids() {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
-        let r1 = Rendition::video(
-            "v1",
-            QualityTier::hd(),
-            1920,
-            1080,
-            2_000_000,
-            "avc1.640028",
-        )
-        .with_track_id(1);
-        let r2 = Rendition::video("v2", QualityTier::sd(), 1280, 720, 1_000_000, "avc1.4d401f")
-            .with_track_id(1);
+        let r1 = Rendition::video(QualityTier::hd()).with_container_track_id(1);
+        let r2 = Rendition::video(QualityTier::sd()).with_container_track_id(1);
 
         let config = PackagingSessionConfig::new("test")
             .with_rendition(r1)
             .with_rendition(r2)
             .with_output_dir(&output_dir);
 
-        let err = PackagingSession::create(config, provider())
+        let err = PackagingSession::create(config, &provider())
             .await
             .unwrap_err();
         assert!(
-            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("Duplicate track_id 1"))
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("Duplicate container_track_id 1"))
         );
     }
 
     #[tokio::test]
-    async fn test_validate_config_rejects_duplicate_rendition_ids() {
+    async fn test_validate_config_rejects_duplicate_logical_track_ids() {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
-        let r1 = Rendition::video(
-            "v1",
-            QualityTier::hd(),
-            1920,
-            1080,
-            2_000_000,
-            "avc1.640028",
-        );
-        let r2 = Rendition::video("v1", QualityTier::sd(), 1280, 720, 1_000_000, "avc1.4d401f");
+        let mut r1 = Rendition::video_hd();
+        r1.track_id = "v_custom".to_string();
+        let mut r2 = Rendition::video(QualityTier::sd());
+        r2.track_id = "v_custom".to_string();
 
         let config = PackagingSessionConfig::new("test")
             .with_rendition(r1)
             .with_rendition(r2)
             .with_output_dir(&output_dir);
 
-        let err = PackagingSession::create(config, provider())
+        let err = PackagingSession::create(config, &provider())
             .await
             .unwrap_err();
         assert!(
-            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("Duplicate rendition id 'v1'"))
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("Duplicate track_id 'v_custom' across renditions"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_rejects_empty_track_id() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let mut r = Rendition::video_hd();
+        r.track_id = "   ".to_string();
+
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(r)
+            .with_output_dir(&output_dir);
+
+        let err = PackagingSession::create(config, &provider())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("track_id cannot be empty"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_accepts_non_sequential_container_track_ids() {
+        let r1 = Rendition::video_hd().with_container_track_id(10);
+        let r2 = Rendition::video(QualityTier::sd()).with_container_track_id(20);
+        let r3 = Rendition::audio().with_container_track_id(30);
+
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(r1)
+            .with_rendition(r2)
+            .with_rendition(r3);
+
+        assert!(super::validate_config(&config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_renditions_same_tier_no_id_collision() {
+        let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
+        let r1 = Rendition::video(QualityTier::hd());
+        let r2 = Rendition::video(QualityTier::hd());
+
+        assert_ne!(r1.track_id, r2.track_id);
+
+        let config = PackagingSessionConfig::new("test")
+            .with_rendition(r1)
+            .with_rendition(r2)
+            .with_output_dir(&output_dir)
+            .with_gpac_bin("gpac");
+
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
+
+        assert_eq!(session.config.renditions.len(), 2);
+        assert_ne!(
+            session.config.renditions[0].track_id,
+            session.config.renditions[1].track_id
+        );
+        let _ = session.close().await;
+        let _ = session.cleanup().await;
     }
 
     #[tokio::test]
@@ -1558,7 +1745,9 @@ mod tests {
         let non_existent = std::env::temp_dir().join(format!("drmpack_missing_{}", Uuid::new_v4()));
         let res = verify_hls_endlist(&non_existent).await;
         assert!(res.is_err());
-        assert!(matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("does not exist")));
+        assert!(
+            matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("does not exist"))
+        );
     }
 
     #[tokio::test]
@@ -1567,7 +1756,9 @@ mod tests {
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let res = verify_hls_endlist(&dir).await;
         assert!(res.is_err());
-        assert!(matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("No HLS media manifests found")));
+        assert!(
+            matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("No HLS media manifests found"))
+        );
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
@@ -1576,7 +1767,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drmpack_master_only_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let master_path = dir.join("master.m3u8");
-        tokio::fs::write(&master_path, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nv1.m3u8\n").await.unwrap();
+        tokio::fs::write(
+            &master_path,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nv1.m3u8\n",
+        )
+        .await
+        .unwrap();
         let res = verify_hls_endlist(&dir).await;
         assert!(res.is_err());
         let content = tokio::fs::read_to_string(&master_path).await.unwrap();
@@ -1594,7 +1790,9 @@ mod tests {
 
         let res = verify_hls_endlist(&dir).await;
         assert!(res.is_err());
-        assert!(matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("missing finalization tag #EXT-X-ENDLIST")));
+        assert!(
+            matches!(res.unwrap_err(), DrmpackError::Session(msg) if msg.contains("missing finalization tag #EXT-X-ENDLIST"))
+        );
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
@@ -1603,7 +1801,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drmpack_valid_endlist_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let media_path = dir.join("live_1.m3u8");
-        let initial = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment1.m4s\n#EXT-X-ENDLIST\n";
+        let initial =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment1.m4s\n#EXT-X-ENDLIST\n";
         tokio::fs::write(&media_path, initial).await.unwrap();
 
         let res = verify_hls_endlist(&dir).await;
@@ -1622,11 +1821,17 @@ mod tests {
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
 
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
-        assert!(session.is_alive(), "Active session must report is_alive() == true");
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
+        assert!(
+            session.is_alive(),
+            "Active session must report is_alive() == true"
+        );
 
         let _ = session.close().await;
-        assert!(!session.is_alive(), "Closed session must report is_alive() == false");
+        assert!(
+            !session.is_alive(),
+            "Closed session must report is_alive() == false"
+        );
         let _ = session.cleanup().await;
     }
 
@@ -1638,7 +1843,7 @@ mod tests {
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
 
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
         assert!(session.is_alive());
 
         // Prematurely kill the GPAC subprocess
@@ -1656,7 +1861,10 @@ mod tests {
             panic!("Expected PackagingSession structured failure");
         };
 
-        assert!(failure.cenc.iter().any(|f| f.operation == PackagingOperation::Supervisor));
+        assert!(failure
+            .cenc
+            .iter()
+            .any(|f| f.operation == PackagingOperation::Supervisor));
         let _ = session.cleanup().await;
     }
 
@@ -1669,7 +1877,7 @@ mod tests {
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
 
-        let session = PackagingSession::create(config, provider()).await.unwrap();
+        let session = PackagingSession::create(config, &provider()).await.unwrap();
         assert_eq!(session.representations().len(), 2);
         assert!(session.is_alive());
 
@@ -1693,7 +1901,10 @@ mod tests {
             .iter()
             .find(|r| r.scheme == EncryptionScheme::Cbcs)
             .expect("CBCS representation must exist");
-        assert!(!cbcs_rep.is_alive(), "CBCS peer must be torn down symmetrically");
+        assert!(
+            !cbcs_rep.is_alive(),
+            "CBCS peer must be torn down symmetrically"
+        );
 
         // Status check reports failure
         let status = session.check_status().await;
@@ -1701,39 +1912,44 @@ mod tests {
         let DrmpackError::PackagingSession(failure) = status.unwrap_err() else {
             panic!("Expected structured PackagingSession failure");
         };
-        assert_eq!(failure.cenc.len(), 1, "CENC must have exactly 1 crash failure");
-        assert_eq!(failure.cbcs.len(), 1, "CBCS peer must have exactly 1 symmetric abort failure");
+        assert_eq!(
+            failure.cenc.len(),
+            1,
+            "CENC must have exactly 1 crash failure"
+        );
+        assert_eq!(
+            failure.cbcs.len(),
+            1,
+            "CBCS peer must have exactly 1 symmetric abort failure"
+        );
         assert_eq!(failure.cenc[0].operation, PackagingOperation::Supervisor);
         assert_eq!(failure.cbcs[0].operation, PackagingOperation::Supervisor);
-        assert!(matches!(failure.cenc[0].error, DrmpackError::ProcessCrashed { .. }));
+        assert!(matches!(
+            failure.cenc[0].error,
+            DrmpackError::ProcessCrashed { .. }
+        ));
 
         let _ = session.cleanup().await;
     }
 
     #[tokio::test]
-    async fn test_push_segment_init_only_does_not_require_endlist() {
+    async fn test_push_init_only_does_not_require_endlist() {
         let output_dir = std::env::temp_dir().join(format!("drmpack_init_only_{}", Uuid::new_v4()));
         let config = PackagingSessionConfig::new("test")
             .with_rendition(rendition())
             .with_output_dir(&output_dir)
             .with_gpac_bin("gpac");
 
-        let mut session = PackagingSession::create(config, provider()).await.unwrap();
+        let mut session = PackagingSession::create(config, &provider()).await.unwrap();
         assert!(!session.has_pushed_media.load(Ordering::Acquire));
 
-        // Push only an initialization segment (is_init: true)
+        // Push only empty/init bytes (no moof box)
         session
-            .push_segment(Segment {
-                rendition_id: "v1".into(),
-                sequence_number: 0,
-                duration_seconds: 0.0,
-                data: bytes::Bytes::new(),
-                is_init: true,
-            })
+            .push(bytes::Bytes::new())
             .await
-            .expect("Init segment write must succeed");
+            .expect("Push write must succeed");
 
-        // Init segment must not mark has_pushed_media as true
+        // Init bytes must not mark has_pushed_media as true
         assert!(!session.has_pushed_media.load(Ordering::Acquire));
 
         let _ = session.close().await;
@@ -1748,9 +1964,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drmpack_ro_dir_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let media_path = dir.join("live_1.m3u8");
-        tokio::fs::write(&media_path, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg1.m4s\n#EXT-X-ENDLIST\n")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            &media_path,
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg1.m4s\n#EXT-X-ENDLIST\n",
+        )
+        .await
+        .unwrap();
 
         // Revoke read permission from directory so read_dir fails
         tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000))
@@ -1764,5 +1983,232 @@ mod tests {
         // Restore permissions for cleanup
         let _ = tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).await;
         tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[test]
+    fn test_presets_and_builder_methods() {
+        let cenc_cfg =
+            PackagingSessionConfig::cenc("cenc_id").with_rendition(Rendition::video_hd());
+        assert_eq!(cenc_cfg.content_id, "cenc_id");
+        assert_eq!(cenc_cfg.encryption_scheme, EncryptionScheme::Cenc);
+        assert_eq!(
+            cenc_cfg.drm_systems,
+            vec![DrmSystem::Widevine, DrmSystem::PlayReady]
+        );
+        assert_eq!(cenc_cfg.latency_mode, LatencyMode::LowLatency);
+        assert_eq!(cenc_cfg.segment_duration, 2.0);
+        assert_eq!(cenc_cfg.chunk_duration, 0.2);
+
+        let dual_cfg = PackagingSessionConfig::low_latency_dual("dual_id")
+            .with_rendition(Rendition::video_hd());
+        assert_eq!(dual_cfg.content_id, "dual_id");
+        assert_eq!(dual_cfg.encryption_scheme, EncryptionScheme::Dual);
+        assert_eq!(
+            dual_cfg.drm_systems,
+            vec![
+                DrmSystem::Widevine,
+                DrmSystem::FairPlay,
+                DrmSystem::PlayReady
+            ]
+        );
+        assert_eq!(dual_cfg.latency_mode, LatencyMode::LowLatency);
+        assert_eq!(dual_cfg.segment_duration, 2.0);
+        assert_eq!(dual_cfg.chunk_duration, 0.2);
+
+        let custom_cfg = PackagingSessionConfig::new("custom")
+            .with_all_drm()
+            .with_renditions(vec![
+                Rendition::video_hd(),
+                Rendition::video_4k(),
+                Rendition::audio(),
+            ]);
+        assert_eq!(
+            custom_cfg.drm_systems,
+            vec![
+                DrmSystem::Widevine,
+                DrmSystem::FairPlay,
+                DrmSystem::PlayReady
+            ]
+        );
+        assert_eq!(custom_cfg.renditions.len(), 3);
+        assert_eq!(custom_cfg.renditions[0].effective_container_track_id(0), 1);
+        assert_eq!(custom_cfg.renditions[1].effective_container_track_id(1), 2);
+        assert_eq!(custom_cfg.renditions[2].effective_container_track_id(2), 3);
+    }
+
+    #[tokio::test]
+    async fn test_ramdisk_lifecycle_close_preserves_and_drop_deletes() {
+        let config = PackagingSessionConfig::cenc("lifecycle_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_gpac_bin("gpac");
+
+        let out_dir;
+        {
+            let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+                .await
+                .unwrap();
+            out_dir = session.output_dir().to_path_buf();
+            assert!(out_dir.exists(), "Auto-allocated output dir must exist");
+
+            // close() flushes/finalizes GPAC but MUST NOT delete output dir
+            let _ = session.close().await;
+            assert!(
+                out_dir.exists(),
+                "Output dir must be preserved after close()"
+            );
+        }
+        // PackagingSession dropped here without preserve_output()
+        assert!(
+            !out_dir.exists(),
+            "Auto-allocated output dir must be deleted on Drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ramdisk_lifecycle_preserve_output() {
+        let config = PackagingSessionConfig::cenc("preserve_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .preserve_output()
+            .with_gpac_bin("gpac");
+
+        let out_dir;
+        {
+            let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+                .await
+                .unwrap();
+            out_dir = session.output_dir().to_path_buf();
+            assert!(out_dir.exists());
+            let _ = session.close().await;
+        }
+        // Output directory must still exist because preserve_output was configured
+        assert!(out_dir.exists(), "Preserved output dir must survive Drop");
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_ramdisk_lifecycle_custom_output_dir_never_dropped() {
+        let custom_dir = std::env::temp_dir().join(format!("drmpack_custom_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::cenc("custom_dir_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_output_dir(&custom_dir)
+            .with_gpac_bin("gpac");
+
+        {
+            let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+                .await
+                .unwrap();
+            assert!(custom_dir.exists());
+            let _ = session.close().await;
+        }
+        // Custom caller path must not be deleted on Drop
+        assert!(
+            custom_dir.exists(),
+            "Custom output dir must NOT be deleted by Drop"
+        );
+        let _ = tokio::fs::remove_dir_all(&custom_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_push_accepts_into_bytes() {
+        let custom_dir = std::env::temp_dir().join(format!("drmpack_push_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::cenc("push_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_output_dir(&custom_dir)
+            .with_gpac_bin("gpac");
+
+        let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+            .await
+            .unwrap();
+
+        // Push slice
+        session.push(&b"init header"[..]).await.unwrap();
+        // Push Vec<u8>
+        session.push(vec![0u8; 16]).await.unwrap();
+        // Push Bytes with fake moof
+        let moof_chunk = vec![0x00, 0x00, 0x00, 0x08, b'm', b'o', b'o', b'f'];
+        session.push(Bytes::from(moof_chunk)).await.unwrap();
+
+        assert!(session.has_pushed_media.load(Ordering::Acquire));
+
+        let _ = session.close().await;
+        let _ = session.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_ingest_stream_and_run_to_completion() {
+        let custom_dir = std::env::temp_dir().join(format!("drmpack_stream_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::cenc("stream_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_output_dir(&custom_dir)
+            .with_gpac_bin("gpac");
+
+        let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+            .await
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        tokio::spawn(async move {
+            tx.send(Bytes::from_static(b"chunk1")).await.unwrap();
+            tx.send(Bytes::from_static(b"chunk2")).await.unwrap();
+        });
+
+        let count = session.ingest_stream(rx).await.unwrap();
+        assert_eq!(count, 2);
+
+        let _ = session.close().await;
+        let _ = session.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_to_completion() {
+        let custom_dir = std::env::temp_dir().join(format!("drmpack_r2c_{}", Uuid::new_v4()));
+        let config = PackagingSessionConfig::cenc("r2c_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_output_dir(&custom_dir)
+            .with_gpac_bin("gpac");
+
+        let session = PackagingSession::create(config, &RawKeyProvider::new())
+            .await
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        tokio::spawn(async move {
+            tx.send(Bytes::from_static(b"segment1")).await.unwrap();
+            tx.send(Bytes::from_static(b"segment2")).await.unwrap();
+        });
+
+        let result = session.run_to_completion(rx).await.unwrap();
+        assert_eq!(result.segments_ingested, 2);
+        assert_eq!(result.output_dir, custom_dir);
+        assert!(result
+            .manifest_path(EncryptionScheme::Cenc, ManifestFormat::Hls)
+            .is_some());
+        assert!(result
+            .manifest_path(EncryptionScheme::Cenc, ManifestFormat::Dash)
+            .is_some());
+
+        result.cleanup().await.unwrap();
+        assert!(!custom_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_multi_rendition_same_tier_packaging_session() {
+        let r1 = Rendition::video(QualityTier::hd());
+        let r2 = Rendition::video(QualityTier::hd());
+        let r_audio = Rendition::audio();
+
+        let key_source = crate::key::StaticKeySource::shared_key([0x55; 16]);
+        let config = PackagingSessionConfig::cenc("same_tier_stream")
+            .with_renditions(vec![r1, r2, r_audio])
+            .with_gpac_bin("gpac");
+
+        let session = PackagingSession::create(config, &key_source).await;
+        assert!(
+            session.is_ok(),
+            "PackagingSession with duplicate quality tiers must not fail with ID collisions"
+        );
+
+        let mut session = session.unwrap();
+        let _ = session.close().await;
     }
 }
