@@ -100,9 +100,9 @@ impl GpacProcessConfig {
         // 0. Disable ANSI color codes for clean machine-readable log parsing
         args.push("-logs=ncl".into());
 
-        // 1. Input filter: read continuous fMP4 from stdin pipe without memory buffering delay
+        // 1. Input filter: read continuous fMP4 from stdin pipe
         args.push("-i".into());
-        args.push("stdin:ext=mp4:alltk:mstore_samples=0:mstore_purge=0".into());
+        args.push("stdin:ext=mp4:alltk".into());
 
         // 2. Encryption filter: cecrypt with generated DRM XML
         args.push(format!("cecrypt:cfile={}", self.drm_xml_path.display()));
@@ -425,10 +425,7 @@ mod tests {
 
         assert_eq!(args[0], "-logs=ncl");
         assert_eq!(args[1], "-i");
-        assert_eq!(
-            args[2],
-            "stdin:ext=mp4:alltk:mstore_samples=0:mstore_purge=0"
-        );
+        assert_eq!(args[2], "stdin:ext=mp4:alltk");
         assert_eq!(args[3], "cecrypt:cfile=/tmp/drm.xml");
         assert_eq!(args[4], "-o");
         assert!(args[5].contains("/dev/shm/test_stream/live.mpd:dual"));

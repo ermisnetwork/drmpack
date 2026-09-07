@@ -417,7 +417,8 @@ fn render_player_html(
         return;
       }}
       const video = document.getElementById('video');
-      const player = new shaka.Player(video);
+      const player = new shaka.Player();
+      await player.attach(video);
 
       player.addEventListener('error', (event) => {{
         const s = document.getElementById('status');
@@ -435,11 +436,10 @@ fn render_player_html(
             }}
           }},
           manifest: {{
-            dash: {{
-              defaultPresentationDelay: 4
-            }}
+            defaultPresentationDelay: 4
           }},
           streaming: {{
+            lowLatencyMode: true,
             rebufferingGoal: 2,
             bufferingGoal: 4
           }}
@@ -457,11 +457,10 @@ fn render_player_html(
             }}
           }},
           manifest: {{
-            dash: {{
-              defaultPresentationDelay: 4
-            }}
+            defaultPresentationDelay: 4
           }},
           streaming: {{
+            lowLatencyMode: true,
             rebufferingGoal: 2,
             bufferingGoal: 4
           }}
