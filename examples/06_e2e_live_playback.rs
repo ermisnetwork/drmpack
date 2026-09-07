@@ -4,7 +4,7 @@ use drmpack::axinom::{AxinomConfig, AxinomProvider};
 use drmpack::key::StaticKeySource;
 use drmpack::license::DEFAULT_AXINOM_WIDEVINE_LICENSE_URL;
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
-use drmpack::types::Rendition;
+use drmpack::types::{LatencyMode, Rendition};
 use std::env;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_rendition(Rendition::audio())
         .with_output_dir(&output_dir)
         .with_segment_duration(2.0)
-        .with_chunk_duration(0.2)
+        .with_latency_mode(LatencyMode::Standard)
         .preserve_output();
 
     let (mut session, is_axinom, active_kids, jwt_token, clear_kid_hex, clear_key_hex, license_url) =
@@ -445,13 +445,12 @@ fn render_player_html(
             defaultPresentationDelay: 4
           }},
           streaming: {{
-            lowLatencyMode: true,
             rebufferingGoal: 2,
             bufferingGoal: 4,
             retryParameters: {{
-              maxAttempts: 5,
+              maxAttempts: 10,
               baseDelay: 500,
-              backoffFactor: 1.5
+              backoffFactor: 1.2
             }}
           }}
         }});
@@ -471,13 +470,12 @@ fn render_player_html(
             defaultPresentationDelay: 4
           }},
           streaming: {{
-            lowLatencyMode: true,
             rebufferingGoal: 2,
             bufferingGoal: 4,
             retryParameters: {{
-              maxAttempts: 5,
+              maxAttempts: 10,
               baseDelay: 500,
-              backoffFactor: 1.5
+              backoffFactor: 1.2
             }}
           }}
         }});
@@ -736,7 +734,7 @@ Connection: close\r\n\r\n";
     if data_opt.is_none()
         && (rel_path.ends_with(".m4s") || rel_path.ends_with(".mpd") || rel_path.ends_with(".m3u8"))
     {
-        for _ in 0..60 {
+        for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             if let Ok(data) = tokio::fs::read(&file_path).await {
                 if !data.is_empty() {
