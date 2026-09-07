@@ -448,7 +448,6 @@ fn render_player_html(
             lowLatencyMode: true,
             rebufferingGoal: 2,
             bufferingGoal: 4,
-            jumpLargeGaps: true,
             retryParameters: {{
               maxAttempts: 5,
               baseDelay: 500,
@@ -475,7 +474,6 @@ fn render_player_html(
             lowLatencyMode: true,
             rebufferingGoal: 2,
             bufferingGoal: 4,
-            jumpLargeGaps: true,
             retryParameters: {{
               maxAttempts: 5,
               baseDelay: 500,
