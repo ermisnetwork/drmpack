@@ -433,6 +433,12 @@ fn render_player_html(
           drm: {{
             servers: {{
               'com.widevine.alpha': licenseUrl
+            }},
+            advanced: {{
+              'com.widevine.alpha': {{
+                videoRobustness: 'SW_SECURE_CRYPTO',
+                audioRobustness: 'SW_SECURE_CRYPTO'
+              }}
             }}
           }},
           manifest: {{
@@ -441,7 +447,13 @@ fn render_player_html(
           streaming: {{
             lowLatencyMode: true,
             rebufferingGoal: 2,
-            bufferingGoal: 4
+            bufferingGoal: 4,
+            jumpLargeGaps: true,
+            retryParameters: {{
+              maxAttempts: 5,
+              baseDelay: 500,
+              backoffFactor: 1.5
+            }}
           }}
         }});
         player.getNetworkingEngine().registerRequestFilter((type, request) => {{
@@ -462,7 +474,13 @@ fn render_player_html(
           streaming: {{
             lowLatencyMode: true,
             rebufferingGoal: 2,
-            bufferingGoal: 4
+            bufferingGoal: 4,
+            jumpLargeGaps: true,
+            retryParameters: {{
+              maxAttempts: 5,
+              baseDelay: 500,
+              backoffFactor: 1.5
+            }}
           }}
         }});
       }}
@@ -720,7 +738,7 @@ Connection: close\r\n\r\n";
     if data_opt.is_none()
         && (rel_path.ends_with(".m4s") || rel_path.ends_with(".mpd") || rel_path.ends_with(".m3u8"))
     {
-        for _ in 0..40 {
+        for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             if let Ok(data) = tokio::fs::read(&file_path).await {
                 if !data.is_empty() {

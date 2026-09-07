@@ -110,7 +110,7 @@ impl GpacProcessConfig {
         // 3. Dasher output filter: generate both DASH and HLS manifests in output_dir
         let manifest_path = self.output_dir.join("live.mpd");
         let mut dasher_opt = format!(
-            "{}:dual:profile=live:dmode=dynauto:segdur={}:pssh=mv",
+            "{}:dual:profile=live:dmode=dynauto:segdur={}:tsb=1800:keep_segs=true:utcs=inband:pssh=mv",
             manifest_path.display(),
             self.segment_duration
         );
@@ -429,7 +429,9 @@ mod tests {
         assert_eq!(args[3], "cecrypt:cfile=/tmp/drm.xml");
         assert_eq!(args[4], "-o");
         assert!(args[5].contains("/dev/shm/test_stream/live.mpd:dual"));
-        assert!(args[5].contains("profile=live:dmode=dynauto:segdur=2:pssh=mv"));
+        assert!(args[5].contains(
+            "profile=live:dmode=dynauto:segdur=2:tsb=1800:keep_segs=true:utcs=inband:pssh=mv"
+        ));
         assert!(args[5].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
     }
 
@@ -443,7 +445,7 @@ mod tests {
 
         assert_eq!(args[0], "-logs=ncl");
         assert_eq!(args[4], "-o");
-        assert!(args[5].contains("segdur=6:pssh=mv"));
+        assert!(args[5].contains("segdur=6:tsb=1800:keep_segs=true:utcs=inband:pssh=mv"));
         assert!(!args[5].contains(":cdur="));
         assert!(!args[5].contains(":llhls="));
     }
