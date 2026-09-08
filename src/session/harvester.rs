@@ -12,20 +12,28 @@ const MAX_EMITTED_HISTORY: usize = 5000;
 
 #[derive(Default)]
 struct HarvesterState {
-    emitted_segments: HashSet<(EncryptionScheme, String)>,
+    emitted_segments: HashMap<EncryptionScheme, HashSet<String>>,
     emitted_order: std::collections::VecDeque<(EncryptionScheme, String)>,
     manifest_cache: HashMap<(EncryptionScheme, String), Bytes>,
     max_segments: HashMap<EncryptionScheme, u64>,
 }
 
 impl HarvesterState {
+    fn is_emitted(&self, scheme: EncryptionScheme, file_name: &str) -> bool {
+        self.emitted_segments
+            .get(&scheme)
+            .is_some_and(|set| set.contains(file_name))
+    }
+
     fn record_emitted(&mut self, scheme: EncryptionScheme, file_name: String) {
-        let key = (scheme, file_name.clone());
-        if self.emitted_segments.insert(key.clone()) {
-            self.emitted_order.push_back(key);
+        let set = self.emitted_segments.entry(scheme).or_default();
+        if set.insert(file_name.clone()) {
+            self.emitted_order.push_back((scheme, file_name.clone()));
             if self.emitted_order.len() > MAX_EMITTED_HISTORY {
-                if let Some(oldest) = self.emitted_order.pop_front() {
-                    self.emitted_segments.remove(&oldest);
+                if let Some((old_scheme, old_name)) = self.emitted_order.pop_front() {
+                    if let Some(old_set) = self.emitted_segments.get_mut(&old_scheme) {
+                        old_set.remove(&old_name);
+                    }
                 }
             }
         }
@@ -336,8 +344,7 @@ async fn harvest_target(
 
     let mut ready_segments = Vec::new();
     for (path, file_name) in segments {
-        let key = (scheme, file_name.clone());
-        if state.emitted_segments.contains(&key) {
+        if state.is_emitted(scheme, &file_name) {
             continue;
         }
 
@@ -831,8 +838,9 @@ mod tests {
             state.record_emitted(EncryptionScheme::Cenc, format!("seg_{i}.m4s"));
         }
 
+        let total_emitted: usize = state.emitted_segments.values().map(|s| s.len()).sum();
         assert_eq!(
-            state.emitted_segments.len(),
+            total_emitted,
             MAX_EMITTED_HISTORY,
             "emitted_segments must be bounded to MAX_EMITTED_HISTORY"
         );
@@ -843,20 +851,12 @@ mod tests {
         );
 
         // Oldest segments (0..1000) must have been evicted
-        assert!(!state
-            .emitted_segments
-            .contains(&(EncryptionScheme::Cenc, "seg_0.m4s".to_string())));
-        assert!(!state
-            .emitted_segments
-            .contains(&(EncryptionScheme::Cenc, "seg_999.m4s".to_string())));
+        assert!(!state.is_emitted(EncryptionScheme::Cenc, "seg_0.m4s"));
+        assert!(!state.is_emitted(EncryptionScheme::Cenc, "seg_999.m4s"));
 
         // Recent segments (5000..6000) must still be retained
-        assert!(state
-            .emitted_segments
-            .contains(&(EncryptionScheme::Cenc, "seg_5500.m4s".to_string())));
-        assert!(state
-            .emitted_segments
-            .contains(&(EncryptionScheme::Cenc, "seg_5999.m4s".to_string())));
+        assert!(state.is_emitted(EncryptionScheme::Cenc, "seg_5500.m4s"));
+        assert!(state.is_emitted(EncryptionScheme::Cenc, "seg_5999.m4s"));
     }
 
     #[tokio::test]

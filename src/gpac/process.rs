@@ -6,7 +6,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -160,7 +160,7 @@ impl GpacProcessConfig {
 /// Managed GPAC child process instance monitored by a ProcessSupervisor task.
 pub struct GpacProcess {
     config: GpacProcessConfig,
-    stdin: Option<ChildStdin>,
+    stdin: Option<BufWriter<ChildStdin>>,
     stderr_buffer: Arc<Mutex<VecDeque<String>>>,
     pub(crate) is_running: Arc<AtomicBool>,
     status_rx: watch::Receiver<Option<ProcessExitStatus>>,
@@ -222,6 +222,8 @@ impl GpacProcess {
                                 LogSeverity::Info => info!(target: "gpac", "{}", trimmed),
                                 LogSeverity::Debug => debug!(target: "gpac", "{}", trimmed),
                             }
+                            // std::sync::Mutex is correct here (not tokio::sync::Mutex):
+                            // lock held synchronously for one push_back, no await points inside.
                             let mut buf = buffer_clone.lock().unwrap();
                             if buf.len() >= DEFAULT_STDERR_RING_BUFFER_CAPACITY {
                                 buf.pop_front();
@@ -286,7 +288,7 @@ impl GpacProcess {
 
         Ok(Self {
             config,
-            stdin: Some(stdin),
+            stdin: Some(BufWriter::new(stdin)),
             stderr_buffer,
             is_running,
             status_rx,
@@ -297,7 +299,6 @@ impl GpacProcess {
     }
 
     /// Write media segment bytes directly into GPAC's stdin pipe.
-    // ponytail: unbuffered ChildStdin — wrap in BufWriter if small-chunk writes become a bottleneck
     pub async fn write_data(&mut self, data: &[u8]) -> Result<()> {
         self.check_status()?;
 
