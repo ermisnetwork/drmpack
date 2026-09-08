@@ -15,6 +15,13 @@ use tracing::{debug, error, info, instrument, warn};
 
 pub const DEFAULT_STDERR_RING_BUFFER_CAPACITY: usize = 64;
 
+/// Default suggested presentation delay factor (multiplier of segment duration).
+///
+/// Based on DASH-IF IOP guidelines (Part 3 Live Services, section 4.3.3.4), setting
+/// `suggestedPresentationDelay` to at least 2.0x segment duration provides sufficient
+/// player buffer margin against network jitter and prevents segment rollover stalls (HTTP 404).
+pub const DEFAULT_SPD_SEGMENT_FACTOR: f64 = 2.0;
+
 /// Log severity classification for GPAC stderr output lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogSeverity {
@@ -50,6 +57,8 @@ pub struct ProcessExitStatus {
     pub success: bool,
 }
 
+pub const DEFAULT_TIME_SHIFT_BUFFER: Duration = Duration::from_secs(60);
+
 /// Configuration for launching a GPAC packaging process.
 #[derive(Debug, Clone)]
 pub struct GpacProcessConfig {
@@ -58,6 +67,8 @@ pub struct GpacProcessConfig {
     pub latency_mode: LatencyMode,
     pub segment_duration: f64,
     pub chunk_duration: f64,
+    pub availability_time_offset: Option<f64>,
+    pub time_shift_buffer: Duration,
     pub gpac_bin: String,
 }
 
@@ -69,6 +80,8 @@ impl GpacProcessConfig {
             latency_mode: LatencyMode::LowLatency,
             segment_duration: 2.0,
             chunk_duration: 0.2,
+            availability_time_offset: None,
+            time_shift_buffer: DEFAULT_TIME_SHIFT_BUFFER,
             gpac_bin: "gpac".into(),
         }
     }
@@ -88,6 +101,16 @@ impl GpacProcessConfig {
         self
     }
 
+    pub fn with_availability_time_offset(mut self, asto: impl Into<Option<f64>>) -> Self {
+        self.availability_time_offset = asto.into();
+        self
+    }
+
+    pub fn with_time_shift_buffer(mut self, buffer: Duration) -> Self {
+        self.time_shift_buffer = buffer;
+        self
+    }
+
     pub fn with_gpac_bin(mut self, bin: impl Into<String>) -> Self {
         self.gpac_bin = bin.into();
         self
@@ -100,23 +123,27 @@ impl GpacProcessConfig {
         // 0. Disable ANSI color codes for clean machine-readable log parsing
         args.push("-logs=ncl".into());
 
-        // 1. Input filter: read continuous fMP4 from stdin pipe
+        // 1. Input filter: read continuous fMP4 from stdin pipe with semantic representation & playlist mapping
         args.push("-i".into());
-        args.push("stdin:ext=mp4:alltk".into());
+        args.push("stdin:ext=mp4:alltk:#Representation=(video)video_$Height$p,(video)video,(audio)(Language=!und)audio_$Language$,(audio)audio,(text)(Language=!und)sub_$Language$,(text)sub:#HLSPL=(video)video_$Height$p.m3u8,(video)video.m3u8,(audio)(Language=!und)audio_$Language$.m3u8,(audio)audio.m3u8,(text)(Language=!und)sub_$Language$.m3u8,(text)sub.m3u8".into());
 
         // 2. Encryption filter: cecrypt with generated DRM XML
         args.push(format!("cecrypt:cfile={}", self.drm_xml_path.display()));
 
         // 3. Dasher output filter: generate both DASH and HLS manifests in output_dir
         let manifest_path = self.output_dir.join("live.mpd");
+        let spd_ms = (self.segment_duration * DEFAULT_SPD_SEGMENT_FACTOR * 1000.0).round() as u64;
+        let tsb_secs = self.time_shift_buffer.as_secs().max(1);
         let mut dasher_opt = format!(
-            "{}:dual:profile=live:dmode=dynauto:segdur={}:tsb=1800:keep_segs=true:utcs=inband:pssh=mv",
+            "{}:dual:profile=live:dmode=dynauto:segdur={}:spd={}:tsb={}:utcs=inband:pssh=mv:template=$RepresentationID$_$Init=init$$Number$",
             manifest_path.display(),
-            self.segment_duration
+            self.segment_duration,
+            spd_ms,
+            tsb_secs,
         );
 
         if self.latency_mode == LatencyMode::LowLatency {
-            let asto = (self.segment_duration - self.chunk_duration).max(0.1);
+            let asto = self.availability_time_offset.unwrap_or(0.0);
             dasher_opt.push_str(&format!(
                 ":cdur={}:asto={:.1}:llhls=br:cmaf=cmfc",
                 self.chunk_duration, asto
@@ -270,6 +297,7 @@ impl GpacProcess {
     }
 
     /// Write media segment bytes directly into GPAC's stdin pipe.
+    // ponytail: unbuffered ChildStdin — wrap in BufWriter if small-chunk writes become a bottleneck
     pub async fn write_data(&mut self, data: &[u8]) -> Result<()> {
         self.check_status()?;
 
@@ -425,14 +453,41 @@ mod tests {
 
         assert_eq!(args[0], "-logs=ncl");
         assert_eq!(args[1], "-i");
-        assert_eq!(args[2], "stdin:ext=mp4:alltk");
+        assert!(args[2].starts_with("stdin:ext=mp4:alltk:#Representation="));
+        assert!(args[2].contains("(video)video_$Height$p"));
+        assert!(args[2].contains("(audio)(Language=!und)audio_$Language$"));
+        assert!(args[2].contains("(text)(Language=!und)sub_$Language$"));
+        assert!(args[2].contains("(audio)(Language=!und)audio_$Language$.m3u8"));
+        assert!(args[2].contains("(text)(Language=!und)sub_$Language$.m3u8"));
         assert_eq!(args[3], "cecrypt:cfile=/tmp/drm.xml");
         assert_eq!(args[4], "-o");
         assert!(args[5].contains("/dev/shm/test_stream/live.mpd:dual"));
         assert!(args[5].contains(
-            "profile=live:dmode=dynauto:segdur=2:tsb=1800:keep_segs=true:utcs=inband:pssh=mv"
+            "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:template=$RepresentationID$_$Init=init$$Number$"
         ));
+        assert!(!args[5].contains("keep_segs"));
+        assert!(args[5].contains(":cdur=0.2:asto=0.0:llhls=br:cmaf=cmfc"));
+    }
+
+    #[test]
+    fn test_gpac_process_config_args_low_latency_custom_asto() {
+        let config = GpacProcessConfig::new("/tmp/drm.xml", "/dev/shm/test_stream")
+            .with_latency_mode(LatencyMode::LowLatency)
+            .with_segment_duration(2.0)
+            .with_chunk_duration(0.2)
+            .with_availability_time_offset(Some(1.8));
+
+        let args = config.build_args();
         assert!(args[5].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
+    }
+
+    #[test]
+    fn test_gpac_process_config_args_custom_time_shift_buffer() {
+        let config = GpacProcessConfig::new("/tmp/drm.xml", "/dev/shm/test_stream")
+            .with_time_shift_buffer(Duration::from_secs(120));
+
+        let args = config.build_args();
+        assert!(args[5].contains(":tsb=120:"));
     }
 
     #[test]
@@ -445,7 +500,8 @@ mod tests {
 
         assert_eq!(args[0], "-logs=ncl");
         assert_eq!(args[4], "-o");
-        assert!(args[5].contains("segdur=6:tsb=1800:keep_segs=true:utcs=inband:pssh=mv"));
+        assert!(args[5].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:template=$RepresentationID$_$Init=init$$Number$"));
+        assert!(!args[5].contains("keep_segs"));
         assert!(!args[5].contains(":cdur="));
         assert!(!args[5].contains(":llhls="));
     }

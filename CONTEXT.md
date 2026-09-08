@@ -15,7 +15,7 @@ The asynchronous supervisor task monitoring a GPAC subprocess exit lifecycle and
 _Avoid_: Process monitor, child watcher, process tracker
 
 **LatencyMode**:
-The streaming delivery latency profile — `LowLatency` (CMAF chunking, LL-HLS, LL-DASH) or `Standard` (traditional 2-6s segments).
+The streaming delivery latency profile — `LowLatency` (CMAF chunking, LL-HLS, LL-DASH) or `Standard` (traditional 2-6s segments). `Standard` latency is the canonical production default for robust player buffer margins and segment rollover stability (ADR-0014).
 _Avoid_: Stream speed, delay profile
 
 **Segment**:
@@ -43,7 +43,7 @@ A named group of Renditions that share a single ContentKey (e.g. SD, HD, 4K). En
 _Avoid_: Key group, tier, quality level
 
 **EncryptionScheme**:
-The concrete cipher mode applied to one media representation — CENC (AES-CTR) or CBCS (AES-CBC 1:9 pattern). `Dual` is an orchestration mode that produces one independent representation of each concrete scheme from the same input.
+The concrete cipher mode applied to one media representation — CBCS (AES-CBC 1:9 pattern for video, 0:0 for audio) or CENC (AES-CTR). `CBCS` is the canonical production default for universal CMAF Multi-DRM convergence across Apple FairPlay, Google Widevine, and Microsoft PlayReady (ADR-0014). `Dual` is an orchestration mode that produces one independent representation of each concrete scheme from the same input for legacy compatibility.
 _Avoid_: Protection scheme, cipher mode
 
 ### Keys & Licensing
@@ -130,12 +130,16 @@ _Avoid_: Pipeline, worker pool, process group, job
 Private session-scoped storage for packaging control-plane material, kept separate from the Ramdisk delivery output.
 _Avoid_: Output directory, served directory
 
+**Storage Staging Directory**:
+The temporary filesystem location (`/tmp` or OS tempdir by default) used as an intermediate workspace by GPAC dasher. Segments and manifests are read from staging into PackagedArtifact buffers and can be immediately pruned.
+_Avoid_: Output folder, cache dir
+
 **Ramdisk**:
-A memory-backed filesystem directory (`/dev/shm` or `tmpfs`) where manifests and CMAF chunks are written and served with zero disk I/O.
+An optional memory-backed filesystem directory (`/dev/shm` or `tmpfs`) for high-throughput zero-disk I/O deployments with explicitly provisioned memory headroom (opt-in per ADR-0015).
 _Avoid_: Cache, tempdir, disk buffer
 
 **Manifest**:
-The playlist or description file served to players — HLS (`.m3u8`) or DASH (`.mpd`). Managed in Ramdisk with correct DRM signaling (PSSH, EXT-X-KEY).
+The playlist or description file served to players — HLS (`.m3u8`) or DASH (`.mpd`). Managed in staging with correct DRM signaling (PSSH, EXT-X-KEY).
 _Avoid_: Playlist (ambiguous with HLS-specific usage)
 
 **Manifest format**:
@@ -145,3 +149,28 @@ _Avoid_: Output type, playlist type
 **VOD Packaging**:
 File-to-file static packaging for on-demand media assets, reading complete source containers from disk and generating static manifests with fixed durations and `#EXT-X-ENDLIST`, decoupled from the live streaming pipe orchestrator.
 _Avoid_: Offline job, batch transcode, file packager
+
+**PackagedArtifact**:
+The structured container carrying an encrypted media segment or updated manifest emitted directly to callers via an async output channel. Eliminates manual filesystem polling for consumers.
+_Avoid_: Output event, packaging message, segment packet
+
+**ArtifactKind**:
+The classification of an emitted PackagedArtifact — `InitSegment` (`init.mp4`), `MediaSegment` (`.m4s`), or `Manifest` (`.m3u8` / `.mpd`).
+_Avoid_: File type, asset type, item kind
+
+**Manifest-Driven Readiness**:
+The synchronization invariant guaranteeing that a media segment is only emitted to callers after GPAC has fully flushed the segment and referenced it in the manifest. The HLS manifest is the canonical readiness signal; DASH MPD uses `SegmentTemplate` patterns that are present from session start and cannot signal individual segment completion. Eliminates partial-file read races.
+_Avoid_: File polling, file stability check, timer delay
+
+**Ephemeral Staging**:
+The lifecycle model where intermediate packaging files in the Storage Staging Directory are unlinked immediately after ingestion into memory buffers, minimizing filesystem footprint and disk write amplification.
+_Avoid_: Scratch directory, temporary caching, permanent staging
+
+**Semantic Manifest & Segment Naming Standard**:
+The standardized, resolution-aware naming scheme adhering to Apple HLS Authoring Guidelines and DASH-IF guidelines:
+- **Master Manifests**: `live.m3u8` (HLS master) and `live.mpd` (DASH description).
+- **Video Tracks**: Dynamically bound to track height as `video_{Height}p.m3u8` (e.g. `video_1080p.m3u8`, `video_720p.m3u8`, `video_360p.m3u8`), initialization segments `video_{Height}p_init.mp4`, and media segments `video_{Height}p_{Number}.m4s`.
+- **Audio Tracks**: Canonical `audio.m3u8` (or `audio_{lang}.m3u8` for multi-language tracks), initialization segments `audio_init.mp4`, and media segments `audio_{Number}.m4s`.
+- **Subtitle Tracks**: `sub.m3u8`, initialization segment `sub_init.mp4`, and media segments `sub_{Number}.m4s`.
+- Eliminates raw numeric stream radicals (`live_1.m3u8`, `live_2.m3u8`) and pipe artifacts (`stdin_dash`).
+_Avoid_: live_1.m3u8, numeric playlist names, stdin_dash
