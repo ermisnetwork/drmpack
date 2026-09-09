@@ -123,35 +123,101 @@ impl GpacProcessConfig {
         // 0. Disable ANSI color codes for clean machine-readable log parsing
         args.push("-logs=ncl".into());
 
-        // 1. Input filter: read continuous fMP4 from stdin pipe with semantic representation & playlist mapping
-        args.push("-i".into());
-        args.push("stdin:ext=mp4:alltk:#Representation=(video)video_$Height$p,(video)video,(audio)(Language=!und)audio_$Language$,(audio)audio,(text)(Language=!und)sub_$Language$,(text)sub:#HLSPL=(video)video_$Height$p.m3u8,(video)video.m3u8,(audio)(Language=!und)audio_$Language$.m3u8,(audio)audio.m3u8,(text)(Language=!und)sub_$Language$.m3u8,(text)sub.m3u8".into());
+        // 1. Disable GPAC filter session blocking regulation for live stdin streaming.
+        // In live piped ingest, demuxed samples must flow freely without artificial PID buffer throttling,
+        // preventing sample accumulation in in-memory queues and eliminating packager latency drift.
+        args.push("-no-block=all".into());
 
-        // 2. Encryption filter: cecrypt with generated DRM XML
+        // 2. Enable multi-threaded filter execution to prevent pipeline starvation in encryption filters.
+        // In single-threaded mode, cecrypt is scheduled on secondary task lists and gets starved by
+        // blocking pipe reads on stdin, accumulating samples in internal queues (+2000ms/segment).
+        args.push("-threads=-1".into());
+
+        // 3. Input filter: read continuous fMP4 from stdin pipe with semantic representation & playlist mapping.
+        // Sets PID properties inherited by the downstream demuxer (mp4dmx):
+        // - ext=mp4: forces MP4 demuxer on anonymous stdin stream.
+        // - alltk: declares all tracks (including disabled ones).
+        // - #Representation: defines semantic DASH representation IDs:
+        //     - (video)video_$Height$p with fallback to video
+        //     - (audio)(Language=!und)audio_$Language$ with fallback to audio
+        //     - (text)(Language=!und)sub_$Language$ with fallback to sub
+        // - #HLSPL: defines corresponding HLS variant playlist filenames (.m3u8).
+        const STDIN_INPUT_FILTER: &str = concat!(
+            "stdin:ext=mp4:alltk",
+            // DASH representation IDs
+            ":#Representation=",
+            "(video)video_$Height$p,",
+            "(video)video,",
+            "(audio)(Language=!und)audio_$Language$,",
+            "(audio)audio,",
+            "(text)(Language=!und)sub_$Language$,",
+            "(text)sub",
+            // HLS playlist file mappings (.m3u8)
+            ":#HLSPL=",
+            "(video)video_$Height$p.m3u8,",
+            "(video)video.m3u8,",
+            "(audio)(Language=!und)audio_$Language$.m3u8,",
+            "(audio)audio.m3u8,",
+            "(text)(Language=!und)sub_$Language$.m3u8,",
+            "(text)sub.m3u8",
+        );
+        args.push("-i".into());
+        args.push(STDIN_INPUT_FILTER.into());
+
+        // 4. Encryption filter: cecrypt with generated DRM XML
         args.push(format!("cecrypt:cfile={}", self.drm_xml_path.display()));
 
-        // 3. Dasher output filter: generate both DASH and HLS manifests in output_dir
+        // 5. Dasher output filter: generate both DASH and HLS manifests in output_dir
         let manifest_path = self.output_dir.join("live.mpd");
         let spd_ms = (self.segment_duration * DEFAULT_SPD_SEGMENT_FACTOR * 1000.0).round() as u64;
         let tsb_secs = self.time_shift_buffer.as_secs().max(1);
-        let mut dasher_opt = format!(
-            "{}:dual:profile=live:dmode=dynauto:segdur={}:spd={}:tsb={}:utcs=inband:pssh=mv:keep_segs=true:template=$RepresentationID$_$Init=init$$Number$",
-            manifest_path.display(),
-            self.segment_duration,
-            spd_ms,
-            tsb_secs,
-        );
+
+        let mut dasher_opts = vec![
+            manifest_path.display().to_string(),
+            // dual: generate both DASH (.mpd) and HLS (.m3u8) manifests simultaneously
+            "dual".into(),
+            // profile=live: enforce MPEG-DASH Live profile using segment templates
+            "profile=live".into(),
+            // dmode=dynauto: dynamic live manifest during active ingest, auto-converts to static upon stdin EOF
+            "dmode=dynauto".into(),
+            // segdur: target media segment duration in seconds
+            format!("segdur={}", self.segment_duration),
+            // spd: suggested presentation delay in ms (signals safe client live-edge buffer margin)
+            format!("spd={spd_ms}"),
+            // tsb: time-shift buffer depth in seconds (sliding DVR playback window)
+            format!("tsb={tsb_secs}"),
+            // utcs=inband: signal inband UTC clock synchronization descriptor in MPD
+            "utcs=inband".into(),
+            // pssh=mv: place Common Encryption PSSH boxes in both manifest (m) and movie moov (v)
+            "pssh=mv".into(),
+            // keep_segs=true: preserve expired media segments on disk (harvested by Ramdisk / Harvester)
+            "keep_segs=true".into(),
+            // sbound=out: zero-latency segment boundary cut immediately when target duration is reached
+            "sbound=out".into(),
+            // check_dur=false: relax strict cross-track duration matching on continuous live streams
+            "check_dur=false".into(),
+            // seg_sync=no: announce segments immediately without waiting for final packet flush
+            "seg_sync=no".into(),
+            // template: segment filename pattern ($RepresentationID$_init.mp4 and $RepresentationID$_<Number>.m4s)
+            "template=$RepresentationID$_$Init=init$$Number$".into(),
+        ];
 
         if self.latency_mode == LatencyMode::LowLatency {
             let asto = self.availability_time_offset.unwrap_or(0.0);
-            dasher_opt.push_str(&format!(
-                ":cdur={}:asto={:.1}:llhls=br:cmaf=cmfc",
-                self.chunk_duration, asto
-            ));
+            dasher_opts.extend([
+                // cdur: CMAF chunk / fragment duration in seconds
+                format!("cdur={}", self.chunk_duration),
+                // asto: DASH availabilityTimeOffset in seconds (early segment dispatch)
+                format!("asto={asto:.1}"),
+                // llhls=br: Apple LL-HLS byte-range parts (EXT-X-PART) pointing to full segments
+                "llhls=br".into(),
+                // cmaf=cmfc: enforce CMAF constrained fragment brand compatibility
+                "cmaf=cmfc".into(),
+            ]);
         }
 
         args.push("-o".into());
-        args.push(dasher_opt);
+        args.push(dasher_opts.join(":"));
 
         args
     }
@@ -453,21 +519,23 @@ mod tests {
         let args = config.build_args();
 
         assert_eq!(args[0], "-logs=ncl");
-        assert_eq!(args[1], "-i");
-        assert!(args[2].starts_with("stdin:ext=mp4:alltk:#Representation="));
-        assert!(args[2].contains("(video)video_$Height$p"));
-        assert!(args[2].contains("(audio)(Language=!und)audio_$Language$"));
-        assert!(args[2].contains("(text)(Language=!und)sub_$Language$"));
-        assert!(args[2].contains("(audio)(Language=!und)audio_$Language$.m3u8"));
-        assert!(args[2].contains("(text)(Language=!und)sub_$Language$.m3u8"));
-        assert_eq!(args[3], "cecrypt:cfile=/tmp/drm.xml");
-        assert_eq!(args[4], "-o");
-        assert!(args[5].contains("/dev/shm/test_stream/live.mpd:dual"));
-        assert!(args[5].contains(
-            "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:template=$RepresentationID$_$Init=init$$Number$"
+        assert_eq!(args[1], "-no-block=all");
+        assert_eq!(args[2], "-threads=-1");
+        assert_eq!(args[3], "-i");
+        assert!(args[4].starts_with("stdin:ext=mp4:alltk:#Representation="));
+        assert!(args[4].contains("(video)video_$Height$p"));
+        assert!(args[4].contains("(audio)(Language=!und)audio_$Language$"));
+        assert!(args[4].contains("(text)(Language=!und)sub_$Language$"));
+        assert!(args[4].contains("(audio)(Language=!und)audio_$Language$.m3u8"));
+        assert!(args[4].contains("(text)(Language=!und)sub_$Language$.m3u8"));
+        assert_eq!(args[5], "cecrypt:cfile=/tmp/drm.xml");
+        assert_eq!(args[6], "-o");
+        assert!(args[7].contains("/dev/shm/test_stream/live.mpd:dual"));
+        assert!(args[7].contains(
+            "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=no:template=$RepresentationID$_$Init=init$$Number$"
         ));
-        assert!(args[5].contains("keep_segs=true"));
-        assert!(args[5].contains(":cdur=0.2:asto=0.0:llhls=br:cmaf=cmfc"));
+        assert!(args[7].contains("keep_segs=true"));
+        assert!(args[7].contains(":cdur=0.2:asto=0.0:llhls=br:cmaf=cmfc"));
     }
 
     #[test]
@@ -479,7 +547,7 @@ mod tests {
             .with_availability_time_offset(Some(1.8));
 
         let args = config.build_args();
-        assert!(args[5].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
+        assert!(args[7].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
     }
 
     #[test]
@@ -488,7 +556,7 @@ mod tests {
             .with_time_shift_buffer(Duration::from_secs(120));
 
         let args = config.build_args();
-        assert!(args[5].contains(":tsb=120:"));
+        assert!(args[7].contains(":tsb=120:"));
     }
 
     #[test]
@@ -500,11 +568,13 @@ mod tests {
         let args = config.build_args();
 
         assert_eq!(args[0], "-logs=ncl");
-        assert_eq!(args[4], "-o");
-        assert!(args[5].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:template=$RepresentationID$_$Init=init$$Number$"));
-        assert!(args[5].contains("keep_segs=true"));
-        assert!(!args[5].contains(":cdur="));
-        assert!(!args[5].contains(":llhls="));
+        assert_eq!(args[1], "-no-block=all");
+        assert_eq!(args[2], "-threads=-1");
+        assert_eq!(args[6], "-o");
+        assert!(args[7].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=no:template=$RepresentationID$_$Init=init$$Number$"));
+        assert!(args[7].contains("keep_segs=true"));
+        assert!(!args[7].contains(":cdur="));
+        assert!(!args[7].contains(":llhls="));
     }
 
     #[test]

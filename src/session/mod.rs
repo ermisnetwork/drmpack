@@ -110,6 +110,18 @@ impl PackagingSessionConfig {
         s
     }
 
+    /// Preconfigured preset for standard live dual-scheme streaming (CENC + CBCS, Widevine + FairPlay + PlayReady, Standard latency).
+    pub fn dual(content_id: impl Into<String>) -> Self {
+        let mut s = Self::new(content_id);
+        s.encryption_scheme = EncryptionScheme::Dual;
+        s.drm_systems = vec![
+            DrmSystem::Widevine,
+            DrmSystem::FairPlay,
+            DrmSystem::PlayReady,
+        ];
+        s
+    }
+
     /// Preconfigured preset for dual-scheme low-latency streaming (CENC + CBCS, Widevine + FairPlay + PlayReady).
     pub fn low_latency_dual(content_id: impl Into<String>) -> Self {
         let mut s = Self::new(content_id);

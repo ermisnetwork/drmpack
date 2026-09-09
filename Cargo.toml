@@ -72,3 +72,7 @@ required-features = ["axinom", "license-proxy"]
 [[example]]
 name = "08_in_memory_live_stream"
 
+[[example]]
+name = "09_axum_playback_server"
+required-features = ["axinom", "license-proxy"]
+

@@ -148,7 +148,7 @@ The playlist or description file served to players — HLS (`.m3u8`) or DASH (`.
 _Avoid_: Playlist (ambiguous with HLS-specific usage)
 
 **Manifest format**:
-The delivery protocol of a Manifest: DASH or HLS. It is independent of the concrete EncryptionScheme of a Representation.
+The delivery protocol of a Manifest: DASH or HLS. It is independent of the concrete EncryptionScheme of a Representation. In GPAC dasher, `:dual` specifies generating dual manifest formats (both DASH `.mpd` and HLS `.m3u8` simultaneously), which is distinct from `EncryptionScheme::Dual` (which produces dual cipher representations: CENC and CBCS).
 _Avoid_: Output type, playlist type
 
 **VOD Packaging**:

@@ -10,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 const MAX_EMITTED_HISTORY: usize = 5000;
-const WATCHDOG_INTERVAL_MS: u64 = 1500;
+const WATCHDOG_INTERVAL_MS: u64 = 50;
+/// Minimum byte threshold for a candidate ISOBMFF segment (at least two 8-byte box headers).
+const MIN_SEGMENT_FILE_SIZE_BYTES: u64 = 16;
 
 struct ManifestMeta {
     mtime: Option<SystemTime>,
@@ -395,6 +397,14 @@ async fn harvest_target(
         let in_manifest = is_init || hls_segments.contains(&file_name) || is_final;
 
         let (is_ready, cached_data) = if in_manifest {
+            let meta = match tokio::fs::metadata(&path).await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.len() < MIN_SEGMENT_FILE_SIZE_BYTES {
+                continue;
+            }
+
             if let Ok(data) = tokio::fs::read(&path).await {
                 let complete = if is_init {
                     is_complete_isobmff_init_segment(&data)
