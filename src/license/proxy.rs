@@ -61,12 +61,6 @@ impl fmt::Debug for LicenseProxy {
     }
 }
 
-impl Default for LicenseProxy {
-    fn default() -> Self {
-        Self::new(AxinomLicenseConfig::default())
-    }
-}
-
 impl LicenseProxy {
     /// Create a new LicenseProxy with given AxinomLicenseConfig and default reqwest::Client.
     pub fn new(config: AxinomLicenseConfig) -> Self {
@@ -443,7 +437,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_license_proxy_manual_cert_caching() {
-        let proxy = LicenseProxy::default();
+        let config = AxinomLicenseConfig::new(
+            "https://example.com/wv",
+            "https://example.com/fp",
+            "https://example.com/pr",
+            "https://example.com/cert",
+        );
+        let proxy = LicenseProxy::new(config);
         assert_eq!(proxy.cached_fairplay_certificate().await, None);
 
         let cert_data = bytes::Bytes::from_static(b"fairplay-cert-sample");
@@ -456,18 +456,29 @@ mod tests {
 
     #[test]
     fn test_license_proxy_try_new() {
-        let valid = AxinomLicenseConfig::default();
-        let proxy = LicenseProxy::try_new(valid);
+        let valid = AxinomLicenseConfig::new(
+            "https://example.com/wv",
+            "https://example.com/fp",
+            "https://example.com/pr",
+            "https://example.com/cert",
+        );
+        let proxy = LicenseProxy::try_new(valid.clone());
         assert!(proxy.is_ok());
 
-        let invalid = AxinomLicenseConfig::default().with_widevine_license_url("invalid-url");
+        let invalid = valid.with_widevine_license_url("invalid-url");
         let err_proxy = LicenseProxy::try_new(invalid);
         assert!(err_proxy.is_err());
     }
 
     #[test]
     fn test_license_proxy_debug_format() {
-        let proxy = LicenseProxy::default();
+        let config = AxinomLicenseConfig::new(
+            "https://example.com/wv",
+            "https://example.com/fp",
+            "https://example.com/pr",
+            "https://example.com/cert",
+        );
+        let proxy = LicenseProxy::new(config);
         let debug_str = format!("{proxy:?}");
         assert!(debug_str.contains("LicenseProxy"));
         assert!(debug_str.contains("widevine_license_url"));

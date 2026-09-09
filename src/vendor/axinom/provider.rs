@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn test_axinom_provider_debug_redaction() {
         let secret = "top-secret-management-key-abcxyz";
-        let config = AxinomConfig::new("my-tenant-uuid", secret);
+        let config = AxinomConfig::new("my-tenant-uuid", secret, "https://mock.axprod.net/speke");
         let provider = AxinomProvider::new(config);
 
         let debug_str = format!("{:?}", provider);

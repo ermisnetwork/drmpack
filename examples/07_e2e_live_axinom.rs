@@ -135,7 +135,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .generate_axinom_jwt_with_config(&signing_config)?;
 
     // 3. Initialize LicenseProxy for server-side DRM license and certificate handling
-    let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();
+    let license_config = AxinomLicenseConfig::from_env().map_err(|e| {
+        eprintln!("FATAL: Axinom license configuration missing: {e}");
+        eprintln!("\nPlease ensure the following environment variables are set in your .env:");
+        eprintln!("  AXINOM_WIDEVINE_LICENSE_URL=https://<tenant-id>.drm-widevine-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_FAIRPLAY_LICENSE_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_PLAYREADY_LICENSE_URL=https://<tenant-id>.drm-playready-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_FAIRPLAY_CERT_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/v2/Certificate");
+        e
+    })?;
     let license_proxy = LicenseProxy::new(license_config);
 
     if fairplay_flag || dual_flag {

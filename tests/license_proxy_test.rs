@@ -6,16 +6,22 @@ use drmpack::license::{
     handle_fairplay_certificate, handle_fairplay_license, handle_playready_license,
     handle_widevine_license, LicenseProxy, LicenseResponse,
 };
-use drmpack::vendor::axinom::config::{
-    AxinomLicenseConfig, DEFAULT_AXINOM_FAIRPLAY_CERT_URL, DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL,
-    DEFAULT_AXINOM_PLAYREADY_LICENSE_URL, DEFAULT_AXINOM_WIDEVINE_LICENSE_URL,
-};
+use drmpack::vendor::axinom::config::AxinomLicenseConfig;
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
+
+fn mock_license_config(server_url: &str) -> AxinomLicenseConfig {
+    AxinomLicenseConfig::new(
+        format!("{server_url}/widevine"),
+        format!("{server_url}/fairplay"),
+        format!("{server_url}/playready"),
+        format!("{server_url}/fairplay.cer"),
+    )
+}
 
 #[derive(Debug, Clone)]
 struct RecordedRequest {
@@ -183,7 +189,7 @@ async fn test_license_proxy_widevine_success() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_widevine_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let challenge = b"\x08\x04\x12\x04wv-challenge";
@@ -205,7 +211,7 @@ async fn test_license_proxy_widevine_success() {
     assert_eq!(reqs.len(), 1);
     let req = &reqs[0];
     assert_eq!(req.method, "POST");
-    assert_eq!(req.path, "/");
+    assert_eq!(req.path, "/widevine");
     assert_eq!(req.body, challenge);
     assert_eq!(
         req.headers.get("x-axdrm-message").map(String::as_str),
@@ -237,7 +243,7 @@ async fn test_license_proxy_fairplay_success() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_fairplay_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let spc_bytes = b"fairplay-spc-client-context";
@@ -279,7 +285,7 @@ async fn test_license_proxy_playready_success() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_playready_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let challenge = b"playready-raw-challenge";
@@ -317,7 +323,7 @@ async fn test_license_proxy_403_forbidden_with_axdrm_errormessage() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_widevine_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let result = handle_widevine_license(&proxy, b"challenge", "expired-token").await;
@@ -350,7 +356,7 @@ async fn test_license_proxy_400_bad_request_with_axdrm_errormessage() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_fairplay_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let result = handle_fairplay_license(&proxy, b"bad-spc", "token").await;
@@ -382,7 +388,7 @@ async fn test_license_proxy_500_server_error_fallback() {
     let server =
         LicenseMockServer::start(500, b"Internal server error occurred".to_vec(), vec![]).await;
 
-    let config = AxinomLicenseConfig::new().with_playready_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let result = handle_playready_license(&proxy, b"challenge", "token").await;
@@ -416,7 +422,7 @@ async fn test_license_proxy_fairplay_cert_caching_single_request() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_fairplay_cert_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     // Call 5 times sequentially
@@ -462,7 +468,7 @@ async fn test_license_proxy_fairplay_cert_preloading() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_fairplay_cert_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     // Initially not cached
@@ -510,7 +516,7 @@ async fn test_license_proxy_fairplay_cert_error_not_cached() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_fairplay_cert_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let res = handle_fairplay_certificate(&proxy, &server.url).await;
@@ -539,12 +545,10 @@ async fn test_license_proxy_custom_headers_propagation() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new()
-        .with_widevine_license_url(&server.url)
-        .with_header(
-            reqwest::header::HeaderName::from_static("x-tenant-custom-trace"),
-            reqwest::header::HeaderValue::from_static("custom-trace-uuid-987"),
-        );
+    let config = mock_license_config(&server.url).with_header(
+        reqwest::header::HeaderName::from_static("x-tenant-custom-trace"),
+        reqwest::header::HeaderValue::from_static("custom-trace-uuid-987"),
+    );
     let proxy = LicenseProxy::new(config);
 
     handle_widevine_license(&proxy, b"challenge", "token")
@@ -571,7 +575,7 @@ async fn test_license_proxy_connection_reuse() {
     )
     .await;
 
-    let config = AxinomLicenseConfig::new().with_widevine_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     for i in 0..3 {
@@ -590,36 +594,33 @@ async fn test_license_proxy_connection_reuse() {
 }
 
 #[test]
-fn test_license_defaults_and_crate_exports() {
-    assert_eq!(
-        DEFAULT_AXINOM_WIDEVINE_LICENSE_URL,
-        "https://drm-widevine-licensing.axprod.net/AcquireLicense"
+fn test_license_config_mandatory_urls() {
+    let config = AxinomLicenseConfig::new(
+        "https://custom.widevine/acquire",
+        "https://custom.fairplay/acquire",
+        "https://custom.playready/acquire",
+        "https://custom.fairplay/cert.der",
     );
-    assert_eq!(
-        DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL,
-        "https://drm-fairplay-licensing.axprod.net/AcquireLicense"
-    );
-    assert_eq!(
-        DEFAULT_AXINOM_PLAYREADY_LICENSE_URL,
-        "https://drm-playready-licensing.axprod.net/AcquireLicense"
-    );
-    assert_eq!(
-        DEFAULT_AXINOM_FAIRPLAY_CERT_URL,
-        "https://tools.axinom.com/FPScert/fairplay.cer"
-    );
-
-    let config = AxinomLicenseConfig::default();
     assert_eq!(
         config.widevine_license_url,
-        DEFAULT_AXINOM_WIDEVINE_LICENSE_URL
+        "https://custom.widevine/acquire"
     );
+    assert_eq!(
+        config.fairplay_license_url,
+        "https://custom.fairplay/acquire"
+    );
+    assert_eq!(
+        config.playready_license_url,
+        "https://custom.playready/acquire"
+    );
+    assert_eq!(config.fairplay_cert_url, "https://custom.fairplay/cert.der");
 }
 
 #[tokio::test]
 async fn test_license_proxy_empty_fairplay_cert_rejected() {
     let server = LicenseMockServer::start(200, vec![], vec![]).await;
 
-    let config = AxinomLicenseConfig::new().with_fairplay_cert_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let res = handle_fairplay_certificate(&proxy, &server.url).await;
@@ -642,7 +643,7 @@ async fn test_license_proxy_empty_fairplay_cert_rejected() {
 async fn test_license_proxy_empty_license_payload_rejected() {
     let server = LicenseMockServer::start(200, vec![], vec![]).await;
 
-    let config = AxinomLicenseConfig::new().with_widevine_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let res = handle_widevine_license(&proxy, b"challenge", "token").await;
@@ -661,7 +662,7 @@ async fn test_license_proxy_empty_license_payload_rejected() {
 
 #[tokio::test]
 async fn test_license_proxy_empty_challenge_rejected() {
-    let config = AxinomLicenseConfig::default();
+    let config = mock_license_config("https://mock.axprod.net");
     let proxy = LicenseProxy::new(config);
 
     let res = handle_widevine_license(&proxy, b"", "token").await;
@@ -676,7 +677,7 @@ async fn test_license_proxy_empty_challenge_rejected() {
 
 #[tokio::test]
 async fn test_license_proxy_empty_token_rejected() {
-    let config = AxinomLicenseConfig::default();
+    let config = mock_license_config("https://mock.axprod.net");
     let proxy = LicenseProxy::new(config);
 
     let res = handle_widevine_license(&proxy, b"challenge", "   ").await;
@@ -697,7 +698,7 @@ async fn test_license_proxy_different_cert_urls_cached_separately() {
     let cert2 = b"CertFromOrigin2";
     let server2 = LicenseMockServer::start(200, cert2.to_vec(), vec![]).await;
 
-    let config = AxinomLicenseConfig::new().with_fairplay_cert_url(&server1.url);
+    let config = mock_license_config(&server1.url);
     let proxy = LicenseProxy::new(config);
 
     let res1 = handle_fairplay_certificate(&proxy, &server1.url)
@@ -719,7 +720,7 @@ async fn test_license_proxy_large_error_body_truncated() {
     let large_body = "x".repeat(5000);
     let server = LicenseMockServer::start(500, large_body.into_bytes(), vec![]).await;
 
-    let config = AxinomLicenseConfig::new().with_widevine_license_url(&server.url);
+    let config = mock_license_config(&server.url);
     let proxy = LicenseProxy::new(config);
 
     let err = handle_widevine_license(&proxy, b"challenge", "token")
@@ -736,11 +737,12 @@ async fn test_license_proxy_large_error_body_truncated() {
 
 #[tokio::test]
 async fn test_license_proxy_try_new_api() {
-    let valid = AxinomLicenseConfig::default();
+    let valid = mock_license_config("https://mock.axprod.net");
     let proxy = LicenseProxy::try_new(valid);
     assert!(proxy.is_ok());
 
-    let invalid = AxinomLicenseConfig::default().with_fairplay_cert_url("ftp://bad");
+    let invalid =
+        mock_license_config("https://mock.axprod.net").with_fairplay_cert_url("ftp://bad");
     let err = LicenseProxy::try_new(invalid);
     assert!(err.is_err());
 }

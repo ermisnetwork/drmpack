@@ -9,17 +9,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let output_dir = std::env::temp_dir().join(format!("drmpack_example_04_{}", Uuid::new_v4()));
 
-    let axinom_config = match AxinomConfig::from_env() {
-        Ok(cfg) => cfg,
-        Err(_) => {
-            println!("AXINOM_TENANT_ID or AXINOM_MANAGEMENT_KEY not set in .env.");
-            println!("Using placeholder credentials to demonstrate API ergonomics.");
-            AxinomConfig::new(
-                "00000000-0000-0000-0000-000000000000",
-                "00000000-0000-0000-0000-000000000000",
-            )
-        }
-    };
+    let axinom_config = AxinomConfig::from_env().map_err(|e| {
+        eprintln!("FATAL: Axinom configuration error: {e}");
+        eprintln!(
+            "Please configure AXINOM_TENANT_ID, AXINOM_MANAGEMENT_KEY, and AXINOM_ENDPOINT in .env"
+        );
+        eprintln!(
+            "(Note: To run offline packaging without cloud credentials, run: `cargo run --example 01_basic_live_cenc`)"
+        );
+        e
+    })?;
 
     let provider = AxinomProvider::new(axinom_config);
 

@@ -9,7 +9,15 @@ use drmpack::vendor::axinom::AxinomLicenseConfig;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
 
-    let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();
+    let license_config = AxinomLicenseConfig::from_env().map_err(|e| {
+        eprintln!("FATAL: Axinom license configuration error: {e}");
+        eprintln!("\nPlease ensure the following environment variables are set in your .env:");
+        eprintln!("  AXINOM_WIDEVINE_LICENSE_URL=https://<tenant-id>.drm-widevine-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_FAIRPLAY_LICENSE_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_PLAYREADY_LICENSE_URL=https://<tenant-id>.drm-playready-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_FAIRPLAY_CERT_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/v2/Certificate");
+        e
+    })?;
     let proxy = LicenseProxy::new(license_config);
 
     println!("LicenseProxy initialized.");
@@ -18,7 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  PlayReady URL: {}", proxy.config().playready_license_url);
     println!("  FairPlay Cert: {}", proxy.config().fairplay_cert_url);
 
-    let sample_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-419b";
+    let sample_token = std::env::var("AXINOM_ENTITLEMENT_TOKEN")
+        .unwrap_or_else(|_| "SAMPLE_OR_TEST_ENTITLEMENT_TOKEN".to_string());
 
     let cert_result = handle_fairplay_certificate(&proxy, None::<&str>).await;
     match cert_result {
@@ -31,16 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let widevine_challenge = Bytes::from_static(b"\x08\x01\x12\x10mock-cdm-challenge");
     let widevine_response =
-        handle_widevine_license(&proxy, &widevine_challenge, sample_token).await;
+        handle_widevine_license(&proxy, &widevine_challenge, &sample_token).await;
     report_response("Widevine", widevine_response);
 
     let fairplay_spc = Bytes::from_static(b"mock-fairplay-spc-payload");
-    let fairplay_response = handle_fairplay_license(&proxy, &fairplay_spc, sample_token).await;
+    let fairplay_response = handle_fairplay_license(&proxy, &fairplay_spc, &sample_token).await;
     report_response("FairPlay", fairplay_response);
 
     let playready_challenge = Bytes::from_static(b"<PlayReadyChallenge>mock</PlayReadyChallenge>");
     let playready_response =
-        handle_playready_license(&proxy, &playready_challenge, sample_token).await;
+        handle_playready_license(&proxy, &playready_challenge, &sample_token).await;
     report_response("PlayReady", playready_response);
 
     Ok(())

@@ -567,7 +567,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth_token = metadata.generate_axinom_jwt(&signing_config)?;
 
     // Set up license proxy
-    let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();
+    let license_config = AxinomLicenseConfig::from_env().map_err(|e| {
+        eprintln!("FATAL: Axinom license configuration missing: {e}");
+        eprintln!("\nPlease ensure the following environment variables are set in your .env:");
+        eprintln!("  AXINOM_WIDEVINE_LICENSE_URL=https://<tenant-id>.drm-widevine-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_FAIRPLAY_LICENSE_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_PLAYREADY_LICENSE_URL=https://<tenant-id>.drm-playready-licensing.axprod.net/AcquireLicense");
+        eprintln!("  AXINOM_FAIRPLAY_CERT_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/v2/Certificate");
+        e
+    })?;
     let license_proxy = LicenseProxy::new(license_config);
 
     // Preload FairPlay cert

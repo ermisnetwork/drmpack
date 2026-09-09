@@ -14,7 +14,4 @@ pub use proxy::{
 pub use response::LicenseResponse;
 
 #[cfg(any(feature = "axinom", feature = "license-proxy"))]
-pub use crate::vendor::axinom::config::{
-    AxinomLicenseConfig, DEFAULT_AXINOM_FAIRPLAY_CERT_URL, DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL,
-    DEFAULT_AXINOM_PLAYREADY_LICENSE_URL, DEFAULT_AXINOM_WIDEVINE_LICENSE_URL,
-};
+pub use crate::vendor::axinom::config::AxinomLicenseConfig;

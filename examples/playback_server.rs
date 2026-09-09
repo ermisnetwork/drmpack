@@ -117,37 +117,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Auto-detect Axinom credentials and discovered KIDs
-    let com_key_id = env::var("AXINOM_COMMUNICATION_KEY_ID").unwrap_or_default();
-    let com_key = env::var("AXINOM_COMMUNICATION_KEY").unwrap_or_default();
-    let mut kids = extract_kids_from_dir(&cdn_dir).await;
+    let com_key_id = env::var("AXINOM_COMMUNICATION_KEY_ID").ok();
+    let com_key = env::var("AXINOM_COMMUNICATION_KEY").ok();
+    let kids = extract_kids_from_dir(&cdn_dir).await;
     if !kids.is_empty() {
         let kids_strings: Vec<String> = kids.iter().map(|k| k.kid.clone()).collect();
         server = server.with_kids(kids_strings);
     }
 
-    if !com_key_id.is_empty() && !com_key.is_empty() {
-        if kids.is_empty() {
-            // Fallback sample KID if none found on disk yet
-            kids.push(AxinomKeyConfig::new("11111111-1111-1111-1111-111111111111"));
-            server = server.with_kids(vec!["11111111-1111-1111-1111-111111111111".to_string()]);
-        }
-        if let Ok(token) = generate_axinom_jwt(&com_key_id, &com_key, &kids) {
-            let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();
-            let license_proxy = LicenseProxy::new(license_config);
+    if let (Some(com_key_id), Some(com_key)) = (com_key_id, com_key) {
+        if !com_key_id.is_empty() && !com_key.is_empty() {
+            if kids.is_empty() {
+                eprintln!(
+                    "Warning: No Key IDs (KIDs) discovered in {}. Run packaging first to produce encrypted streams.",
+                    cdn_dir.display()
+                );
+            } else {
+                let token = generate_axinom_jwt(&com_key_id, &com_key, &kids)?;
+                let license_config = AxinomLicenseConfig::from_env().map_err(|e| {
+                    eprintln!("FATAL: Axinom communication keys configured but license endpoints missing: {e}");
+                    eprintln!("\nPlease ensure the following environment variables are set in your .env:");
+                    eprintln!("  AXINOM_WIDEVINE_LICENSE_URL=https://<tenant-id>.drm-widevine-licensing.axprod.net/AcquireLicense");
+                    eprintln!("  AXINOM_FAIRPLAY_LICENSE_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/AcquireLicense");
+                    eprintln!("  AXINOM_PLAYREADY_LICENSE_URL=https://<tenant-id>.drm-playready-licensing.axprod.net/AcquireLicense");
+                    eprintln!("  AXINOM_FAIRPLAY_CERT_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/v2/Certificate");
+                    e
+                })?;
+                let license_proxy = LicenseProxy::new(license_config);
 
-            if is_dual {
-                let _ = license_proxy.preload_fairplay_certificate().await;
+                if is_dual {
+                    let _ = license_proxy.preload_fairplay_certificate().await;
+                }
+
+                let scheme = if is_dual { "dual" } else { "widevine" };
+                server = server
+                    .with_drm_scheme(scheme)
+                    .with_license_proxy(license_proxy, token);
+
+                println!(
+                    "Axinom DRM LicenseProxy enabled ({} Key IDs discovered in manifests).",
+                    kids.len()
+                );
             }
-
-            let scheme = if is_dual { "dual" } else { "widevine" };
-            server = server
-                .with_drm_scheme(scheme)
-                .with_license_proxy(license_proxy, token);
-
-            println!(
-                "Axinom DRM LicenseProxy enabled ({} Key IDs discovered in manifests).",
-                kids.len()
-            );
         }
     }
 

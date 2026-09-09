@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => {
             eprintln!("Error loading Axinom credentials: {e}");
             eprintln!(
-                "Please make sure AXINOM_TENANT_ID and AXINOM_MANAGEMENT_KEY are set in .env"
+                "Please make sure AXINOM_TENANT_ID, AXINOM_MANAGEMENT_KEY, and AXINOM_ENDPOINT (or AXINOM_SPEKE_ENDPOINT) are set in .env"
             );
             return Ok(());
         }

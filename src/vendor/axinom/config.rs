@@ -2,9 +2,6 @@ use crate::error::{DrmpackError, Result};
 use std::fmt;
 use std::time::Duration;
 
-/// Default Axinom SPEKE v2 endpoint URL.
-pub const DEFAULT_AXINOM_ENDPOINT: &str = "https://key-server-management.axprod.net/api/SpekeV2";
-
 /// Configuration for connecting to the Axinom Key Service (SPEKE v2 over CPIX 2.3).
 #[derive(Clone)]
 pub struct AxinomConfig {
@@ -17,15 +14,18 @@ pub struct AxinomConfig {
 }
 
 impl AxinomConfig {
-    /// Create a new Axinom configuration with required tenant ID and management key.
+    /// Create a new Axinom configuration with required tenant ID, management key, and SPEKE v2 endpoint URL.
     ///
-    /// Endpoint defaults to `DEFAULT_AXINOM_ENDPOINT` (`https://key-server-management.axprod.net/api/SpekeV2`),
     /// `override_key_ids` defaults to `false`, and `timeout` defaults to 10 seconds.
-    pub fn new(tenant_id: impl Into<String>, management_key: impl Into<String>) -> Self {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        management_key: impl Into<String>,
+        endpoint: impl Into<String>,
+    ) -> Self {
         Self {
             tenant_id: tenant_id.into(),
             management_key: management_key.into(),
-            endpoint: DEFAULT_AXINOM_ENDPOINT.to_string(),
+            endpoint: endpoint.into(),
             override_key_ids: false,
             timeout: Duration::from_secs(10),
             headers: reqwest::header::HeaderMap::new(),
@@ -66,7 +66,7 @@ impl AxinomConfig {
     /// Load Axinom configuration from environment variables:
     /// - `AXINOM_TENANT_ID` (required)
     /// - `AXINOM_MANAGEMENT_KEY` (required)
-    /// - `AXINOM_ENDPOINT` (optional, overrides default endpoint)
+    /// - `AXINOM_ENDPOINT` or `AXINOM_SPEKE_ENDPOINT` (required)
     /// - `AXINOM_OVERRIDE_KEY_IDS` (optional, boolean "true"/"false"/"1"/"0")
     pub fn from_env() -> Result<Self> {
         let tenant_id = std::env::var("AXINOM_TENANT_ID").map_err(|_| {
@@ -95,16 +95,21 @@ impl AxinomConfig {
             ));
         }
 
-        let mut config = Self::new(tenant_id, management_key);
-
-        if let Ok(endpoint) =
-            std::env::var("AXINOM_ENDPOINT").or_else(|_| std::env::var("AXINOM_SPEKE_ENDPOINT"))
-        {
-            let endpoint = endpoint.trim();
-            if !endpoint.is_empty() {
-                config = config.with_endpoint(endpoint);
-            }
+        let endpoint = std::env::var("AXINOM_ENDPOINT")
+            .or_else(|_| std::env::var("AXINOM_SPEKE_ENDPOINT"))
+            .map_err(|_| {
+                DrmpackError::InvalidConfig(
+                    "Missing required environment variable 'AXINOM_ENDPOINT' (or 'AXINOM_SPEKE_ENDPOINT')".into(),
+                )
+            })?;
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty() {
+            return Err(DrmpackError::InvalidConfig(
+                "Environment variable 'AXINOM_ENDPOINT' cannot be empty".into(),
+            ));
         }
+
+        let mut config = Self::new(tenant_id, management_key, endpoint);
 
         if let Ok(override_str) = std::env::var("AXINOM_OVERRIDE_KEY_IDS") {
             let trimmed = override_str.trim();
@@ -138,21 +143,6 @@ impl fmt::Debug for AxinomConfig {
     }
 }
 
-/// Default Axinom Widevine license service endpoint.
-pub const DEFAULT_AXINOM_WIDEVINE_LICENSE_URL: &str =
-    "https://drm-widevine-licensing.axprod.net/AcquireLicense";
-
-/// Default Axinom FairPlay license service endpoint.
-pub const DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL: &str =
-    "https://drm-fairplay-licensing.axprod.net/AcquireLicense";
-
-/// Default Axinom PlayReady license service endpoint.
-pub const DEFAULT_AXINOM_PLAYREADY_LICENSE_URL: &str =
-    "https://drm-playready-licensing.axprod.net/AcquireLicense";
-
-/// Default Axinom FairPlay application certificate endpoint.
-pub const DEFAULT_AXINOM_FAIRPLAY_CERT_URL: &str = "https://tools.axinom.com/FPScert/fairplay.cer";
-
 /// Configuration for the Axinom License Proxy endpoints and connection parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AxinomLicenseConfig {
@@ -164,23 +154,22 @@ pub struct AxinomLicenseConfig {
     pub headers: reqwest::header::HeaderMap,
 }
 
-impl Default for AxinomLicenseConfig {
-    fn default() -> Self {
+impl AxinomLicenseConfig {
+    /// Create a new AxinomLicenseConfig with required license acquisition and certificate URLs.
+    pub fn new(
+        widevine_license_url: impl Into<String>,
+        fairplay_license_url: impl Into<String>,
+        playready_license_url: impl Into<String>,
+        fairplay_cert_url: impl Into<String>,
+    ) -> Self {
         Self {
-            widevine_license_url: DEFAULT_AXINOM_WIDEVINE_LICENSE_URL.to_string(),
-            fairplay_license_url: DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL.to_string(),
-            playready_license_url: DEFAULT_AXINOM_PLAYREADY_LICENSE_URL.to_string(),
-            fairplay_cert_url: DEFAULT_AXINOM_FAIRPLAY_CERT_URL.to_string(),
+            widevine_license_url: widevine_license_url.into(),
+            fairplay_license_url: fairplay_license_url.into(),
+            playready_license_url: playready_license_url.into(),
+            fairplay_cert_url: fairplay_cert_url.into(),
             timeout: Duration::from_secs(10),
             headers: reqwest::header::HeaderMap::new(),
         }
-    }
-}
-
-impl AxinomLicenseConfig {
-    /// Create a new AxinomLicenseConfig with default endpoints and timeout.
-    pub fn new() -> Self {
-        Self::default()
     }
 
     /// Set a custom Widevine license acquisition URL.
@@ -259,53 +248,60 @@ impl AxinomLicenseConfig {
     }
 
     /// Load Axinom License Proxy configuration from environment variables:
-    /// - `AXINOM_WIDEVINE_LICENSE_URL`
-    /// - `AXINOM_FAIRPLAY_LICENSE_URL`
-    /// - `AXINOM_PLAYREADY_LICENSE_URL`
-    /// - `AXINOM_FAIRPLAY_CERT_URL`
+    /// - `AXINOM_WIDEVINE_LICENSE_URL` (required)
+    /// - `AXINOM_FAIRPLAY_LICENSE_URL` (required)
+    /// - `AXINOM_PLAYREADY_LICENSE_URL` (required)
+    /// - `AXINOM_FAIRPLAY_CERT_URL` (required)
     pub fn from_env() -> Result<Self> {
-        let mut config = Self::default();
-
-        if let Ok(val) = std::env::var("AXINOM_WIDEVINE_LICENSE_URL") {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                return Err(DrmpackError::InvalidConfig(
-                    "Environment variable 'AXINOM_WIDEVINE_LICENSE_URL' cannot be empty".into(),
-                ));
-            }
-            config.widevine_license_url = trimmed.to_string();
+        let wv = std::env::var("AXINOM_WIDEVINE_LICENSE_URL").map_err(|_| {
+            DrmpackError::InvalidConfig(
+                "Missing required environment variable 'AXINOM_WIDEVINE_LICENSE_URL'".into(),
+            )
+        })?;
+        let wv = wv.trim();
+        if wv.is_empty() {
+            return Err(DrmpackError::InvalidConfig(
+                "Environment variable 'AXINOM_WIDEVINE_LICENSE_URL' cannot be empty".into(),
+            ));
         }
 
-        if let Ok(val) = std::env::var("AXINOM_FAIRPLAY_LICENSE_URL") {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                return Err(DrmpackError::InvalidConfig(
-                    "Environment variable 'AXINOM_FAIRPLAY_LICENSE_URL' cannot be empty".into(),
-                ));
-            }
-            config.fairplay_license_url = trimmed.to_string();
+        let fp = std::env::var("AXINOM_FAIRPLAY_LICENSE_URL").map_err(|_| {
+            DrmpackError::InvalidConfig(
+                "Missing required environment variable 'AXINOM_FAIRPLAY_LICENSE_URL'".into(),
+            )
+        })?;
+        let fp = fp.trim();
+        if fp.is_empty() {
+            return Err(DrmpackError::InvalidConfig(
+                "Environment variable 'AXINOM_FAIRPLAY_LICENSE_URL' cannot be empty".into(),
+            ));
         }
 
-        if let Ok(val) = std::env::var("AXINOM_PLAYREADY_LICENSE_URL") {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                return Err(DrmpackError::InvalidConfig(
-                    "Environment variable 'AXINOM_PLAYREADY_LICENSE_URL' cannot be empty".into(),
-                ));
-            }
-            config.playready_license_url = trimmed.to_string();
+        let pr = std::env::var("AXINOM_PLAYREADY_LICENSE_URL").map_err(|_| {
+            DrmpackError::InvalidConfig(
+                "Missing required environment variable 'AXINOM_PLAYREADY_LICENSE_URL'".into(),
+            )
+        })?;
+        let pr = pr.trim();
+        if pr.is_empty() {
+            return Err(DrmpackError::InvalidConfig(
+                "Environment variable 'AXINOM_PLAYREADY_LICENSE_URL' cannot be empty".into(),
+            ));
         }
 
-        if let Ok(val) = std::env::var("AXINOM_FAIRPLAY_CERT_URL") {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                return Err(DrmpackError::InvalidConfig(
-                    "Environment variable 'AXINOM_FAIRPLAY_CERT_URL' cannot be empty".into(),
-                ));
-            }
-            config.fairplay_cert_url = trimmed.to_string();
+        let cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL").map_err(|_| {
+            DrmpackError::InvalidConfig(
+                "Missing required environment variable 'AXINOM_FAIRPLAY_CERT_URL'".into(),
+            )
+        })?;
+        let cert = cert.trim();
+        if cert.is_empty() {
+            return Err(DrmpackError::InvalidConfig(
+                "Environment variable 'AXINOM_FAIRPLAY_CERT_URL' cannot be empty".into(),
+            ));
         }
 
+        let config = Self::new(wv, fp, pr, cert);
         config.validate()?;
         Ok(config)
     }
@@ -316,11 +312,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_axinom_config_defaults() {
-        let config = AxinomConfig::new("my-tenant-id", "my-secret-key");
+    fn test_axinom_config_constructor() {
+        let config = AxinomConfig::new(
+            "my-tenant-id",
+            "my-secret-key",
+            "https://custom.axprod.net/speke",
+        );
         assert_eq!(config.tenant_id, "my-tenant-id");
         assert_eq!(config.management_key, "my-secret-key");
-        assert_eq!(config.endpoint, DEFAULT_AXINOM_ENDPOINT);
+        assert_eq!(config.endpoint, "https://custom.axprod.net/speke");
         assert!(!config.override_key_ids);
         assert_eq!(config.timeout, Duration::from_secs(10));
         assert!(config.headers.is_empty());
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_axinom_config_builder_methods() {
-        let config = AxinomConfig::new("tenant", "key")
+        let config = AxinomConfig::new("tenant", "key", "https://initial.endpoint.com/speke")
             .with_endpoint("https://custom.endpoint.com/speke")
             .with_override_key_ids(true)
             .with_timeout(Duration::from_secs(30))
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn test_axinom_config_debug_redaction() {
         let secret = "super-confidential-management-key-987654";
-        let config = AxinomConfig::new("tenant-uuid", secret);
+        let config = AxinomConfig::new("tenant-uuid", secret, "https://endpoint.axprod.net");
         let debug_repr = format!("{:?}", config);
 
         assert!(
@@ -371,9 +371,11 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_tenant = std::env::var("AXINOM_TENANT_ID").ok();
         let prev_key = std::env::var("AXINOM_MANAGEMENT_KEY").ok();
+        let prev_ep = std::env::var("AXINOM_ENDPOINT").ok();
 
         std::env::remove_var("AXINOM_TENANT_ID");
         std::env::set_var("AXINOM_MANAGEMENT_KEY", "some-key");
+        std::env::set_var("AXINOM_ENDPOINT", "https://custom.endpoint");
 
         let res = AxinomConfig::from_env();
         assert!(res.is_err());
@@ -382,9 +384,18 @@ mod tests {
         // Restore
         if let Some(t) = prev_tenant {
             std::env::set_var("AXINOM_TENANT_ID", t);
+        } else {
+            std::env::remove_var("AXINOM_TENANT_ID");
         }
         if let Some(k) = prev_key {
             std::env::set_var("AXINOM_MANAGEMENT_KEY", k);
+        } else {
+            std::env::remove_var("AXINOM_MANAGEMENT_KEY");
+        }
+        if let Some(e) = prev_ep {
+            std::env::set_var("AXINOM_ENDPOINT", e);
+        } else {
+            std::env::remove_var("AXINOM_ENDPOINT");
         }
     }
 
@@ -394,10 +405,12 @@ mod tests {
         let prev_tenant = std::env::var("AXINOM_TENANT_ID").ok();
         let prev_key = std::env::var("AXINOM_MANAGEMENT_KEY").ok();
         let prev_ks_key = std::env::var("AXINOM_KEY_SERVICE_MANAGEMENT_KEY").ok();
+        let prev_ep = std::env::var("AXINOM_ENDPOINT").ok();
 
         std::env::set_var("AXINOM_TENANT_ID", "some-tenant");
         std::env::remove_var("AXINOM_MANAGEMENT_KEY");
         std::env::remove_var("AXINOM_KEY_SERVICE_MANAGEMENT_KEY");
+        std::env::set_var("AXINOM_ENDPOINT", "https://custom.endpoint");
 
         let res = AxinomConfig::from_env();
         assert!(res.is_err());
@@ -409,12 +422,63 @@ mod tests {
         // Restore
         if let Some(t) = prev_tenant {
             std::env::set_var("AXINOM_TENANT_ID", t);
+        } else {
+            std::env::remove_var("AXINOM_TENANT_ID");
         }
         if let Some(k) = prev_key {
             std::env::set_var("AXINOM_MANAGEMENT_KEY", k);
+        } else {
+            std::env::remove_var("AXINOM_MANAGEMENT_KEY");
         }
         if let Some(k) = prev_ks_key {
             std::env::set_var("AXINOM_KEY_SERVICE_MANAGEMENT_KEY", k);
+        } else {
+            std::env::remove_var("AXINOM_KEY_SERVICE_MANAGEMENT_KEY");
+        }
+        if let Some(e) = prev_ep {
+            std::env::set_var("AXINOM_ENDPOINT", e);
+        } else {
+            std::env::remove_var("AXINOM_ENDPOINT");
+        }
+    }
+
+    #[test]
+    fn test_axinom_config_from_env_missing_endpoint() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let prev_tenant = std::env::var("AXINOM_TENANT_ID").ok();
+        let prev_key = std::env::var("AXINOM_MANAGEMENT_KEY").ok();
+        let prev_ep = std::env::var("AXINOM_ENDPOINT").ok();
+        let prev_speke_ep = std::env::var("AXINOM_SPEKE_ENDPOINT").ok();
+
+        std::env::set_var("AXINOM_TENANT_ID", "some-tenant");
+        std::env::set_var("AXINOM_MANAGEMENT_KEY", "some-key");
+        std::env::remove_var("AXINOM_ENDPOINT");
+        std::env::remove_var("AXINOM_SPEKE_ENDPOINT");
+
+        let res = AxinomConfig::from_env();
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("AXINOM_ENDPOINT"));
+
+        // Restore
+        if let Some(t) = prev_tenant {
+            std::env::set_var("AXINOM_TENANT_ID", t);
+        } else {
+            std::env::remove_var("AXINOM_TENANT_ID");
+        }
+        if let Some(k) = prev_key {
+            std::env::set_var("AXINOM_MANAGEMENT_KEY", k);
+        } else {
+            std::env::remove_var("AXINOM_MANAGEMENT_KEY");
+        }
+        if let Some(e) = prev_ep {
+            std::env::set_var("AXINOM_ENDPOINT", e);
+        } else {
+            std::env::remove_var("AXINOM_ENDPOINT");
+        }
+        if let Some(e) = prev_speke_ep {
+            std::env::set_var("AXINOM_SPEKE_ENDPOINT", e);
+        } else {
+            std::env::remove_var("AXINOM_SPEKE_ENDPOINT");
         }
     }
 
@@ -448,6 +512,8 @@ mod tests {
         }
         if let Some(k) = prev_key {
             std::env::set_var("AXINOM_MANAGEMENT_KEY", k);
+        } else {
+            std::env::remove_var("AXINOM_MANAGEMENT_KEY");
         }
         if let Some(k) = prev_ks_key {
             std::env::set_var("AXINOM_KEY_SERVICE_MANAGEMENT_KEY", k);
@@ -505,10 +571,12 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_tenant = std::env::var("AXINOM_TENANT_ID").ok();
         let prev_key = std::env::var("AXINOM_MANAGEMENT_KEY").ok();
+        let prev_ep = std::env::var("AXINOM_ENDPOINT").ok();
         let prev_ov = std::env::var("AXINOM_OVERRIDE_KEY_IDS").ok();
 
         std::env::set_var("AXINOM_TENANT_ID", "env-tenant");
         std::env::set_var("AXINOM_MANAGEMENT_KEY", "env-key");
+        std::env::set_var("AXINOM_ENDPOINT", "https://custom.endpoint");
         std::env::set_var("AXINOM_OVERRIDE_KEY_IDS", "not_a_bool");
 
         let res = AxinomConfig::from_env();
@@ -519,7 +587,11 @@ mod tests {
             .contains("Invalid boolean value"));
 
         // Restore
-        std::env::remove_var("AXINOM_OVERRIDE_KEY_IDS");
+        if let Some(o) = prev_ov {
+            std::env::set_var("AXINOM_OVERRIDE_KEY_IDS", o);
+        } else {
+            std::env::remove_var("AXINOM_OVERRIDE_KEY_IDS");
+        }
         if let Some(t) = prev_tenant {
             std::env::set_var("AXINOM_TENANT_ID", t);
         } else {
@@ -530,8 +602,10 @@ mod tests {
         } else {
             std::env::remove_var("AXINOM_MANAGEMENT_KEY");
         }
-        if let Some(o) = prev_ov {
-            std::env::set_var("AXINOM_OVERRIDE_KEY_IDS", o);
+        if let Some(e) = prev_ep {
+            std::env::set_var("AXINOM_ENDPOINT", e);
+        } else {
+            std::env::remove_var("AXINOM_ENDPOINT");
         }
     }
 
@@ -540,15 +614,24 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_tenant = std::env::var("AXINOM_TENANT_ID").ok();
         let prev_key = std::env::var("AXINOM_MANAGEMENT_KEY").ok();
+        let prev_ep = std::env::var("AXINOM_ENDPOINT").ok();
 
         // Empty tenant ID
         std::env::set_var("AXINOM_TENANT_ID", "   ");
         std::env::set_var("AXINOM_MANAGEMENT_KEY", "valid-key");
+        std::env::set_var("AXINOM_ENDPOINT", "https://valid.endpoint");
         assert!(AxinomConfig::from_env().is_err());
 
         // Empty management key
         std::env::set_var("AXINOM_TENANT_ID", "valid-tenant");
         std::env::set_var("AXINOM_MANAGEMENT_KEY", "   ");
+        std::env::set_var("AXINOM_ENDPOINT", "https://valid.endpoint");
+        assert!(AxinomConfig::from_env().is_err());
+
+        // Empty endpoint
+        std::env::set_var("AXINOM_TENANT_ID", "valid-tenant");
+        std::env::set_var("AXINOM_MANAGEMENT_KEY", "valid-key");
+        std::env::set_var("AXINOM_ENDPOINT", "   ");
         assert!(AxinomConfig::from_env().is_err());
 
         // Restore
@@ -562,43 +645,58 @@ mod tests {
         } else {
             std::env::remove_var("AXINOM_MANAGEMENT_KEY");
         }
+        if let Some(e) = prev_ep {
+            std::env::set_var("AXINOM_ENDPOINT", e);
+        } else {
+            std::env::remove_var("AXINOM_ENDPOINT");
+        }
     }
 
     #[test]
-    fn test_axinom_license_config_defaults() {
-        let config = AxinomLicenseConfig::default();
+    fn test_axinom_license_config_constructor() {
+        let config = AxinomLicenseConfig::new(
+            "https://custom.axprod.net/widevine",
+            "https://custom.axprod.net/fairplay",
+            "https://custom.axprod.net/playready",
+            "https://custom.axprod.net/fairplay.cer",
+        );
         assert_eq!(
             config.widevine_license_url,
-            DEFAULT_AXINOM_WIDEVINE_LICENSE_URL
+            "https://custom.axprod.net/widevine"
         );
         assert_eq!(
             config.fairplay_license_url,
-            DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL
+            "https://custom.axprod.net/fairplay"
         );
         assert_eq!(
             config.playready_license_url,
-            DEFAULT_AXINOM_PLAYREADY_LICENSE_URL
+            "https://custom.axprod.net/playready"
         );
-        assert_eq!(config.fairplay_cert_url, DEFAULT_AXINOM_FAIRPLAY_CERT_URL);
+        assert_eq!(
+            config.fairplay_cert_url,
+            "https://custom.axprod.net/fairplay.cer"
+        );
         assert_eq!(config.timeout, Duration::from_secs(10));
         assert!(config.headers.is_empty());
-
-        let new_config = AxinomLicenseConfig::new();
-        assert_eq!(config, new_config);
     }
 
     #[test]
     fn test_axinom_license_config_builder() {
-        let config = AxinomLicenseConfig::new()
-            .with_widevine_license_url("https://custom.axprod.net/widevine")
-            .with_fairplay_license_url("https://custom.axprod.net/fairplay")
-            .with_playready_license_url("https://custom.axprod.net/playready")
-            .with_fairplay_cert_url("https://custom.axprod.net/cert.cer")
-            .with_timeout(Duration::from_secs(25))
-            .with_header(
-                reqwest::header::HeaderName::from_static("x-custom-tracking"),
-                reqwest::header::HeaderValue::from_static("test-track-id"),
-            );
+        let config = AxinomLicenseConfig::new(
+            "https://initial/wv",
+            "https://initial/fp",
+            "https://initial/pr",
+            "https://initial/cert",
+        )
+        .with_widevine_license_url("https://custom.axprod.net/widevine")
+        .with_fairplay_license_url("https://custom.axprod.net/fairplay")
+        .with_playready_license_url("https://custom.axprod.net/playready")
+        .with_fairplay_cert_url("https://custom.axprod.net/cert.cer")
+        .with_timeout(Duration::from_secs(25))
+        .with_header(
+            reqwest::header::HeaderName::from_static("x-custom-tracking"),
+            reqwest::header::HeaderValue::from_static("test-track-id"),
+        );
 
         assert_eq!(
             config.widevine_license_url,
@@ -672,32 +770,24 @@ mod tests {
     }
 
     #[test]
-    fn test_axinom_license_config_from_env_partial() {
+    fn test_axinom_license_config_from_env_missing_any_fails() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_wv = std::env::var("AXINOM_WIDEVINE_LICENSE_URL").ok();
         let prev_fp = std::env::var("AXINOM_FAIRPLAY_LICENSE_URL").ok();
         let prev_pr = std::env::var("AXINOM_PLAYREADY_LICENSE_URL").ok();
         let prev_cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL").ok();
 
-        std::env::set_var(
-            "AXINOM_WIDEVINE_LICENSE_URL",
-            "https://override.axprod.net/wv",
-        );
-        std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL");
-        std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL");
+        std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", "https://env.axprod.net/wv");
+        std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", "https://env.axprod.net/fp");
+        std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", "https://env.axprod.net/pr");
         std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
 
-        let cfg = AxinomLicenseConfig::from_env().expect("partial from_env must succeed");
-        assert_eq!(cfg.widevine_license_url, "https://override.axprod.net/wv");
-        assert_eq!(
-            cfg.fairplay_license_url,
-            DEFAULT_AXINOM_FAIRPLAY_LICENSE_URL
-        );
-        assert_eq!(
-            cfg.playready_license_url,
-            DEFAULT_AXINOM_PLAYREADY_LICENSE_URL
-        );
-        assert_eq!(cfg.fairplay_cert_url, DEFAULT_AXINOM_FAIRPLAY_CERT_URL);
+        let res = AxinomLicenseConfig::from_env();
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("AXINOM_FAIRPLAY_CERT_URL"));
 
         // Restore
         if let Some(v) = prev_wv {
@@ -726,8 +816,18 @@ mod tests {
     fn test_axinom_license_config_from_env_empty() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_wv = std::env::var("AXINOM_WIDEVINE_LICENSE_URL").ok();
+        let prev_fp = std::env::var("AXINOM_FAIRPLAY_LICENSE_URL").ok();
+        let prev_pr = std::env::var("AXINOM_PLAYREADY_LICENSE_URL").ok();
+        let prev_cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL").ok();
 
         std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", "   ");
+        std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", "https://env.axprod.net/fp");
+        std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", "https://env.axprod.net/pr");
+        std::env::set_var(
+            "AXINOM_FAIRPLAY_CERT_URL",
+            "https://env.axprod.net/cert.der",
+        );
+
         let res = AxinomLicenseConfig::from_env();
         assert!(res.is_err());
         assert!(res
@@ -741,14 +841,39 @@ mod tests {
         } else {
             std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
         }
+        if let Some(v) = prev_fp {
+            std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL");
+        }
+        if let Some(v) = prev_pr {
+            std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL");
+        }
+        if let Some(v) = prev_cert {
+            std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
+        }
     }
 
     #[test]
     fn test_axinom_license_config_from_env_invalid_url() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_wv = std::env::var("AXINOM_WIDEVINE_LICENSE_URL").ok();
+        let prev_fp = std::env::var("AXINOM_FAIRPLAY_LICENSE_URL").ok();
+        let prev_pr = std::env::var("AXINOM_PLAYREADY_LICENSE_URL").ok();
+        let prev_cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL").ok();
 
         std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", "ftp://invalid-url.net");
+        std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", "https://env.axprod.net/fp");
+        std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", "https://env.axprod.net/pr");
+        std::env::set_var(
+            "AXINOM_FAIRPLAY_CERT_URL",
+            "https://env.axprod.net/cert.der",
+        );
+
         let res = AxinomLicenseConfig::from_env();
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("http:// or https://"));
@@ -759,11 +884,31 @@ mod tests {
         } else {
             std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
         }
+        if let Some(v) = prev_fp {
+            std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL");
+        }
+        if let Some(v) = prev_pr {
+            std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL");
+        }
+        if let Some(v) = prev_cert {
+            std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
+        }
     }
 
     #[test]
     fn test_axinom_license_config_validation() {
-        let valid = AxinomLicenseConfig::default();
+        let valid = AxinomLicenseConfig::new(
+            "https://valid/wv",
+            "https://valid/fp",
+            "https://valid/pr",
+            "https://valid/cert",
+        );
         assert!(valid.validate().is_ok());
         assert_eq!(valid.timeout, Duration::from_secs(10));
         assert!(valid.headers.is_empty());

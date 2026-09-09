@@ -299,7 +299,7 @@ async fn test_axinom_provider_headers_and_basic_auth() {
     let tenant_id = "test-tenant-uuid-1234";
     let management_key = "test-management-key-abcd";
 
-    let config = AxinomConfig::new(tenant_id, management_key).with_endpoint(&server.url);
+    let config = AxinomConfig::new(tenant_id, management_key, &server.url);
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-content-1")
@@ -369,9 +369,7 @@ async fn test_axinom_provider_headers_and_basic_auth() {
 async fn test_axinom_provider_override_key_ids_query_param() {
     let server = AxinomMockServer::start(200, SAMPLE_AXINOM_RESPONSE_OVERRIDDEN_KID.into()).await;
 
-    let config = AxinomConfig::new("tenant", "key")
-        .with_endpoint(&server.url)
-        .with_override_key_ids(true);
+    let config = AxinomConfig::new("tenant", "key", &server.url).with_override_key_ids(true);
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-overridden")
@@ -404,7 +402,7 @@ async fn test_axinom_provider_override_key_ids_query_param() {
 async fn test_axinom_provider_dual_cenc_cbcs() {
     let server = AxinomMockServer::start(200, SAMPLE_AXINOM_RESPONSE_DUAL.into()).await;
 
-    let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-dual-content")
@@ -441,12 +439,10 @@ async fn test_axinom_provider_dual_cenc_cbcs() {
 async fn test_axinom_provider_custom_headers() {
     let server = AxinomMockServer::start(200, SAMPLE_AXINOM_RESPONSE_CENC.into()).await;
 
-    let config = AxinomConfig::new("tenant", "key")
-        .with_endpoint(&server.url)
-        .with_header(
-            reqwest::header::HeaderName::from_static("x-custom-tenant-tag"),
-            reqwest::header::HeaderValue::from_static("staging-cluster-1"),
-        );
+    let config = AxinomConfig::new("tenant", "key", &server.url).with_header(
+        reqwest::header::HeaderName::from_static("x-custom-tenant-tag"),
+        reqwest::header::HeaderValue::from_static("staging-cluster-1"),
+    );
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-content-1")
@@ -475,7 +471,7 @@ async fn test_axinom_provider_error_diagnostics_with_axdrm_header() {
     )
     .await;
 
-    let config = AxinomConfig::new("tenant", "bad-key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "bad-key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-content-1")
@@ -507,7 +503,7 @@ async fn test_axinom_provider_error_diagnostics_bad_request_header() {
     )
     .await;
 
-    let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-content-1")
@@ -526,7 +522,7 @@ async fn test_axinom_provider_http_500_fallback() {
     let server =
         AxinomMockServer::start(500, "Internal Server Failure in Axinom Cloud".into()).await;
 
-    let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-content-1")
@@ -542,7 +538,7 @@ async fn test_axinom_provider_http_500_fallback() {
 
 #[tokio::test]
 async fn test_axinom_provider_unreachable_endpoint() {
-    let config = AxinomConfig::new("tenant", "key").with_endpoint("http://127.0.0.1:1/speke");
+    let config = AxinomConfig::new("tenant", "key", "http://127.0.0.1:1/speke");
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("axinom-content-1")
@@ -558,7 +554,7 @@ async fn test_axinom_provider_unreachable_endpoint() {
 #[tokio::test]
 async fn test_axinom_provider_packaging_session_lifecycle() {
     let server = AxinomMockServer::start(200, SAMPLE_AXINOM_RESPONSE_CENC.into()).await;
-    let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let rendition = Rendition::video_hd();
@@ -860,7 +856,7 @@ async fn test_axinom_provider_explicit_iv_parsing() {
 </cpix:CPIX>"#;
 
     let server = AxinomMockServer::start(200, xml_with_iv.into()).await;
-    let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let req = KeyRequest::new("test-iv")
@@ -887,7 +883,7 @@ async fn test_axinom_provider_e2e_real_packaging_cenc() {
     }
 
     let server = AxinomMockServer::start(200, SAMPLE_AXINOM_RESPONSE_CENC.into()).await;
-    let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let rendition = Rendition::video_hd();
@@ -951,7 +947,7 @@ async fn test_axinom_provider_e2e_real_packaging_dual() {
     }
 
     let server = AxinomMockServer::start(200, SAMPLE_AXINOM_RESPONSE_DUAL.into()).await;
-    let config = AxinomConfig::new("tenant", "key").with_endpoint(&server.url);
+    let config = AxinomConfig::new("tenant", "key", &server.url);
     let provider = AxinomProvider::new(config);
 
     let rendition = Rendition::video_hd();

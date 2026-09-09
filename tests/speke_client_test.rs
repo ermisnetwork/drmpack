@@ -535,7 +535,7 @@ fn test_static_key_source_direct_api() {
 async fn test_vendor_axinom_canonical_namespace_and_client_accessor() {
     use drmpack::vendor::axinom::{AxinomConfig, AxinomProvider};
 
-    let config = AxinomConfig::new("my-tenant", "my-key");
+    let config = AxinomConfig::new("my-tenant", "my-key", "https://speke.axprod.net/api");
     let provider = AxinomProvider::new(config);
     let _ = provider.client();
     let _ = provider.speke_client();

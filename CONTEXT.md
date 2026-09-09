@@ -82,8 +82,12 @@ The pluggable trait for key acquisition (`fetch_keys`). Implemented by vendor ad
 _Avoid_: Key source, key fetcher
 
 **Axinom Provider (`AxinomProvider`)**:
-The built-in vendor adapter targeting Axinom's Key Service API via SPEKE v2 over CPIX 2.3 (`https://key-server-management.axprod.net/api/SpekeV2`). Managed under `drmpack::vendor::axinom`. Authenticates using HTTP Basic Auth with Tenant ID and Management Key (`Authorization: Basic <base64(tenant_id:management_key)>`), composes `SpekeClient`, supports `overrideKeyIds` configuration, surfaces `X-AxDRM-ErrorMessage` diagnostics on non-200 responses, and maps homogeneous or dual-scheme requests into scheme-aware `KeySet`.
+The built-in vendor adapter targeting Axinom's Key Service API via SPEKE v2 over CPIX 2.3 using tenant-specific endpoints (e.g. `https://<tenant-id>.key-service-management.axprod.net/api/SpekeV2`, ADR-0018). Managed under `drmpack::vendor::axinom`. Authenticates using HTTP Basic Auth with Tenant ID and Management Key (`Authorization: Basic <base64(tenant_id:management_key)>`), composes `SpekeClient`, supports `overrideKeyIds` configuration, surfaces `X-AxDRM-ErrorMessage` diagnostics on non-200 responses, and maps homogeneous or dual-scheme requests into scheme-aware `KeySet`.
 _Avoid_: Axinom client, Axinom adapter
+
+**AxinomLicenseConfig**:
+The configuration container holding tenant-specific DRM license acquisition and certificate URLs (Widevine, FairPlay, PlayReady, and FairPlay Application Certificate). Requires explicit tenant endpoints without hardcoded defaults to guarantee isolation across Axinom Mosaic tenants and prevent misrouted licensing traffic (ADR-0018).
+_Avoid_: License URLs, DRM license settings
 
 **License proxy**:
 An async handler function that forwards a player's license request to the Provider and returns the response. Media-server mounts it on an HTTP route; auth is media-server's responsibility.
