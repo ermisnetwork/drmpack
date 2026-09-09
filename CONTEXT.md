@@ -105,6 +105,14 @@ _Avoid_: Apple cert, FairPlay key
 The metadata injected into manifests and initialization segments enabling player license acquisition — PSSH boxes for DASH/CMAF and `#EXT-X-KEY` attributes (`skd://` for FairPlay, inline data URI for Widevine/PlayReady) for HLS.
 _Avoid_: Encryption metadata, DRM tags, key header
 
+**DrmStreamMetadata**:
+The public, serializable data transfer object emitted by `PackagingSession::playback_metadata()` for application-level state persistence (PostgreSQL/Redis). Encapsulates public KIDs, IVs, track bindings, and encryption schemes needed by playback and authorization backends to issue DRM entitlement tokens. Excludes raw AES keys to eliminate credential leakage across application boundaries (ADR-0017).
+_Avoid_: Key manifest, stream keys, DRM token info
+
+**AxinomSigningConfig**:
+The secure credential container managing Axinom Communication Key ID and Base64 communication secret for minting entitlement JWTs. Implements redacted debug representations to prevent accidental secret leakage in logs, and provides direct JWT signing utilities over `DrmStreamMetadata` (ADR-0017).
+_Avoid_: Communication key, signing credentials, token config
+
 **KeyMappingPolicy**:
 The orchestration policy governing how ContentKeys are assigned across Renditions — `SharedAll` (single key for all tracks, default), `SharedVideoSingleAudio` (one video key, one audio key), or `PerTierAndTrack` (granular key per QualityTier and track type per ADR-0003).
 _Avoid_: Key allocation, key strategy, tier mode

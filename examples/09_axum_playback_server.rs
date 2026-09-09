@@ -17,8 +17,9 @@
 mod common;
 
 use common::playback_server::PlaybackServer;
-use drmpack::key::{extract_keys_from_dir, KeySet};
-use drmpack::license::{AxinomLicenseConfig, LicenseProxy};
+use drmpack::axinom::{AxinomLicenseConfig, AxinomSigningConfig};
+use drmpack::license::LicenseProxy;
+use drmpack::session::DrmStreamMetadata;
 use drmpack::types::LatencyMode;
 use std::env;
 use std::path::PathBuf;
@@ -42,9 +43,8 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
 
 #[derive(Clone)]
 struct AppState {
-    com_key_id: String,
-    com_key: String,
-    key_set: KeySet,
+    signing_config: AxinomSigningConfig,
+    metadata: DrmStreamMetadata,
     stream_dir: PathBuf,
     port: u16,
     // ponytail: hardcoded demo token instead of a real session store
@@ -135,21 +135,17 @@ async fn handle_playback_info(
     let scheme = query.scheme.to_lowercase();
     let dual = is_dual_stream(&state.stream_dir);
 
-    // Generate Axinom JWT via library one-liner (handles IV derivation for CBCS)
+    // Generate Axinom JWT via library one-liner using DrmStreamMetadata and AxinomSigningConfig
     let drm_token = state
-        .key_set
-        .generate_axinom_jwt(&state.com_key_id, &state.com_key)
+        .metadata
+        .generate_axinom_jwt(&state.signing_config)
         .map_err(|e| {
             eprintln!("Failed to generate Axinom JWT: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     let origin = format!("http://127.0.0.1:{}", state.port);
-    let kid_strings: Vec<String> = state
-        .key_set
-        .all_keys()
-        .map(|k| k.kid.0.hyphenated().to_string())
-        .collect();
+    let kid_strings: Vec<String> = state.metadata.kid_strings();
     Ok(Json(PlaybackInfoResponse {
         drm_token,
         license_servers: LicenseServers {
@@ -505,29 +501,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Load Axinom credentials
-    let com_key_id = env::var("AXINOM_COMMUNICATION_KEY_ID").map_err(|_| {
-        eprintln!("FATAL: Missing AXINOM_COMMUNICATION_KEY_ID in .env");
-        "Missing AXINOM_COMMUNICATION_KEY_ID"
+    // Load Axinom communication credentials (with automatic secret redaction in Debug logs)
+    let signing_config = AxinomSigningConfig::from_env().map_err(|e| {
+        eprintln!("FATAL: Failed to load Axinom credentials from .env: {e}");
+        "Missing Axinom credentials"
     })?;
-    let com_key = env::var("AXINOM_COMMUNICATION_KEY").map_err(|_| {
-        eprintln!("FATAL: Missing AXINOM_COMMUNICATION_KEY in .env");
-        "Missing AXINOM_COMMUNICATION_KEY"
+    println!("Axinom Credentials loaded safely: {signing_config:?}");
+
+    // Load DRM stream metadata (simulating querying the database record for this stream)
+    let meta_file = stream_dir.join("drm_metadata.json");
+    if !meta_file.exists() {
+        eprintln!(
+            "FATAL: Missing DRM metadata file at: {}",
+            meta_file.display()
+        );
+        eprintln!("Run example 08 first to generate content and metadata:");
+        eprintln!(
+            "  cargo run --example 08_in_memory_live_stream -- --dual --axinom --duration 30"
+        );
+        std::process::exit(1);
+    }
+    let meta_json = std::fs::read_to_string(&meta_file)?;
+    let metadata = DrmStreamMetadata::from_json(&meta_json).map_err(|e| {
+        eprintln!("FATAL: Failed to parse DRM metadata JSON: {e}");
+        "Corrupted DRM metadata"
     })?;
 
-    // Extract KIDs from MPD files on disk (library handles scheme detection + IV derivation)
-    let key_set = extract_keys_from_dir(&stream_dir);
-    if key_set.is_empty() {
-        eprintln!("WARNING: No KIDs found in MPD files. JWT token will have no keys.");
-    } else {
-        println!("Detected KIDs from content:");
-        for k in key_set.all_keys() {
-            let scheme_tag = k
-                .encryption_scheme
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "?".into());
-            println!("  - [{scheme_tag}] {}", k.kid.0);
-        }
+    println!(
+        "Loaded DRM Stream Metadata for content: {}",
+        metadata.content_id
+    );
+    for k in &metadata.keys {
+        println!("  - [{}] KID: {}", k.scheme, k.kid.0);
     }
 
     let dual = is_dual_stream(&stream_dir);
@@ -540,16 +545,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let demo_token = "drmpack-demo-token-2024".to_string();
 
     let app_state = Arc::new(AppState {
-        com_key_id: com_key_id.clone(),
-        com_key: com_key.clone(),
-        key_set: key_set.clone(),
+        signing_config: signing_config.clone(),
+        metadata: metadata.clone(),
         stream_dir: stream_dir.clone(),
         port,
         demo_token,
     });
 
     // Generate Axinom JWT for PlaybackServer license proxy — one-liner
-    let auth_token = key_set.generate_axinom_jwt(&com_key_id, &com_key)?;
+    let auth_token = metadata.generate_axinom_jwt(&signing_config)?;
 
     // Set up license proxy
     let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();
@@ -580,10 +584,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let drm_scheme = if dual { "dual" } else { "widevine" };
-    let kids_strings: Vec<String> = key_set
-        .all_keys()
-        .map(|k| k.kid.0.hyphenated().to_string())
-        .collect();
+    let kids_strings: Vec<String> = metadata.kid_strings();
 
     let base_router = PlaybackServer::new(stream_dir, manifest_url)
         .with_latency_mode(LatencyMode::Standard)

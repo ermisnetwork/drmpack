@@ -3,7 +3,7 @@ mod common;
 use common::cdn_publisher::{clean_dir, CdnPublisher};
 use common::media_feeder::{resolve_or_create_input_media, MediaFeeder, MediaFeederConfig};
 use common::playback_server::PlaybackServer;
-use drmpack::axinom::{AxinomConfig, AxinomProvider};
+use drmpack::axinom::{AxinomConfig, AxinomProvider, AxinomSigningConfig};
 use drmpack::license::{AxinomLicenseConfig, LicenseProxy};
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
 use drmpack::types::{LatencyMode, Rendition};
@@ -51,15 +51,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("(Note: To test without Axinom credentials, use `cargo run --example 06_e2e_live_clearkey`).");
         e
     })?;
-    let com_key_id = env::var("AXINOM_COMMUNICATION_KEY_ID").map_err(|_| {
-        eprintln!("FATAL: Missing environment variable 'AXINOM_COMMUNICATION_KEY_ID'");
+    let signing_config = AxinomSigningConfig::from_env().map_err(|e| {
+        eprintln!("FATAL: Axinom communication credentials missing: {e}");
         eprintln!("(Note: To test without Axinom credentials, use `cargo run --example 06_e2e_live_clearkey`).");
-        "Missing AXINOM_COMMUNICATION_KEY_ID"
-    })?;
-    let com_key = env::var("AXINOM_COMMUNICATION_KEY").map_err(|_| {
-        eprintln!("FATAL: Missing environment variable 'AXINOM_COMMUNICATION_KEY'");
-        eprintln!("(Note: To test without Axinom credentials, use `cargo run --example 06_e2e_live_clearkey`).");
-        "Missing AXINOM_COMMUNICATION_KEY"
+        "Missing Axinom communication credentials"
     })?;
 
     let cdn_storage = PathBuf::from("scratch/cdn_storage");
@@ -137,7 +132,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let token = session
         .key_set()
-        .generate_axinom_jwt(&com_key_id, &com_key)?;
+        .generate_axinom_jwt_with_config(&signing_config)?;
 
     // 3. Initialize LicenseProxy for server-side DRM license and certificate handling
     let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();

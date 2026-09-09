@@ -121,6 +121,80 @@ pub fn generate_axinom_jwt(
     Ok(format!("{signing_input}.{sig_b64}"))
 }
 
+use std::fmt;
+
+/// Configuration and credentials for signing Axinom DRM JWT entitlement tokens.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AxinomSigningConfig {
+    pub key_id: String,
+    secret: String,
+}
+
+impl fmt::Debug for AxinomSigningConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AxinomSigningConfig")
+            .field("key_id", &self.key_id)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl AxinomSigningConfig {
+    /// Create new signing credentials.
+    pub fn new(key_id: impl Into<String>, secret: impl Into<String>) -> Self {
+        Self {
+            key_id: key_id.into(),
+            secret: secret.into(),
+        }
+    }
+
+    /// Load communication key credentials from environment variables:
+    /// - `AXINOM_COMMUNICATION_KEY_ID`
+    /// - `AXINOM_COMMUNICATION_KEY`
+    pub fn from_env() -> Result<Self> {
+        let key_id = std::env::var("AXINOM_COMMUNICATION_KEY_ID").map_err(|_| {
+            DrmpackError::InvalidConfig(
+                "Missing AXINOM_COMMUNICATION_KEY_ID environment variable".to_string(),
+            )
+        })?;
+        let secret = std::env::var("AXINOM_COMMUNICATION_KEY").map_err(|_| {
+            DrmpackError::InvalidConfig(
+                "Missing AXINOM_COMMUNICATION_KEY environment variable".to_string(),
+            )
+        })?;
+        Ok(Self::new(key_id, secret))
+    }
+
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// Access the raw communication key secret bytes.
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+
+    /// Generate a signed Axinom JWT entitlement token for the given key configs.
+    pub fn generate_jwt(&self, keys: &[AxinomKeyConfig]) -> Result<String> {
+        generate_axinom_jwt(&self.key_id, &self.secret, keys)
+    }
+
+    /// Generate a signed Axinom JWT entitlement token for a DrmStreamMetadata.
+    pub fn generate_jwt_for_metadata(
+        &self,
+        metadata: &crate::session::DrmStreamMetadata,
+    ) -> Result<String> {
+        let configs = metadata.to_axinom_key_configs();
+        self.generate_jwt(&configs)
+    }
+
+    /// Generate a signed Axinom JWT entitlement token for a KeySet.
+    pub fn generate_jwt_for_keyset(&self, keyset: &crate::key::KeySet) -> Result<String> {
+        let configs = keyset.to_axinom_key_configs();
+        self.generate_jwt(&configs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +274,24 @@ mod tests {
         ck.iv = Some(custom_iv);
         let cfg2 = AxinomKeyConfig::from(ck);
         assert_eq!(cfg2.iv, Some(custom_iv));
+    }
+
+    #[test]
+    fn test_axinom_signing_config_debug_redaction_and_signing() {
+        let signing = AxinomSigningConfig::new(
+            "00000000-0000-0000-0000-000000000000",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        );
+
+        let debug_str = format!("{signing:?}");
+        assert!(debug_str.contains("00000000-0000-0000-0000-000000000000"));
+        assert!(debug_str.contains("[REDACTED]"));
+        assert!(!debug_str.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="));
+
+        let keys = vec![AxinomKeyConfig::new("11111111-1111-1111-1111-111111111111")];
+        let jwt = signing
+            .generate_jwt(&keys)
+            .expect("JWT signing must succeed");
+        assert_eq!(jwt.split('.').count(), 3);
     }
 }

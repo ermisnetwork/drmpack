@@ -2,6 +2,8 @@ pub mod cluster;
 pub use cluster::{Representation, RepresentationCluster};
 pub mod harvester;
 use harvester::Harvester;
+pub mod metadata;
+pub use metadata::{DrmKeyEntry, DrmStreamMetadata};
 
 use crate::error::{
     DrmpackError, PackagingOperation, PackagingSessionFailure, RepresentationFailure, Result,
@@ -758,6 +760,20 @@ impl PackagingSession {
     /// Access the cached KeySet. The in-process control plane remains trusted.
     pub fn key_set(&self) -> &KeySet {
         &self.key_set
+    }
+
+    /// Return the public DRM stream metadata for this packaging session.
+    ///
+    /// Suitable for application-level state persistence (e.g. PostgreSQL, Redis) or
+    /// transfer to a playback authorization backend.
+    /// Strictly excludes secret keys while preserving KIDs, IVs, track bindings,
+    /// and encryption schemes needed to issue playback entitlement tokens (ADR-0017).
+    pub fn playback_metadata(&self) -> DrmStreamMetadata {
+        DrmStreamMetadata::from_session(
+            &self.config.content_id,
+            self.config.encryption_scheme,
+            &self.key_set,
+        )
     }
 
     /// Root of the Ramdisk delivery output. Private DRM XML remains outside this directory.

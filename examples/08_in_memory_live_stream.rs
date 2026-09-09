@@ -128,6 +128,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             k.kid.0, k.track_type, k.quality_tier
         );
     }
+
+    // Persist DRM stream metadata for playback servers (simulates database/state persistence)
+    let meta = session.playback_metadata();
+    if let Ok(json) = meta.to_json_pretty() {
+        let meta_path = dump_path.join("drm_metadata.json");
+        if let Err(e) = std::fs::write(&meta_path, json) {
+            eprintln!(
+                "Warning: failed to write DRM metadata to {}: {e}",
+                meta_path.display()
+            );
+        } else {
+            println!(
+                "DRM Playback Metadata saved (for Playback Server): {}",
+                meta_path.display()
+            );
+        }
+    }
     println!();
     let tracker = LatencyTracker::default();
     // Consumer: log artifacts + dump to disk

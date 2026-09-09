@@ -22,9 +22,6 @@ pub use crate::vendor::axinom::AxinomProvider;
 pub mod policy;
 pub mod raw;
 
-pub mod extract;
-pub use extract::extract_keys_from_dir;
-
 pub use policy::{KeyPlan, KeyPolicyEngine};
 pub use raw::{RawKeyProvider, StaticKeySource};
 
@@ -311,6 +308,14 @@ impl KeySet {
     pub fn generate_axinom_jwt(&self, com_key_id: &str, com_key: &str) -> Result<String> {
         let configs = self.to_axinom_key_configs();
         crate::vendor::axinom::generate_axinom_jwt(com_key_id, com_key, &configs)
+    }
+
+    /// Generate a signed Axinom JWT entitlement token using an [`AxinomSigningConfig`].
+    pub fn generate_axinom_jwt_with_config(
+        &self,
+        signing_config: &crate::vendor::axinom::AxinomSigningConfig,
+    ) -> Result<String> {
+        signing_config.generate_jwt_for_keyset(self)
     }
 }
 

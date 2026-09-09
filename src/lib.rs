@@ -28,12 +28,12 @@ pub use error::{
 };
 pub use gpac::{GpacDrmConfig, GpacDrmXmlGenerator, GpacProcess, GpacProcessConfig};
 pub use key::{
-    extract_keys_from_dir, ContentKey, KeyID, KeyPlan, KeyPolicyEngine, KeyProvider, KeyRequest,
-    KeySet, RawKeyProvider, StaticKeySource,
+    ContentKey, KeyID, KeyPlan, KeyPolicyEngine, KeyProvider, KeyRequest, KeySet, RawKeyProvider,
+    StaticKeySource,
 };
 pub use session::{
-    PackagingResult, PackagingSession, PackagingSessionConfig, Representation,
-    RepresentationCluster, SessionWriter,
+    DrmKeyEntry, DrmStreamMetadata, PackagingResult, PackagingSession, PackagingSessionConfig,
+    Representation, RepresentationCluster, SessionWriter,
 };
 pub use types::{
     ArtifactKind, DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat,
@@ -51,7 +51,8 @@ pub use speke::{
 
 #[cfg(feature = "axinom")]
 pub use vendor::axinom::{
-    generate_axinom_jwt, AxinomConfig, AxinomKeyConfig, AxinomProvider, DEFAULT_AXINOM_ENDPOINT,
+    generate_axinom_jwt, AxinomConfig, AxinomKeyConfig, AxinomProvider, AxinomSigningConfig,
+    DEFAULT_AXINOM_ENDPOINT,
 };
 
 #[cfg(any(feature = "axinom", feature = "license-proxy"))]
