@@ -22,6 +22,9 @@ pub use crate::vendor::axinom::AxinomProvider;
 pub mod policy;
 pub mod raw;
 
+pub mod extract;
+pub use extract::extract_keys_from_dir;
+
 pub use policy::{KeyPlan, KeyPolicyEngine};
 pub use raw::{RawKeyProvider, StaticKeySource};
 
@@ -283,6 +286,31 @@ impl KeySet {
 
     pub fn len(&self) -> usize {
         self.keys.len()
+    }
+}
+
+#[cfg(feature = "axinom")]
+impl KeySet {
+    /// Build deduplicated, sorted Axinom key configs from this KeySet.
+    ///
+    /// Automatically derives IV for CBCS keys (IV = KID bytes, FairPlay convention).
+    /// Handles sort by KID and dedup — caller never needs to touch `AxinomKeyConfig` directly.
+    pub fn to_axinom_key_configs(&self) -> Vec<crate::vendor::axinom::AxinomKeyConfig> {
+        let mut configs: Vec<crate::vendor::axinom::AxinomKeyConfig> = self
+            .all_keys()
+            .map(crate::vendor::axinom::AxinomKeyConfig::from)
+            .collect();
+        configs.sort_by(|a, b| a.kid.cmp(&b.kid));
+        configs.dedup_by(|a, b| a.kid == b.kid);
+        configs
+    }
+
+    /// Generate a signed Axinom JWT entitlement token for all keys in this set.
+    ///
+    /// One-liner that handles key config extraction, IV derivation, sort, dedup, and signing.
+    pub fn generate_axinom_jwt(&self, com_key_id: &str, com_key: &str) -> Result<String> {
+        let configs = self.to_axinom_key_configs();
+        crate::vendor::axinom::generate_axinom_jwt(com_key_id, com_key, &configs)
     }
 }
 

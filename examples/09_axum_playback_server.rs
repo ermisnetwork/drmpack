@@ -17,7 +17,7 @@
 mod common;
 
 use common::playback_server::PlaybackServer;
-use drmpack::axinom::{generate_axinom_jwt, AxinomKeyConfig};
+use drmpack::key::{extract_keys_from_dir, KeySet};
 use drmpack::license::{AxinomLicenseConfig, LicenseProxy};
 use drmpack::types::LatencyMode;
 use std::env;
@@ -44,80 +44,11 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
 struct AppState {
     com_key_id: String,
     com_key: String,
-    extracted_keys: Vec<ExtractedKey>, // KIDs with scheme info from MPD
+    key_set: KeySet,
     stream_dir: PathBuf,
     port: u16,
     // ponytail: hardcoded demo token instead of a real session store
     demo_token: String,
-}
-
-// ── KID extraction from MPD ──────────────────────────────────────────
-
-/// Extracted key info: KID string + whether it's from a CBCS directory.
-#[derive(Clone, Debug)]
-struct ExtractedKey {
-    kid: String,
-    is_cbcs: bool,
-}
-
-/// Parse default_KID values from MPD XML on disk, tracking scheme per KID.
-/// ponytail: string split over XML parse — good enough for extracting UUIDs.
-fn extract_keys_from_dir(dir: &std::path::Path) -> Vec<ExtractedKey> {
-    let mut keys = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    // Check cenc/ and cbcs/ subdirs, then root
-    for (subdir, is_cbcs) in [("cenc", false), ("cbcs", true), ("", false)] {
-        let search_dir = dir.join(subdir);
-        if !search_dir.is_dir() {
-            continue;
-        }
-        let entries = match std::fs::read_dir(&search_dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("mpd") {
-                continue;
-            }
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            // Also detect scheme from the MPD value="cbcs" if in root dir
-            let mpd_is_cbcs = is_cbcs || content.contains("value=\"cbcs\"");
-            for segment in content.split("default_KID=\"") {
-                if let Some(end) = segment.find('"') {
-                    let kid = &segment[..end];
-                    if kid.len() >= 32 && seen.insert(kid.to_string()) {
-                        keys.push(ExtractedKey {
-                            kid: kid.to_string(),
-                            is_cbcs: mpd_is_cbcs,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    keys
-}
-
-/// Build AxinomKeyConfigs from extracted keys.
-/// For CBCS keys, derive IV from KID bytes (FairPlay convention: IV = KID as 16 bytes).
-fn build_key_configs(keys: &[ExtractedKey]) -> Vec<AxinomKeyConfig> {
-    keys.iter()
-        .map(|ek| {
-            let mut cfg = AxinomKeyConfig::new(ek.kid.clone());
-            if ek.is_cbcs {
-                // Parse UUID string → 16 bytes → use as IV
-                if let Ok(uuid) = uuid::Uuid::parse_str(&ek.kid) {
-                    cfg = cfg.with_iv(*uuid.as_bytes());
-                }
-            }
-            cfg
-        })
-        .collect()
 }
 
 // ── Detect dual mode ─────────────────────────────────────────────────
@@ -171,12 +102,12 @@ fn default_scheme() -> String {
 
 #[derive(serde::Serialize)]
 struct PlaybackInfoResponse {
-    manifest_url: String,
     drm_token: String,
     license_servers: LicenseServers,
     certificate_url: String,
     kids: Vec<String>,
     scheme: String,
+    is_dual: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -204,30 +135,22 @@ async fn handle_playback_info(
     let scheme = query.scheme.to_lowercase();
     let dual = is_dual_stream(&state.stream_dir);
 
-    // Always use MPD — Shaka handles Widevine+FairPlay via DASH on all browsers.
-    // HLS only has FairPlay signaling, which fails on Chrome.
-    let manifest_url = if dual {
-        match scheme.as_str() {
-            "cbcs" => "/cbcs/live.mpd".to_string(),
-            _ => "/cenc/live.mpd".to_string(),
-        }
-    } else {
-        "/live.mpd".to_string()
-    };
-
-    // Generate Axinom JWT with proper IVs for CBCS keys
-    let key_configs = build_key_configs(&state.extracted_keys);
-
-    let drm_token =
-        generate_axinom_jwt(&state.com_key_id, &state.com_key, &key_configs).map_err(|e| {
+    // Generate Axinom JWT via library one-liner (handles IV derivation for CBCS)
+    let drm_token = state
+        .key_set
+        .generate_axinom_jwt(&state.com_key_id, &state.com_key)
+        .map_err(|e| {
             eprintln!("Failed to generate Axinom JWT: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     let origin = format!("http://127.0.0.1:{}", state.port);
-    let kid_strings: Vec<String> = state.extracted_keys.iter().map(|k| k.kid.clone()).collect();
+    let kid_strings: Vec<String> = state
+        .key_set
+        .all_keys()
+        .map(|k| k.kid.0.hyphenated().to_string())
+        .collect();
     Ok(Json(PlaybackInfoResponse {
-        manifest_url,
         drm_token,
         license_servers: LicenseServers {
             widevine: format!("{origin}/license/widevine"),
@@ -237,6 +160,7 @@ async fn handle_playback_info(
         certificate_url: format!("{origin}/fairplay.cer"),
         kids: kid_strings,
         scheme,
+        is_dual: dual,
     }))
 }
 
@@ -407,12 +331,16 @@ fn render_player_html(port: u16) -> String {
         if (!infoRes.ok) throw new Error('Failed to get playback info (HTTP ' + infoRes.status + ')');
         const info = await infoRes.json();
 
-        document.getElementById('val-manifest').textContent = info.manifest_url;
+        // Client builds manifest URL: Safari needs HLS for FairPlay DRM, Chrome/Firefox use DASH
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        const ext = isSafari ? 'm3u8' : 'mpd';
+        const manifestPath = info.is_dual ? '/' + info.scheme + '/live.' + ext : '/live.' + ext;
+        document.getElementById('val-manifest').textContent = manifestPath;
         document.getElementById('val-scheme').textContent = info.scheme.toUpperCase();
         document.getElementById('val-kids').textContent = info.kids.join(', ') || '-';
 
         // Wait for manifest to be available
-        const manifestUrl = window.location.origin + info.manifest_url;
+        const manifestUrl = window.location.origin + manifestPath;
         let ready = false;
         statusEl.textContent = 'Waiting for live stream...';
         for (let i = 0; i < 30; i++) {{
@@ -587,15 +515,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Missing AXINOM_COMMUNICATION_KEY"
     })?;
 
-    // Extract KIDs from MPD files on disk (with scheme info for IV generation)
-    let extracted_keys = extract_keys_from_dir(&stream_dir);
-    if extracted_keys.is_empty() {
+    // Extract KIDs from MPD files on disk (library handles scheme detection + IV derivation)
+    let key_set = extract_keys_from_dir(&stream_dir);
+    if key_set.is_empty() {
         eprintln!("WARNING: No KIDs found in MPD files. JWT token will have no keys.");
     } else {
         println!("Detected KIDs from content:");
-        for ek in &extracted_keys {
-            let scheme_tag = if ek.is_cbcs { "cbcs" } else { "cenc" };
-            println!("  - [{scheme_tag}] {}", ek.kid);
+        for k in key_set.all_keys() {
+            let scheme_tag = k
+                .encryption_scheme
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "?".into());
+            println!("  - [{scheme_tag}] {}", k.kid.0);
         }
     }
 
@@ -611,15 +542,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = Arc::new(AppState {
         com_key_id: com_key_id.clone(),
         com_key: com_key.clone(),
-        extracted_keys: extracted_keys.clone(),
+        key_set: key_set.clone(),
         stream_dir: stream_dir.clone(),
         port,
         demo_token,
     });
 
-    // Generate the Axinom JWT for the PlaybackServer's license proxy (with IVs for CBCS)
-    let key_configs = build_key_configs(&extracted_keys);
-    let auth_token = generate_axinom_jwt(&com_key_id, &com_key, &key_configs)?;
+    // Generate Axinom JWT for PlaybackServer license proxy — one-liner
+    let auth_token = key_set.generate_axinom_jwt(&com_key_id, &com_key)?;
 
     // Set up license proxy
     let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();
@@ -650,7 +580,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let drm_scheme = if dual { "dual" } else { "widevine" };
-    let kids_strings: Vec<String> = extracted_keys.iter().map(|k| k.kid.clone()).collect();
+    let kids_strings: Vec<String> = key_set
+        .all_keys()
+        .map(|k| k.kid.0.hyphenated().to_string())
+        .collect();
 
     let base_router = PlaybackServer::new(stream_dir, manifest_url)
         .with_latency_mode(LatencyMode::Standard)

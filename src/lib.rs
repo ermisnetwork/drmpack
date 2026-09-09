@@ -28,8 +28,8 @@ pub use error::{
 };
 pub use gpac::{GpacDrmConfig, GpacDrmXmlGenerator, GpacProcess, GpacProcessConfig};
 pub use key::{
-    ContentKey, KeyID, KeyPlan, KeyPolicyEngine, KeyProvider, KeyRequest, KeySet, RawKeyProvider,
-    StaticKeySource,
+    extract_keys_from_dir, ContentKey, KeyID, KeyPlan, KeyPolicyEngine, KeyProvider, KeyRequest,
+    KeySet, RawKeyProvider, StaticKeySource,
 };
 pub use session::{
     PackagingResult, PackagingSession, PackagingSessionConfig, Representation,

@@ -22,6 +22,37 @@ impl EncryptionScheme {
             EncryptionScheme::Dual => &[EncryptionScheme::Cenc, EncryptionScheme::Cbcs],
         }
     }
+
+    /// Resolve the manifest path for a given scheme, dual mode, and manifest format.
+    ///
+    /// Encodes DRM/browser domain knowledge:
+    /// - Safari DRM requires HLS (`.m3u8`) — caller passes `ManifestFormat::Hls`
+    /// - Chrome/Firefox use DASH (`.mpd`) — caller passes `ManifestFormat::Dash`
+    /// - Widevine supports both CENC and CBCS via DASH
+    /// - FairPlay requires CBCS + HLS
+    ///
+    /// # Examples
+    /// ```
+    /// use drmpack::types::{EncryptionScheme, ManifestFormat};
+    /// assert_eq!(EncryptionScheme::Cenc.resolve_manifest_path(true, ManifestFormat::Dash), "/cenc/live.mpd");
+    /// assert_eq!(EncryptionScheme::Cbcs.resolve_manifest_path(true, ManifestFormat::Hls), "/cbcs/live.m3u8");
+    /// assert_eq!(EncryptionScheme::Cbcs.resolve_manifest_path(false, ManifestFormat::Dash), "/live.mpd");
+    /// ```
+    pub fn resolve_manifest_path(&self, is_dual: bool, format: ManifestFormat) -> String {
+        let ext = match format {
+            ManifestFormat::Dash => "mpd",
+            ManifestFormat::Hls => "m3u8",
+        };
+        if is_dual {
+            let scheme = match self {
+                EncryptionScheme::Cbcs => "cbcs",
+                _ => "cenc",
+            };
+            format!("/{scheme}/live.{ext}")
+        } else {
+            format!("/live.{ext}")
+        }
+    }
 }
 
 impl fmt::Display for EncryptionScheme {

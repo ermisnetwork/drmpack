@@ -3,7 +3,7 @@ mod common;
 use common::cdn_publisher::{clean_dir, CdnPublisher};
 use common::media_feeder::{resolve_or_create_input_media, MediaFeeder, MediaFeederConfig};
 use common::playback_server::PlaybackServer;
-use drmpack::axinom::{generate_axinom_jwt, AxinomConfig, AxinomKeyConfig, AxinomProvider};
+use drmpack::axinom::{AxinomConfig, AxinomProvider};
 use drmpack::license::{AxinomLicenseConfig, LicenseProxy};
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
 use drmpack::types::{LatencyMode, Rendition};
@@ -120,17 +120,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .take_output_receiver()
         .expect("Failed to claim direct output receiver");
 
-    let mut key_configs: Vec<AxinomKeyConfig> = session
-        .key_set()
-        .all_keys()
-        .map(AxinomKeyConfig::from)
-        .collect();
-    key_configs.sort_by(|a, b| {
-        a.kid
-            .cmp(&b.kid)
-            .then_with(|| b.iv.is_some().cmp(&a.iv.is_some()))
-    });
-    key_configs.dedup_by(|a, b| a.kid == b.kid);
+    let key_configs = session.key_set().to_axinom_key_configs();
 
     println!("Axinom PackagingSession initialized successfully.");
     println!("Ephemeral Staging: {}", session.output_dir().display());
@@ -145,7 +135,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let token = generate_axinom_jwt(&com_key_id, &com_key, &key_configs)?;
+    let token = session
+        .key_set()
+        .generate_axinom_jwt(&com_key_id, &com_key)?;
 
     // 3. Initialize LicenseProxy for server-side DRM license and certificate handling
     let license_config = AxinomLicenseConfig::from_env().unwrap_or_default();
