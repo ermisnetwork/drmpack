@@ -1,21 +1,31 @@
 use crate::types::{ArtifactKind, EncryptionScheme, PackagedArtifact};
 use bytes::Bytes;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
+use std::time::{Duration, SystemTime};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 const MAX_EMITTED_HISTORY: usize = 5000;
+const WATCHDOG_INTERVAL_MS: u64 = 1500;
+
+struct ManifestMeta {
+    mtime: Option<SystemTime>,
+    size: u64,
+    data: Bytes,
+    hls_refs: HashSet<String>,
+}
 
 #[derive(Default)]
 struct HarvesterState {
     emitted_segments: HashMap<EncryptionScheme, HashSet<String>>,
     emitted_order: std::collections::VecDeque<(EncryptionScheme, String)>,
-    manifest_cache: HashMap<(EncryptionScheme, String), Bytes>,
+    manifest_cache: HashMap<(EncryptionScheme, String), ManifestMeta>,
     max_segments: HashMap<EncryptionScheme, u64>,
+    watched_dirs: HashSet<PathBuf>,
 }
 
 impl HarvesterState {
@@ -106,8 +116,12 @@ pub fn parse_segment_template_duration(xml: &str) -> Option<f64> {
     let end_idx = template_slice.find('>')?;
     let tag = &template_slice[..end_idx];
 
-    let timescale = extract_xml_attribute(tag, "timescale")?.parse::<u64>().ok()?;
-    let duration = extract_xml_attribute(tag, "duration")?.parse::<u64>().ok()?;
+    let timescale = extract_xml_attribute(tag, "timescale")?
+        .parse::<u64>()
+        .ok()?;
+    let duration = extract_xml_attribute(tag, "duration")?
+        .parse::<u64>()
+        .ok()?;
     if timescale > 0 && duration > 0 {
         Some(duration as f64 / timescale as f64)
     } else {
@@ -252,6 +266,25 @@ fn is_valid_hls_manifest(text: &str) -> bool {
     }
 }
 
+/// Extract all segment and init-segment URIs referenced by an HLS manifest.
+fn extract_hls_segment_refs(text: &str) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.starts_with('#') {
+            refs.insert(trimmed.to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("#EXT-X-MAP:") {
+            if let Some(uri) = extract_xml_attribute(rest, "URI") {
+                refs.insert(uri.to_string());
+            }
+        }
+    }
+    refs
+}
+
 async fn harvest_target(
     dir: &Path,
     scheme: EncryptionScheme,
@@ -299,6 +332,24 @@ async fn harvest_target(
     let mut hls_segments: HashSet<String> = HashSet::new();
 
     for (path, file_name) in manifests {
+        // Metadata guard: skip reading file if mtime and size unchanged
+        let meta = match tokio::fs::metadata(&path).await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mtime = meta.modified().ok();
+        let file_size = meta.len();
+        let cache_key = (scheme, file_name.clone());
+        if !is_final {
+            if let Some(cached) = state.manifest_cache.get(&cache_key) {
+                if cached.mtime == mtime && cached.size == file_size && mtime.is_some() {
+                    // Manifest unchanged — reuse cached hls_refs directly
+                    hls_segments.extend(cached.hls_refs.iter().cloned());
+                    continue;
+                }
+            }
+        }
+
         if let Ok(bytes) = tokio::fs::read(&path).await {
             let (is_valid, text_opt) = if file_name.ends_with(".mpd") {
                 (
@@ -316,28 +367,14 @@ async fn harvest_target(
             };
 
             if is_valid {
+                let mut refs = HashSet::new();
                 if let Some(text) = text_opt {
                     if file_name.ends_with(".m3u8") {
-                        for line in text.lines() {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
-                            if !trimmed.starts_with('#') {
-                                hls_segments.insert(trimmed.to_string());
-                            } else if let Some(rest) = trimmed.strip_prefix("#EXT-X-MAP:") {
-                                // Extract URI="..." from init map tag
-                                if let Some(start) = rest.find("URI=\"") {
-                                    let after = &rest[start + 5..];
-                                    if let Some(end) = after.find('"') {
-                                        hls_segments.insert(after[..end].to_string());
-                                    }
-                                }
-                            }
-                        }
+                        refs = extract_hls_segment_refs(text);
+                        hls_segments.extend(refs.iter().cloned());
                     }
                 }
-                valid_manifests.push((path, file_name, bytes));
+                valid_manifests.push((path, file_name, bytes, mtime, file_size, refs));
             }
         }
     }
@@ -412,7 +449,7 @@ async fn harvest_target(
     }
 
     valid_manifests.sort_by(|a, b| a.1.cmp(&b.1));
-    for (path, file_name, bytes) in &valid_manifests {
+    for (path, file_name, bytes, mtime, file_size, hls_refs) in &valid_manifests {
         let mut data_bytes = bytes.clone();
         if file_name.ends_with(".mpd") {
             if let Ok(text) = std::str::from_utf8(&data_bytes) {
@@ -426,9 +463,22 @@ async fn harvest_target(
 
         let key = (scheme, file_name.clone());
         let data = Bytes::from(data_bytes);
-        let changed = state.manifest_cache.get(&key) != Some(&data);
+        let changed = state
+            .manifest_cache
+            .get(&key)
+            .map(|cached| cached.data != data)
+            .unwrap_or(true);
+        // Always update metadata so mtime/size stay fresh (fixes stale cache loop)
+        state.manifest_cache.insert(
+            key,
+            ManifestMeta {
+                mtime: *mtime,
+                size: *file_size,
+                data: data.clone(),
+                hls_refs: hls_refs.clone(),
+            },
+        );
         if changed {
-            state.manifest_cache.insert(key, data.clone());
             let artifact = PackagedArtifact {
                 filename: file_name.clone(),
                 data,
@@ -448,9 +498,26 @@ async fn harvest_target(
 }
 
 pub struct Harvester {
-    notify: Arc<Notify>,
     shutdown_token: CancellationToken,
     join_handle: Option<JoinHandle<()>>,
+}
+
+/// Try to lazily register directories with the watcher when they first appear.
+/// Marks dir as attempted even on failure to avoid spamming warnings.
+fn try_register_watches(
+    watcher: &mut RecommendedWatcher,
+    targets: &[(PathBuf, EncryptionScheme)],
+    watched_dirs: &mut HashSet<PathBuf>,
+) {
+    for (dir, _) in targets {
+        if dir.exists() && !watched_dirs.contains(dir) {
+            if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
+                warn!(?dir, error = %e, "ArtifactHarvester: failed to register directory watch, relying on watchdog");
+            }
+            // Mark as attempted regardless — watchdog timer covers this dir
+            watched_dirs.insert(dir.clone());
+        }
+    }
 }
 
 impl Harvester {
@@ -458,34 +525,48 @@ impl Harvester {
         targets: Vec<(PathBuf, EncryptionScheme)>,
         tx: mpsc::Sender<PackagedArtifact>,
     ) -> Self {
-        let notify = Arc::new(Notify::new());
-        let notify_clone = Arc::clone(&notify);
         let shutdown_token = CancellationToken::new();
         let loop_shutdown = shutdown_token.clone();
 
+        // Create filesystem watcher bridged to Tokio via unbounded channel.
+        // If creation fails, fall back to watchdog-only mode.
+        let (fs_tx, mut fs_rx) = mpsc::unbounded_channel();
+        let watcher = RecommendedWatcher::new(
+            move |res| {
+                let _ = fs_tx.send(res);
+            },
+            notify::Config::default(),
+        )
+        .inspect_err(|e| {
+            warn!(error = %e, "ArtifactHarvester: failed to create watcher, falling back to watchdog-only mode");
+        })
+        .ok();
+
         let join_handle = tokio::spawn(async move {
             let mut state = HarvesterState::default();
-            let mut ticker = tokio::time::interval(Duration::from_millis(200));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut watcher = watcher;
+            let mut watchdog = tokio::time::interval(Duration::from_millis(WATCHDOG_INTERVAL_MS));
+            watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
+                // Lazy watch registration: register dirs as they appear
+                if let Some(ref mut w) = watcher {
+                    try_register_watches(w, &targets, &mut state.watched_dirs);
+                }
+
                 tokio::select! {
-                    _ = loop_shutdown.cancelled() => {
-                        break;
-                    }
-                    _ = notify_clone.notified() => {
-                        for (dir, scheme) in &targets {
-                            if harvest_target(dir, *scheme, &tx, &mut state, false).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    _ = ticker.tick() => {
-                        for (dir, scheme) in &targets {
-                            if harvest_target(dir, *scheme, &tx, &mut state, false).await.is_err() {
-                                return;
-                            }
-                        }
+                    _ = loop_shutdown.cancelled() => break,
+                    Some(_) = fs_rx.recv() => {}  // kernel event wake-up
+                    _ = watchdog.tick() => {}       // watchdog safety net
+                }
+
+                // Single reconciliation pass — shared by all wake-up sources
+                for (dir, scheme) in &targets {
+                    if harvest_target(dir, *scheme, &tx, &mut state, false)
+                        .await
+                        .is_err()
+                    {
+                        return;
                     }
                 }
             }
@@ -497,14 +578,9 @@ impl Harvester {
         });
 
         Self {
-            notify,
             shutdown_token,
             join_handle: Some(join_handle),
         }
-    }
-
-    pub fn ping(&self) {
-        self.notify.notify_one();
     }
 
     pub fn cancel(&mut self) {
@@ -840,8 +916,7 @@ mod tests {
 
         let total_emitted: usize = state.emitted_segments.values().map(|s| s.len()).sum();
         assert_eq!(
-            total_emitted,
-            MAX_EMITTED_HISTORY,
+            total_emitted, MAX_EMITTED_HISTORY,
             "emitted_segments must be bounded to MAX_EMITTED_HISTORY"
         );
         assert_eq!(
@@ -961,10 +1036,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_harvest_target_dash_only_no_early_segment_read() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "drmpack_dash_only_test_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("drmpack_dash_only_test_{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
 
         // Write a valid DASH MPD with SegmentTemplate containing rep_id "video_720p"
@@ -978,7 +1051,9 @@ mod tests {
   </AdaptationSet>
  </Period>
 </MPD>"#;
-        tokio::fs::write(temp_dir.join("live.mpd"), mpd).await.unwrap();
+        tokio::fs::write(temp_dir.join("live.mpd"), mpd)
+            .await
+            .unwrap();
 
         // Write a complete segment on disk
         let mut seg_data = Vec::new();
@@ -1005,7 +1080,10 @@ mod tests {
             "DASH-only: segment must NOT be emitted without HLS readiness signal; got {:?}",
             emitted
         );
-        assert!(seg_path.exists(), "Segment must NOT be unlinked without HLS signal");
+        assert!(
+            seg_path.exists(),
+            "Segment must NOT be unlinked without HLS signal"
+        );
 
         // Final harvest: segment SHOULD be emitted (is_final overrides)
         let res = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, true).await;
@@ -1035,10 +1113,8 @@ mod tests {
     #[tokio::test]
     #[ignore] // Run with: cargo test -- test_harvest_performance --ignored --nocapture
     async fn test_harvest_performance_n_segments() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "drmpack_perf_bench_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("drmpack_perf_bench_{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
 
         let total_segments = 100;
@@ -1095,4 +1171,3 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }
-

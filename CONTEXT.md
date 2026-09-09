@@ -162,6 +162,18 @@ _Avoid_: File type, asset type, item kind
 The synchronization invariant guaranteeing that a media segment is only emitted to callers after GPAC has fully flushed the segment and referenced it in the manifest. The HLS manifest is the canonical readiness signal; DASH MPD uses `SegmentTemplate` patterns that are present from session start and cannot signal individual segment completion. Eliminates partial-file read races.
 _Avoid_: File polling, file stability check, timer delay
 
+**ArtifactHarvester**:
+The asynchronous background subsystem that monitors the Storage Staging Directory for completed segments and updated manifests, emitting them as PackagedArtifact values through the direct output channel. Uses kernel filesystem events (`inotify`/`FSEvents`) as the primary detection mechanism with a relaxed watchdog timer as safety net (ADR-0016).
+_Avoid_: File watcher, polling loop, segment scanner
+
+**HarvesterCadence**:
+The detection and scheduling strategy governing how the ArtifactHarvester observes the staging directory — kernel event-driven (sub-millisecond, primary) or watchdog timer fallback (1500ms, safety net).
+_Avoid_: Polling interval, scan rate, timer frequency
+
+**Metadata Guarding**:
+The optimization where manifest files are checked via filesystem metadata (`mtime` and `size`) before reading bytes into memory. Unchanged manifests are skipped entirely, eliminating redundant heap allocations and string parsing.
+_Avoid_: Content diffing, hash check, file fingerprint
+
 **Ephemeral Staging**:
 The lifecycle model where intermediate packaging files in the Storage Staging Directory are unlinked immediately after ingestion into memory buffers, minimizing filesystem footprint and disk write amplification.
 _Avoid_: Scratch directory, temporary caching, permanent staging

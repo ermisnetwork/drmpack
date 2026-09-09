@@ -1,13 +1,15 @@
 pub mod cluster;
 pub use cluster::{Representation, RepresentationCluster};
+pub mod harvester;
+use harvester::Harvester;
 
 use crate::error::{
     DrmpackError, PackagingOperation, PackagingSessionFailure, RepresentationFailure, Result,
 };
 use crate::key::{KeyPolicyEngine, KeyProvider, KeySet};
 use crate::types::{
-    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, Rendition,
-    TrackType,
+    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, PackagedArtifact,
+    Rendition, TrackType,
 };
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
@@ -25,14 +27,15 @@ use uuid::Uuid;
 const DEFAULT_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WATCHDOG_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Default shared memory path for Ramdisk output.
+pub const DEFAULT_SEGMENT_DURATION: f64 = 2.0;
+pub const DEFAULT_CHUNK_DURATION: f64 = 0.2;
+pub const MIN_SEGMENT_DURATION: f64 = 0.5;
+pub const MAX_SEGMENT_DURATION: f64 = 30.0;
+pub use crate::gpac::process::DEFAULT_TIME_SHIFT_BUFFER;
+
+/// Default storage staging directory for packaging output.
 fn default_output_dir(content_id: &str) -> PathBuf {
-    let parent = if Path::new("/dev/shm").is_dir() {
-        PathBuf::from("/dev/shm")
-    } else {
-        std::env::temp_dir()
-    };
-    parent.join(format!("drmpack_{content_id}_{}", Uuid::new_v4()))
+    std::env::temp_dir().join(format!("drmpack_{content_id}_{}", Uuid::new_v4()))
 }
 
 /// Configuration for creating a `PackagingSession`.
@@ -46,6 +49,8 @@ pub struct PackagingSessionConfig {
     pub latency_mode: LatencyMode,
     pub segment_duration: f64,
     pub chunk_duration: f64,
+    pub availability_time_offset: Option<f64>,
+    pub time_shift_buffer: Duration,
     pub output_dir: PathBuf,
     pub is_custom_output_dir: bool,
     pub preserve_output: bool,
@@ -68,11 +73,13 @@ impl PackagingSessionConfig {
             preserve_output: false,
             content_id: cid,
             renditions: Vec::new(),
-            encryption_scheme: EncryptionScheme::Cenc,
+            encryption_scheme: EncryptionScheme::Cbcs,
             drm_systems: Vec::new(),
-            latency_mode: LatencyMode::LowLatency,
-            segment_duration: 2.0,
-            chunk_duration: 0.2,
+            latency_mode: LatencyMode::Standard,
+            segment_duration: DEFAULT_SEGMENT_DURATION,
+            chunk_duration: DEFAULT_CHUNK_DURATION,
+            availability_time_offset: None,
+            time_shift_buffer: DEFAULT_TIME_SHIFT_BUFFER,
             control_dir: None,
             session_timeout: None,
             finalization_timeout: DEFAULT_FINALIZATION_TIMEOUT,
@@ -83,50 +90,35 @@ impl PackagingSessionConfig {
 
     /// Preconfigured preset for standard live CENC streaming (Widevine + PlayReady, LowLatency).
     pub fn cenc(content_id: impl Into<String>) -> Self {
-        let cid = content_id.into();
-        Self {
-            output_dir: default_output_dir(&cid),
-            is_custom_output_dir: false,
-            preserve_output: false,
-            content_id: cid,
-            renditions: Vec::new(),
-            encryption_scheme: EncryptionScheme::Cenc,
-            drm_systems: vec![DrmSystem::Widevine, DrmSystem::PlayReady],
-            latency_mode: LatencyMode::LowLatency,
-            segment_duration: 2.0,
-            chunk_duration: 0.2,
-            control_dir: None,
-            session_timeout: None,
-            finalization_timeout: DEFAULT_FINALIZATION_TIMEOUT,
-            gpac_bin: None,
-            key_mapping_policy: KeyMappingPolicy::default(),
-        }
+        let mut s = Self::new(content_id);
+        s.encryption_scheme = EncryptionScheme::Cenc;
+        s.drm_systems = vec![DrmSystem::Widevine, DrmSystem::PlayReady];
+        s.latency_mode = LatencyMode::LowLatency;
+        s
+    }
+
+    /// Preconfigured preset for standard live CBCS streaming (FairPlay + Widevine + PlayReady, Standard latency).
+    pub fn cbcs(content_id: impl Into<String>) -> Self {
+        let mut s = Self::new(content_id);
+        s.drm_systems = vec![
+            DrmSystem::FairPlay,
+            DrmSystem::Widevine,
+            DrmSystem::PlayReady,
+        ];
+        s
     }
 
     /// Preconfigured preset for dual-scheme low-latency streaming (CENC + CBCS, Widevine + FairPlay + PlayReady).
     pub fn low_latency_dual(content_id: impl Into<String>) -> Self {
-        let cid = content_id.into();
-        Self {
-            output_dir: default_output_dir(&cid),
-            is_custom_output_dir: false,
-            preserve_output: false,
-            content_id: cid,
-            renditions: Vec::new(),
-            encryption_scheme: EncryptionScheme::Dual,
-            drm_systems: vec![
-                DrmSystem::Widevine,
-                DrmSystem::FairPlay,
-                DrmSystem::PlayReady,
-            ],
-            latency_mode: LatencyMode::LowLatency,
-            segment_duration: 2.0,
-            chunk_duration: 0.2,
-            control_dir: None,
-            session_timeout: None,
-            finalization_timeout: DEFAULT_FINALIZATION_TIMEOUT,
-            gpac_bin: None,
-            key_mapping_policy: KeyMappingPolicy::default(),
-        }
+        let mut s = Self::new(content_id);
+        s.encryption_scheme = EncryptionScheme::Dual;
+        s.drm_systems = vec![
+            DrmSystem::Widevine,
+            DrmSystem::FairPlay,
+            DrmSystem::PlayReady,
+        ];
+        s.latency_mode = LatencyMode::LowLatency;
+        s
     }
 
     pub fn with_rendition(mut self, rendition: Rendition) -> Self {
@@ -176,13 +168,38 @@ impl PackagingSessionConfig {
         self
     }
 
+    /// Sets the target duration for media segments in seconds (default: 2.0s).
+    ///
+    /// Must be between 0.5s and 30.0s, and strictly greater than `chunk_duration`.
+    /// Integer durations (e.g. 1.0, 2.0, 4.0, 6.0) aligned with the upstream encoder's
+    /// GOP size are strongly recommended.
     pub fn with_segment_duration(mut self, duration: f64) -> Self {
         self.segment_duration = duration;
         self
     }
 
+    /// Sets the CMAF chunk duration for low-latency streaming in seconds (default: 0.2s).
+    ///
+    /// Must be finite, greater than zero, and strictly less than `segment_duration`.
     pub fn with_chunk_duration(mut self, duration: f64) -> Self {
         self.chunk_duration = duration;
+        self
+    }
+
+    /// Sets an explicit availability time offset (`asto`) for Low-Latency DASH.
+    ///
+    /// When `None` (default), GPAC does not signal `@availabilityTimeOffset` (or uses `asto=0`),
+    /// ensuring standard file-based HTTP origins do not return 404 on live-edge requests.
+    /// When running a true Chunked Transfer Encoding (CTE) streaming origin, set this to
+    /// e.g. `Some(segment_duration - chunk_duration)`.
+    pub fn with_availability_time_offset(mut self, asto: impl Into<Option<f64>>) -> Self {
+        self.availability_time_offset = asto.into();
+        self
+    }
+
+    /// Sets the time-shift buffer (DVR sliding window) duration (default: 60s).
+    pub fn with_time_shift_buffer(mut self, buffer: Duration) -> Self {
+        self.time_shift_buffer = buffer;
         self
     }
 
@@ -195,12 +212,6 @@ impl PackagingSessionConfig {
     /// Preserve output files upon Drop, preventing automatic deletion of auto-allocated directories.
     pub fn preserve_output(mut self) -> Self {
         self.preserve_output = true;
-        self
-    }
-
-    /// Explicitly control output preservation upon Drop.
-    pub fn with_preserve_output(mut self, preserve: bool) -> Self {
-        self.preserve_output = preserve;
         self
     }
 
@@ -332,6 +343,8 @@ pub struct PackagingSession {
     cancellation_token: CancellationToken,
     watchdog_handle: Option<JoinHandle<()>>,
     preserve_output: bool,
+    harvester: Option<Harvester>,
+    output_receiver_claimed: bool,
 }
 
 impl std::fmt::Debug for PackagingSession {
@@ -398,6 +411,8 @@ impl PackagingSession {
             cancellation_token,
             watchdog_handle,
             preserve_output,
+            harvester: None,
+            output_receiver_claimed: false,
         })
     }
 
@@ -407,25 +422,51 @@ impl PackagingSession {
         }
     }
 
+    /// Retrieve the asynchronous output channel receiver yielding packaged artifacts.
+    ///
+    /// Single-ownership semantics: returns `Some(receiver)` on first invocation,
+    /// and `None` on all subsequent invocations.
+    /// When claimed, activates an asynchronous background harvester that monitors
+    /// the session staging directory, emits artifacts (init segments, media segments,
+    /// and manifests) into memory, and immediately unlinks consumed segment files
+    /// (ephemeral staging). Zero overhead if not claimed.
+    pub fn take_output_receiver(&mut self) -> Option<mpsc::Receiver<PackagedArtifact>> {
+        if self.output_receiver_claimed || self.is_closed() {
+            return None;
+        }
+        self.output_receiver_claimed = true;
+
+        let (tx, rx) = mpsc::channel(1024);
+        let is_dual = self.config.encryption_scheme == EncryptionScheme::Dual;
+        let targets = if is_dual {
+            vec![
+                (self.config.output_dir.join("cenc"), EncryptionScheme::Cenc),
+                (self.config.output_dir.join("cbcs"), EncryptionScheme::Cbcs),
+            ]
+        } else {
+            vec![(
+                self.config.output_dir.clone(),
+                self.config.encryption_scheme,
+            )]
+        };
+
+        let harvester = Harvester::spawn(targets, tx);
+        self.harvester = Some(harvester);
+        Some(rx)
+    }
+
     /// Mark output files to be preserved upon Drop, preventing automatic cleanup.
     pub fn preserve_output(&mut self) {
         self.preserve_output = true;
     }
 
     /// Push raw media bytes or chunk to every active Representation.
-    /// Primary push API accepting `impl Into<Bytes>` (e.g. `Bytes`, `Vec<u8>`, `&'static [u8]`).
-    #[instrument(skip(self, bytes))]
-    pub async fn push(&mut self, bytes: impl Into<Bytes>) -> Result<()> {
-        let data: Bytes = bytes.into();
-        let is_media = data.windows(4).any(|w| w == b"moof");
-        self.push_data(&data, is_media).await
-    }
-
-    /// Push raw media bytes to every active Representation.
-    #[instrument(skip(self, bytes), fields(len = bytes.len()))]
-    pub async fn push_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        let is_media = bytes.windows(4).any(|w| w == b"moof");
-        self.push_data(bytes, is_media).await
+    /// Accepts `&[u8]`, `Vec<u8>`, `Bytes`, etc. with zero heap allocations.
+    #[instrument(skip(self, bytes), fields(len = bytes.as_ref().len()))]
+    pub async fn push(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
+        let slice = bytes.as_ref();
+        let is_media = slice.windows(4).any(|w| w == b"moof");
+        self.push_data(slice, is_media).await
     }
 
     /// Stream media chunks from an async channel to stdin until EOF, returning total chunk count.
@@ -529,6 +570,7 @@ impl PackagingSession {
                 let err = lifecycle.failure_error();
                 drop(lifecycle);
                 let _ = self.cleanup_control_dir().await;
+                self.is_terminal.store(true, Ordering::Release);
                 return Err(err);
             }
             SessionState::Active => {
@@ -561,10 +603,17 @@ impl PackagingSession {
             }
         }
 
+        if let Some(harvester) = self.harvester.take() {
+            harvester.finish_and_flush().await;
+        }
+
         let control_cleanup = self.cleanup_control_dir().await.err();
 
         if failures.is_empty() && control_cleanup.is_none() {
             lifecycle.state = SessionState::Closed;
+            if !self.output_receiver_claimed {
+                self.preserve_output = true;
+            }
             self.is_terminal.store(true, Ordering::Release);
             info!("PackagingSession closed successfully");
             Ok(())
@@ -715,11 +764,6 @@ impl PackagingSession {
         self.cluster.representations()
     }
 
-    /// Access the underlying RepresentationCluster.
-    pub fn cluster(&self) -> &Arc<RepresentationCluster> {
-        &self.cluster
-    }
-
     fn stop_watchdog(&self) {
         self.cancellation_token.cancel();
     }
@@ -784,6 +828,9 @@ impl PackagingSession {
 impl Drop for PackagingSession {
     fn drop(&mut self) {
         self.cancellation_token.cancel();
+        if let Some(mut harvester) = self.harvester.take() {
+            harvester.cancel();
+        }
         if let Some(handle) = &self.watchdog_handle {
             handle.abort();
         }
@@ -814,19 +861,54 @@ fn validate_config(config: &PackagingSessionConfig) -> Result<()> {
             "PackagingSession requires at least one Rendition".into(),
         ));
     }
-    if !config.segment_duration.is_finite() || config.segment_duration <= 0.0 {
-        return Err(DrmpackError::InvalidConfig(
-            "segment_duration must be finite and greater than zero".into(),
-        ));
+    if !config.segment_duration.is_finite()
+        || config.segment_duration < MIN_SEGMENT_DURATION
+        || config.segment_duration > MAX_SEGMENT_DURATION
+    {
+        return Err(DrmpackError::InvalidConfig(format!(
+            "segment_duration must be between {MIN_SEGMENT_DURATION}s and {MAX_SEGMENT_DURATION}s (got {})",
+            config.segment_duration
+        )));
     }
     if !config.chunk_duration.is_finite() || config.chunk_duration <= 0.0 {
         return Err(DrmpackError::InvalidConfig(
             "chunk_duration must be finite and greater than zero".into(),
         ));
     }
+    if config.chunk_duration >= config.segment_duration {
+        return Err(DrmpackError::InvalidConfig(format!(
+            "chunk_duration ({:.2}s) must be strictly less than segment_duration ({:.2}s)",
+            config.chunk_duration, config.segment_duration
+        )));
+    }
+    if let Some(asto) = config.availability_time_offset {
+        if !asto.is_finite() || asto < 0.0 {
+            return Err(DrmpackError::InvalidConfig(
+                "availability_time_offset must be finite and non-negative".into(),
+            ));
+        }
+        if asto >= config.segment_duration {
+            return Err(DrmpackError::InvalidConfig(format!(
+                "availability_time_offset ({:.2}s) must be strictly less than segment_duration ({:.2}s)",
+                asto, config.segment_duration
+            )));
+        }
+    }
+    if (config.segment_duration.fract()).abs() > 1e-6 {
+        warn!(
+            duration = config.segment_duration,
+            "Non-integer segment_duration ({:.2}s); verify that encoder GOP matches to prevent uneven pacing or missing keyframes at segment boundaries",
+            config.segment_duration
+        );
+    }
     if config.finalization_timeout.is_zero() {
         return Err(DrmpackError::InvalidConfig(
             "finalization_timeout must be greater than zero".into(),
+        ));
+    }
+    if config.time_shift_buffer.is_zero() {
+        return Err(DrmpackError::InvalidConfig(
+            "time_shift_buffer must be greater than zero".into(),
         ));
     }
 
@@ -1331,9 +1413,9 @@ mod tests {
         let DrmpackError::PackagingSession(failure) = first_error else {
             panic!("close must return structured packaging failure");
         };
-        assert_eq!(failure.cenc.len(), 1);
-        assert!(failure.cbcs.is_empty());
-        assert_eq!(failure.cenc[0].operation, PackagingOperation::Close);
+        assert_eq!(failure.cbcs.len(), 1);
+        assert!(failure.cenc.is_empty());
+        assert_eq!(failure.cbcs[0].operation, PackagingOperation::Close);
 
         let later_error = session.check_status().await.unwrap_err();
         assert!(matches!(later_error, DrmpackError::PackagingSession(_)));
@@ -1374,7 +1456,7 @@ mod tests {
             .await
             .unwrap();
 
-        let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cenc.xml"))
+        let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cbcs.xml"))
             .await
             .unwrap();
         assert!(drm_xml.contains(r#"<CrypTrack trackID="1" IsEncrypted="0"/>"#));
@@ -1396,7 +1478,7 @@ mod tests {
         // provider() only supplies Video HD key. No Audio key is provided.
         let mut session = PackagingSession::create(config, &provider()).await.unwrap();
 
-        let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cenc.xml"))
+        let drm_xml = tokio::fs::read_to_string(session.control_dir_path().join("cbcs.xml"))
             .await
             .unwrap();
         // Track 1 is encrypted with video key
@@ -1574,7 +1656,7 @@ mod tests {
             panic!("Expected PackagingSession failure from watchdog");
         };
         assert!(failure
-            .cenc
+            .cbcs
             .iter()
             .any(|f| f.operation == PackagingOperation::Watchdog));
         let _ = session.cleanup().await;
@@ -1600,7 +1682,7 @@ mod tests {
             panic!("Expected structured PackagingSession failure on close after watchdog timeout");
         };
         assert!(failure
-            .cenc
+            .cbcs
             .iter()
             .any(|f| f.operation == PackagingOperation::Watchdog));
         assert!(session.is_closed(), "Session must be closed");
@@ -1716,6 +1798,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_config_rejects_invalid_segment_duration() {
+        let r = rendition();
+        let base = PackagingSessionConfig::new("test").with_rendition(r);
+
+        // Less than minimum (0.5s)
+        let config = base.clone().with_segment_duration(0.4);
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("segment_duration must be between 0.5s and 30s"))
+        );
+
+        // Greater than maximum (30s)
+        let config = base.clone().with_segment_duration(30.1);
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("segment_duration must be between 0.5s and 30s"))
+        );
+
+        // NaN
+        let config = base.clone().with_segment_duration(f64::NAN);
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("segment_duration must be between 0.5s and 30s"))
+        );
+
+        // Valid boundaries: 0.5s and 30.0s
+        let config = base
+            .clone()
+            .with_segment_duration(0.5)
+            .with_chunk_duration(0.1);
+        assert!(super::validate_config(&config).is_ok());
+
+        let config = base.clone().with_segment_duration(30.0);
+        assert!(super::validate_config(&config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_rejects_invalid_chunk_duration() {
+        let r = rendition();
+        let base = PackagingSessionConfig::new("test").with_rendition(r);
+
+        // chunk_duration == segment_duration
+        let config = base
+            .clone()
+            .with_segment_duration(2.0)
+            .with_chunk_duration(2.0);
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("chunk_duration (2.00s) must be strictly less than segment_duration (2.00s)"))
+        );
+
+        // chunk_duration > segment_duration
+        let config = base
+            .clone()
+            .with_segment_duration(2.0)
+            .with_chunk_duration(2.5);
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("must be strictly less than segment_duration"))
+        );
+
+        // non-positive chunk_duration
+        let config = base.clone().with_chunk_duration(0.0);
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("chunk_duration must be finite and greater than zero"))
+        );
+
+        // negative chunk_duration
+        let config = base.clone().with_chunk_duration(-0.2);
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("chunk_duration must be finite and greater than zero"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_availability_time_offset() {
+        let r = rendition();
+        let base = PackagingSessionConfig::new("test")
+            .with_rendition(r)
+            .with_segment_duration(2.0);
+
+        // Valid asto
+        let config = base.clone().with_availability_time_offset(Some(1.8));
+        assert!(super::validate_config(&config).is_ok());
+
+        let config = base.clone().with_availability_time_offset(Some(0.0));
+        assert!(super::validate_config(&config).is_ok());
+
+        // asto >= segment_duration
+        let config = base.clone().with_availability_time_offset(Some(2.0));
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("must be strictly less than segment_duration"))
+        );
+
+        // negative asto
+        let config = base.clone().with_availability_time_offset(Some(-0.5));
+        let err = super::validate_config(&config).unwrap_err();
+        assert!(
+            matches!(err, DrmpackError::InvalidConfig(msg) if msg.contains("must be finite and non-negative"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_multiple_renditions_same_tier_no_id_collision() {
         let output_dir = std::env::temp_dir().join(format!("drmpack_test_{}", Uuid::new_v4()));
         let r1 = Rendition::video(QualityTier::hd());
@@ -1784,7 +1972,7 @@ mod tests {
     async fn test_verify_hls_endlist_missing_endlist_fails() {
         let dir = std::env::temp_dir().join(format!("drmpack_missing_endlist_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        let media_path = dir.join("live_1.m3u8");
+        let media_path = dir.join("video_720p.m3u8");
         let initial = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment1.m4s\n";
         tokio::fs::write(&media_path, initial).await.unwrap();
 
@@ -1800,7 +1988,7 @@ mod tests {
     async fn test_verify_hls_endlist_present_succeeds() {
         let dir = std::env::temp_dir().join(format!("drmpack_valid_endlist_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        let media_path = dir.join("live_1.m3u8");
+        let media_path = dir.join("video_720p.m3u8");
         let initial =
             "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment1.m4s\n#EXT-X-ENDLIST\n";
         tokio::fs::write(&media_path, initial).await.unwrap();
@@ -1854,15 +2042,15 @@ mod tests {
 
         assert!(!session.is_alive(), "Session must not be alive after crash");
 
-        // push_bytes must fail immediately with PackagingSession failure containing PackagingOperation::Supervisor
-        let res = session.push_bytes(b"dummy fmp4 data").await;
-        assert!(res.is_err(), "push_bytes must fail after crash");
+        // push must fail immediately with PackagingSession failure containing PackagingOperation::Supervisor
+        let res = session.push(b"dummy fmp4 data").await;
+        assert!(res.is_err(), "push must fail after crash");
         let DrmpackError::PackagingSession(failure) = res.unwrap_err() else {
             panic!("Expected PackagingSession structured failure");
         };
 
         assert!(failure
-            .cenc
+            .cbcs
             .iter()
             .any(|f| f.operation == PackagingOperation::Supervisor));
         let _ = session.cleanup().await;
@@ -1963,7 +2151,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("drmpack_ro_dir_{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        let media_path = dir.join("live_1.m3u8");
+        let media_path = dir.join("video_720p.m3u8");
         tokio::fs::write(
             &media_path,
             "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg1.m4s\n#EXT-X-ENDLIST\n",
@@ -1998,6 +2186,22 @@ mod tests {
         assert_eq!(cenc_cfg.latency_mode, LatencyMode::LowLatency);
         assert_eq!(cenc_cfg.segment_duration, 2.0);
         assert_eq!(cenc_cfg.chunk_duration, 0.2);
+
+        let cbcs_cfg =
+            PackagingSessionConfig::cbcs("cbcs_id").with_rendition(Rendition::video_hd());
+        assert_eq!(cbcs_cfg.content_id, "cbcs_id");
+        assert_eq!(cbcs_cfg.encryption_scheme, EncryptionScheme::Cbcs);
+        assert_eq!(
+            cbcs_cfg.drm_systems,
+            vec![
+                DrmSystem::FairPlay,
+                DrmSystem::Widevine,
+                DrmSystem::PlayReady,
+            ]
+        );
+        assert_eq!(cbcs_cfg.latency_mode, LatencyMode::Standard);
+        assert_eq!(cbcs_cfg.segment_duration, 2.0);
+        assert_eq!(cbcs_cfg.chunk_duration, 0.2);
 
         let dual_cfg = PackagingSessionConfig::low_latency_dual("dual_id")
             .with_rendition(Rendition::video_hd());
@@ -2036,11 +2240,122 @@ mod tests {
         assert_eq!(custom_cfg.renditions[2].effective_container_track_id(2), 3);
     }
 
+    #[test]
+    fn test_default_output_dir_uses_temp_dir() {
+        let config = PackagingSessionConfig::new("test_content");
+        assert!(
+            config.output_dir.starts_with(std::env::temp_dir()),
+            "default_output_dir must use std::env::temp_dir(); got {:?}",
+            config.output_dir
+        );
+        assert_eq!(config.time_shift_buffer, Duration::from_secs(60));
+
+        let custom_tsb =
+            PackagingSessionConfig::new("test").with_time_shift_buffer(Duration::from_secs(120));
+        assert_eq!(custom_tsb.time_shift_buffer, Duration::from_secs(120));
+
+        let custom_dir = PackagingSessionConfig::new("test").with_output_dir("/custom/path");
+        assert_eq!(custom_dir.output_dir, PathBuf::from("/custom/path"));
+        assert!(custom_dir.is_custom_output_dir);
+    }
+
     #[tokio::test]
-    async fn test_ramdisk_lifecycle_close_preserves_and_drop_deletes() {
-        let config = PackagingSessionConfig::cenc("lifecycle_test")
+    async fn test_take_output_receiver_single_claim() {
+        let mock_bin = std::env::temp_dir().join(format!("mock_gpac_{}.sh", Uuid::new_v4()));
+        std::fs::write(&mock_bin, "#!/bin/sh\ncat > /dev/null\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PackagingSessionConfig::cenc("single_claim_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_gpac_bin(mock_bin.to_str().unwrap());
+
+        let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+            .await
+            .unwrap();
+
+        let first_claim = session.take_output_receiver();
+        assert!(
+            first_claim.is_some(),
+            "First call to take_output_receiver must return Some(Receiver)"
+        );
+
+        let second_claim = session.take_output_receiver();
+        assert!(
+            second_claim.is_none(),
+            "Second call to take_output_receiver must return None (single-ownership)"
+        );
+
+        session.close().await.unwrap();
+        let _ = tokio::fs::remove_file(&mock_bin).await;
+    }
+
+    #[tokio::test]
+    async fn test_take_output_receiver_closed_session_returns_none() {
+        let mock_bin = std::env::temp_dir().join(format!("mock_gpac_{}.sh", Uuid::new_v4()));
+        std::fs::write(&mock_bin, "#!/bin/sh\ncat > /dev/null\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PackagingSessionConfig::cenc("closed_receiver_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_gpac_bin(mock_bin.to_str().unwrap());
+
+        let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+            .await
+            .unwrap();
+
+        session.close().await.unwrap();
+
+        let claim = session.take_output_receiver();
+        assert!(
+            claim.is_none(),
+            "take_output_receiver on closed session must return None"
+        );
+
+        let _ = tokio::fs::remove_file(&mock_bin).await;
+    }
+
+    #[tokio::test]
+    async fn test_ramdisk_lifecycle_drop_without_close_deletes() {
+        let config = PackagingSessionConfig::cenc("lifecycle_drop_test")
             .with_rendition(Rendition::video_hd().clear())
             .with_gpac_bin("gpac");
+
+        let out_dir;
+        {
+            let session = PackagingSession::create(config, &RawKeyProvider::new())
+                .await
+                .unwrap();
+            out_dir = session.output_dir().to_path_buf();
+            assert!(out_dir.exists(), "Auto-allocated output dir must exist");
+            // PackagingSession dropped here without close()
+        }
+        assert!(
+            !out_dir.exists(),
+            "Auto-allocated output dir must be deleted on Drop when not closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ramdisk_lifecycle_close_preserves_output_after_drop() {
+        let mock_bin = std::env::temp_dir().join(format!("mock_gpac_{}.sh", Uuid::new_v4()));
+        std::fs::write(&mock_bin, "#!/bin/sh\ncat > /dev/null\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PackagingSessionConfig::cenc("lifecycle_close_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_gpac_bin(mock_bin.to_str().unwrap());
 
         let out_dir;
         {
@@ -2050,18 +2365,57 @@ mod tests {
             out_dir = session.output_dir().to_path_buf();
             assert!(out_dir.exists(), "Auto-allocated output dir must exist");
 
-            // close() flushes/finalizes GPAC but MUST NOT delete output dir
-            let _ = session.close().await;
+            session.close().await.unwrap();
             assert!(
                 out_dir.exists(),
                 "Output dir must be preserved after close()"
             );
         }
-        // PackagingSession dropped here without preserve_output()
+        // PackagingSession dropped here after successful close()
+        // If close() did NOT set self.preserve_output = true, Drop will delete out_dir!
+        assert!(
+            out_dir.exists(),
+            "Auto-allocated output dir must be preserved after successful close() even after Drop"
+        );
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
+        let _ = tokio::fs::remove_file(&mock_bin).await;
+    }
+
+    #[tokio::test]
+    async fn test_ramdisk_lifecycle_failed_close_deletes_output_dir() {
+        let mock_bin = std::env::temp_dir().join(format!("mock_gpac_fail_{}.sh", Uuid::new_v4()));
+        std::fs::write(&mock_bin, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PackagingSessionConfig::cenc("lifecycle_close_fail_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_gpac_bin(mock_bin.to_str().unwrap());
+
+        let out_dir;
+        {
+            let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+                .await
+                .unwrap();
+            out_dir = session.output_dir().to_path_buf();
+            assert!(out_dir.exists(), "Auto-allocated output dir must exist");
+
+            let res = session.close().await;
+            assert!(
+                res.is_err(),
+                "Session close must fail when GPAC exits with error"
+            );
+        }
+        // PackagingSession dropped here after FAILED close()
+        // Because close() failed, self.preserve_output remained false, so Drop deletes out_dir!
         assert!(
             !out_dir.exists(),
-            "Auto-allocated output dir must be deleted on Drop"
+            "Auto-allocated output dir must be deleted on Drop after close() failure"
         );
+        let _ = tokio::fs::remove_file(&mock_bin).await;
     }
 
     #[tokio::test]

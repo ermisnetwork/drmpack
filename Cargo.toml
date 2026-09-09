@@ -7,13 +7,10 @@ authors = ["ermis-stream"]
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["widevine", "fairplay", "playready", "cpix", "speke-v2", "axinom", "license-proxy"]
-widevine = []
-fairplay = []
-playready = []
+default = ["cpix", "speke-v2", "axinom", "license-proxy"]
 cpix = ["dep:reqwest", "dep:quick-xml"]
 speke-v2 = ["cpix", "dep:reqwest"]
-axinom = ["speke-v2"]
+axinom = ["speke-v2", "dep:ring", "dep:serde_json"]
 license-proxy = ["dep:reqwest"]
 
 [dependencies]
@@ -23,20 +20,23 @@ tracing = "0.1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 bytes = { version = "1", features = ["serde"] }
-async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 base64 = "0.22"
+notify = "8"
 
 # Optional dependencies for key providers
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
-quick-xml = { version = "0.37", features = ["serialize"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+quick-xml = { version = "0.37", optional = true }
+ring = { version = "0.17", optional = true }
+serde_json = { version = "1.0", optional = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
+serde_json = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 ring = "0.17"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
 
 [[example]]
 name = "inspect_axinom"
@@ -60,6 +60,15 @@ name = "05_license_proxy_service"
 required-features = ["license-proxy"]
 
 [[example]]
-name = "06_e2e_live_playback"
+name = "playback_server"
+
+[[example]]
+name = "06_e2e_live_clearkey"
+
+[[example]]
+name = "07_e2e_live_axinom"
 required-features = ["axinom", "license-proxy"]
+
+[[example]]
+name = "08_in_memory_live_stream"
 
