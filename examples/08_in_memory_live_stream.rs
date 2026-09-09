@@ -129,11 +129,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // NOTE (Production):
-    // Save `session.playback_metadata()` into your database (PostgreSQL/Redis)
-    // so playback API backends can retrieve it by stream_id without scanning storage:
-    // let meta = session.playback_metadata();
-    // db.save_stream_drm(&content_id, &meta).await?;
+    // =========================================================================
+    // PRODUCTION NOTE:
+    // In a real system (e.g. Ermis Stream), the packaging service serializes
+    // `session.playback_metadata()` into PostgreSQL or Redis:
+    //
+    //   let meta = session.playback_metadata();
+    //   db.save_stream_drm(&content_id, &meta.to_json()?).await?;
+    //
+    // For this offline demo, we write `drm_metadata.json` to disk to simulate
+    // that database record so `example 09` can load it automatically without
+    // requiring you to manually pass KIDs or configure an external database.
+    // =========================================================================
+    let meta = session.playback_metadata();
+    if let Ok(json) = meta.to_json_pretty() {
+        let meta_path = dump_path.join("drm_metadata.json");
+        if let Err(e) = std::fs::write(&meta_path, json) {
+            eprintln!(
+                "Warning: failed to write DRM metadata to {}: {e}",
+                meta_path.display()
+            );
+        } else {
+            println!(
+                "DRM Playback Metadata saved (mock DB record for example 09): {}",
+                meta_path.display()
+            );
+        }
+    }
     println!();
     let tracker = LatencyTracker::default();
     // Consumer: log artifacts + dump to disk
