@@ -3,6 +3,7 @@ use crate::key::{ContentKey, KeySet, PsshData};
 use crate::types::{DrmSystem, EncryptionScheme, QualityTier, TrackType};
 use base64::prelude::*;
 use std::fmt::Write;
+use uuid::Uuid;
 
 /// Track encryption configuration for GPAC DRM XML.
 #[derive(Debug, Clone)]
@@ -201,14 +202,28 @@ impl GpacDrmXmlGenerator {
             None => "".to_string(),
         };
 
+        // Apple FairPlay & ISO/IEC 23001-7: Pattern encryption (1:9) applies ONLY to video tracks.
+        // Audio tracks in CBCS must not use pattern encryption (0:0 / whole-block).
         let pattern_attrs = if is_cbcs {
-            r#" crypt_byte_block="1" skip_byte_block="9""#
+            if key.track_type == TrackType::Video {
+                r#" crypt_byte_block="1" skip_byte_block="9""#
+            } else {
+                r#" crypt_byte_block="0" skip_byte_block="0""#
+            }
         } else {
             ""
         };
 
         let iv_size = 16;
-        let first_iv = if let Some(iv) = key.iv {
+        // In CBCS mode, ensure a deterministic 16-byte constant IV is present.
+        // If key.iv is None, derive deterministically from the KID bytes.
+        let effective_iv = if is_cbcs {
+            Some(key.iv.unwrap_or_else(|| *key.kid.as_bytes()))
+        } else {
+            key.iv
+        };
+
+        let first_iv = if let Some(iv) = effective_iv {
             format!(r#" first_IV="0x{}""#, hex_encode(&iv))
         } else {
             "".to_string()
@@ -240,12 +255,8 @@ impl GpacDrmXmlGenerator {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        let _ = write!(s, "{:02x}", b);
-    }
-    s
+fn hex_encode(bytes: &[u8; 16]) -> String {
+    Uuid::from_bytes(*bytes).simple().to_string()
 }
 
 fn build_hls_info(
@@ -279,7 +290,7 @@ fn build_hls_info(
                 continue;
             }
             has_fairplay = true;
-            let skd_uri = if !pssh.data.is_empty() {
+            let mut skd_uri = if !pssh.data.is_empty() {
                 let s = String::from_utf8_lossy(&pssh.data);
                 if s.starts_with("skd://") {
                     s.to_string()
@@ -296,6 +307,12 @@ fn build_hls_info(
             } else {
                 format!("skd://{}", key.kid.0.hyphenated())
             };
+            let uri_suffix = skd_uri.strip_prefix("skd://").unwrap_or(&skd_uri);
+            if !uri_suffix.contains(':') {
+                let iv = key.iv.unwrap_or_else(|| *key.kid.as_bytes());
+                let iv_hex = hex_encode(&iv);
+                skd_uri = format!("{skd_uri}:{iv_hex}");
+            }
             parts.push(format!(
                 r#"URI="{}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#,
                 skd_uri
@@ -306,7 +323,7 @@ fn build_hls_info(
             let part = format!(
                 r#"URI="data:text/plain;base64,{}",KEYFORMAT="urn:uuid:{}",KEYFORMATVERSIONS="1""#,
                 uri,
-                format_uuid(&pssh.system_id)
+                Uuid::from_bytes(pssh.system_id)
             );
             if !parts.contains(&part) {
                 parts.push(part);
@@ -338,17 +355,6 @@ fn build_pssh_box(pssh: &PsshData) -> Result<Vec<u8>> {
     bytes.extend_from_slice(&data_size.to_be_bytes());
     bytes.extend_from_slice(&pssh.data);
     Ok(bytes)
-}
-
-fn format_uuid(bytes: &[u8; 16]) -> String {
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
 }
 
 #[cfg(test)]
@@ -407,22 +413,22 @@ mod tests {
     #[test]
     fn test_gpac_xml_cbcs_pattern_generation() {
         let kid = KeyID::new(Uuid::from_bytes([0x07; 16]));
-        let content_key = ContentKey::new(kid, [0x99; 16], QualityTier::sd(), TrackType::Video);
+        let video_key = ContentKey::new(kid, [0x99; 16], QualityTier::sd(), TrackType::Video);
+        let audio_key = ContentKey::new(kid, [0x88; 16], QualityTier::sd(), TrackType::Audio);
 
         let mut key_set = KeySet::new();
-        key_set.insert_key(content_key);
+        key_set.insert_key(video_key);
+        key_set.insert_key(audio_key);
 
-        let config = GpacDrmConfig::new(EncryptionScheme::Cbcs).with_track(
-            1,
-            TrackType::Video,
-            QualityTier::sd(),
-        );
+        let config = GpacDrmConfig::new(EncryptionScheme::Cbcs)
+            .with_track(1, TrackType::Video, QualityTier::sd())
+            .with_track(2, TrackType::Audio, QualityTier::sd());
 
         let xml = GpacDrmXmlGenerator::generate(&key_set, &config).expect("XML generation failed");
 
         assert!(xml.contains(r#"<GPACDRM type="cbcs">"#));
-        assert!(xml.contains(r#"scheme_type="cbcs""#));
-        assert!(xml.contains(r#"crypt_byte_block="1" skip_byte_block="9""#));
+        assert!(xml.contains(r#"trackID="1" IsEncrypted="1" IV_size="16" scheme_type="cbcs" crypt_byte_block="1" skip_byte_block="9" first_IV="0x07070707070707070707070707070707""#));
+        assert!(xml.contains(r#"trackID="2" IsEncrypted="1" IV_size="16" scheme_type="cbcs" crypt_byte_block="0" skip_byte_block="0" first_IV="0x07070707070707070707070707070707""#));
     }
 
     #[test]
@@ -491,10 +497,11 @@ mod tests {
         // Verify FairPlay does NOT emit an ISO-BMFF PSSH tag
         assert!(!xml.contains(r#"<BS ID128="94ce86fb07ff4f43adb893d2fa968ca2"/>"#));
 
-        // Verify hlsInfo includes FairPlay skd URI as well as Widevine and PlayReady UUIDs
+        // Verify hlsInfo includes FairPlay skd URI with IV as well as Widevine and PlayReady UUIDs
         let expected_fairplay = format!(
-            r#"URI="skd://{}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#,
-            kid_uuid.hyphenated()
+            r#"URI="skd://{}:{}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#,
+            kid_uuid.hyphenated(),
+            hex_encode(kid.as_bytes())
         );
         let expected_widevine = r#"KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed""#;
         let expected_playready = r#"KEYFORMAT="urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95""#;

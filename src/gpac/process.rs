@@ -135,7 +135,7 @@ impl GpacProcessConfig {
         let spd_ms = (self.segment_duration * DEFAULT_SPD_SEGMENT_FACTOR * 1000.0).round() as u64;
         let tsb_secs = self.time_shift_buffer.as_secs().max(1);
         let mut dasher_opt = format!(
-            "{}:dual:profile=live:dmode=dynauto:segdur={}:spd={}:tsb={}:utcs=inband:pssh=mv:template=$RepresentationID$_$Init=init$$Number$",
+            "{}:dual:profile=live:dmode=dynauto:segdur={}:spd={}:tsb={}:utcs=inband:pssh=mv:keep_segs=true:template=$RepresentationID$_$Init=init$$Number$",
             manifest_path.display(),
             self.segment_duration,
             spd_ms,
@@ -464,9 +464,9 @@ mod tests {
         assert_eq!(args[4], "-o");
         assert!(args[5].contains("/dev/shm/test_stream/live.mpd:dual"));
         assert!(args[5].contains(
-            "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:template=$RepresentationID$_$Init=init$$Number$"
+            "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:template=$RepresentationID$_$Init=init$$Number$"
         ));
-        assert!(!args[5].contains("keep_segs"));
+        assert!(args[5].contains("keep_segs=true"));
         assert!(args[5].contains(":cdur=0.2:asto=0.0:llhls=br:cmaf=cmfc"));
     }
 
@@ -501,8 +501,8 @@ mod tests {
 
         assert_eq!(args[0], "-logs=ncl");
         assert_eq!(args[4], "-o");
-        assert!(args[5].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:template=$RepresentationID$_$Init=init$$Number$"));
-        assert!(!args[5].contains("keep_segs"));
+        assert!(args[5].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:template=$RepresentationID$_$Init=init$$Number$"));
+        assert!(args[5].contains("keep_segs=true"));
         assert!(!args[5].contains(":cdur="));
         assert!(!args[5].contains(":llhls="));
     }

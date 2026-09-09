@@ -671,6 +671,7 @@ async fn test_axinom_provider_live_key_acquisition() {
                 !key_set.pssh.is_empty(),
                 "Live acquisition must return DRM signaling / PSSH"
             );
+
             println!(
                 "Successfully acquired live Axinom Dual keys for content '{}': {} keys, {} PSSH entries",
                 content_id,
@@ -926,7 +927,7 @@ async fn test_axinom_provider_e2e_real_packaging_cenc() {
         "DASH MPD must contain Axinom KID"
     );
 
-    let init_mp4 = out_dir.join("stdin_dashinit.mp4");
+    let init_mp4 = out_dir.join("video_360p_init.mp4");
     assert!(init_mp4.exists(), "Init segment must exist");
     let init_bytes = tokio::fs::read(&init_mp4).await.unwrap();
     let tenc = find_box(&init_bytes, b"tenc").expect("Init segment must contain tenc box");
@@ -984,7 +985,7 @@ async fn test_axinom_provider_e2e_real_packaging_dual() {
         .expect("Failed to close session cleanly");
 
     // Verify CENC Representation has CENC Axinom KID
-    let cenc_init = out_dir.join("cenc/stdin_dashinit.mp4");
+    let cenc_init = out_dir.join("cenc/video_360p_init.mp4");
     assert!(cenc_init.exists());
     let cenc_init_bytes = tokio::fs::read(&cenc_init).await.unwrap();
     let cenc_tenc = find_box(&cenc_init_bytes, b"tenc").expect("cenc must have tenc");
@@ -995,7 +996,7 @@ async fn test_axinom_provider_e2e_real_packaging_dual() {
     );
 
     // Verify CBCS Representation has distinct CBCS Axinom KID
-    let cbcs_init = out_dir.join("cbcs/stdin_dashinit.mp4");
+    let cbcs_init = out_dir.join("cbcs/video_360p_init.mp4");
     assert!(cbcs_init.exists());
     let cbcs_init_bytes = tokio::fs::read(&cbcs_init).await.unwrap();
     let cbcs_tenc = find_box(&cbcs_init_bytes, b"tenc").expect("cbcs must have tenc");

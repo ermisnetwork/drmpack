@@ -108,21 +108,10 @@ impl LicenseProxy {
         &self.config
     }
 
-    /// Access mutable configuration.
-    pub fn config_mut(&mut self) -> &mut AxinomLicenseConfig {
-        &mut self.config
-    }
-
     /// Return the currently cached FairPlay certificate for the configured endpoint, if any.
     pub async fn cached_fairplay_certificate(&self) -> Option<bytes::Bytes> {
         let lock = self.fairplay_cert_cache.read().await;
         lock.get(&self.config.fairplay_cert_url).cloned()
-    }
-
-    /// Return the currently cached FairPlay certificate for a specific URL, if any.
-    pub async fn cached_fairplay_certificate_for(&self, url: &str) -> Option<bytes::Bytes> {
-        let lock = self.fairplay_cert_cache.read().await;
-        lock.get(url.trim()).cloned()
     }
 
     /// Manually populate the FairPlay certificate cache.

@@ -13,14 +13,16 @@ use crate::types::{
 };
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, PollSender};
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
@@ -455,6 +457,50 @@ impl PackagingSession {
         Some(rx)
     }
 
+    /// Create an [`AsyncWrite`](tokio::io::AsyncWrite) handle for this session.
+    ///
+    /// Spawns an internal forwarding task that replicates [`push()`](Self::push) semantics
+    /// (lifecycle checks, heartbeat, cluster fan-out). Call [`SessionWriter::close()`] to
+    /// drain buffered bytes, or simply drop the writer to detach.
+    ///
+    /// ```no_run
+    /// # async fn example(session: &drmpack::PackagingSession, reader: &mut (impl tokio::io::AsyncRead + Unpin)) {
+    /// let mut writer = session.writer();
+    /// tokio::io::copy(reader, &mut writer).await.unwrap();
+    /// writer.close().await;
+    /// # }
+    /// ```
+    pub fn writer(&self) -> SessionWriter {
+        let (tx, mut rx) = mpsc::channel::<Bytes>(64);
+        let cluster = Arc::clone(&self.cluster);
+        let is_terminal = Arc::clone(&self.is_terminal);
+        let cancellation_token = self.cancellation_token.clone();
+        let heartbeat_tx = self.heartbeat_tx.clone();
+        let has_pushed_media = Arc::clone(&self.has_pushed_media);
+
+        let forward_task = tokio::spawn(async move {
+            while let Some(bytes) = rx.recv().await {
+                if is_terminal.load(Ordering::Acquire) || cancellation_token.is_cancelled() {
+                    break;
+                }
+                if let Some(ref htx) = heartbeat_tx {
+                    let _ = htx.try_send(());
+                }
+                if bytes.windows(4).any(|w| w == b"moof") {
+                    has_pushed_media.store(true, Ordering::Release);
+                }
+                if !cluster.write_data(&bytes).await.is_empty() {
+                    break;
+                }
+            }
+        });
+
+        SessionWriter {
+            sender: PollSender::new(tx),
+            forward_task: Some(forward_task),
+        }
+    }
+
     /// Mark output files to be preserved upon Drop, preventing automatic cleanup.
     pub fn preserve_output(&mut self) {
         self.preserve_output = true;
@@ -822,6 +868,66 @@ impl PackagingSession {
     /// Path to the session's private control directory containing GPAC DRM XML definitions.
     pub fn control_dir_path(&self) -> &Path {
         &self.control_dir
+    }
+}
+
+/// An owned write handle implementing [`tokio::io::AsyncWrite`].
+///
+/// Created via [`PackagingSession::writer()`]. Internally backed by a bounded
+/// channel and a forwarding task that replicates `push()` semantics.
+pub struct SessionWriter {
+    sender: PollSender<Bytes>,
+    forward_task: Option<JoinHandle<()>>,
+}
+
+impl SessionWriter {
+    /// Shut down the writer and drain any buffered bytes to the session.
+    pub async fn close(mut self) {
+        self.sender.close();
+        if let Some(task) = self.forward_task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for SessionWriter {
+    fn drop(&mut self) {
+        self.sender.close();
+    }
+}
+
+impl tokio::io::AsyncWrite for SessionWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match this.sender.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {
+                let len = buf.len();
+                this.sender
+                    .send_item(Bytes::copy_from_slice(buf))
+                    .map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session closed")
+                    })?;
+                Poll::Ready(Ok(len))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "session closed",
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        self.get_mut().sender.close();
+        Poll::Ready(Ok(()))
     }
 }
 

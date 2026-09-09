@@ -1,6 +1,5 @@
 use crate::error::Result;
 use crate::types::{DrmSystem, EncryptionScheme, QualityTier, TrackType};
-use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,18 +43,7 @@ impl KeyID {
     }
 
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0.as_bytes())
-    }
-}
-
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            use std::fmt::Write;
-            let _ = write!(s, "{:02x}", b);
-        }
-        s
+        self.0.simple().to_string()
     }
 }
 
@@ -299,9 +287,11 @@ impl KeySet {
 }
 
 /// Pluggable trait for DRM key acquisition.
-#[async_trait]
 pub trait KeyProvider: Send + Sync {
-    async fn fetch_keys(&self, request: &KeyRequest) -> Result<KeySet>;
+    fn fetch_keys(
+        &self,
+        request: &KeyRequest,
+    ) -> impl std::future::Future<Output = Result<KeySet>> + Send;
 }
 
 #[cfg(test)]
@@ -355,5 +345,21 @@ mod tests {
         keyset.add_pssh(pssh.clone());
         keyset.add_pssh(pssh);
         assert_eq!(keyset.pssh.len(), 1, "Duplicate PSSH must be deduplicated");
+    }
+
+    #[tokio::test]
+    async fn test_key_provider_native_future_is_send() {
+        struct NativeMockProvider;
+        impl KeyProvider for NativeMockProvider {
+            async fn fetch_keys(&self, _request: &KeyRequest) -> Result<KeySet> {
+                Ok(KeySet::new())
+            }
+        }
+
+        let provider = NativeMockProvider;
+        let request = KeyRequest::new("test");
+        let handle = tokio::spawn(async move { provider.fetch_keys(&request).await });
+        let res = handle.await.unwrap();
+        assert!(res.is_ok());
     }
 }

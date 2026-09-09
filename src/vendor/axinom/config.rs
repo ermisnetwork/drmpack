@@ -229,36 +229,6 @@ impl AxinomLicenseConfig {
         self
     }
 
-    /// Get Widevine license acquisition URL.
-    pub fn widevine_license_url(&self) -> &str {
-        &self.widevine_license_url
-    }
-
-    /// Get FairPlay license acquisition URL.
-    pub fn fairplay_license_url(&self) -> &str {
-        &self.fairplay_license_url
-    }
-
-    /// Get PlayReady license acquisition URL.
-    pub fn playready_license_url(&self) -> &str {
-        &self.playready_license_url
-    }
-
-    /// Get FairPlay application certificate URL.
-    pub fn fairplay_cert_url(&self) -> &str {
-        &self.fairplay_cert_url
-    }
-
-    /// Get request timeout duration.
-    pub fn timeout(&self) -> Duration {
-        self.timeout
-    }
-
-    /// Get custom HTTP headers.
-    pub fn headers(&self) -> &reqwest::header::HeaderMap {
-        &self.headers
-    }
-
     /// Validate the configuration endpoints and parameters.
     pub fn validate(&self) -> Result<()> {
         Self::validate_url("widevine_license_url", &self.widevine_license_url)?;
@@ -631,19 +601,19 @@ mod tests {
             );
 
         assert_eq!(
-            config.widevine_license_url(),
+            config.widevine_license_url,
             "https://custom.axprod.net/widevine"
         );
         assert_eq!(
-            config.fairplay_license_url(),
+            config.fairplay_license_url,
             "https://custom.axprod.net/fairplay"
         );
         assert_eq!(
-            config.playready_license_url(),
+            config.playready_license_url,
             "https://custom.axprod.net/playready"
         );
         assert_eq!(
-            config.fairplay_cert_url(),
+            config.fairplay_cert_url,
             "https://custom.axprod.net/cert.cer"
         );
         assert_eq!(config.timeout, Duration::from_secs(25));
@@ -795,8 +765,8 @@ mod tests {
     fn test_axinom_license_config_validation() {
         let valid = AxinomLicenseConfig::default();
         assert!(valid.validate().is_ok());
-        assert_eq!(valid.timeout(), Duration::from_secs(10));
-        assert!(valid.headers().is_empty());
+        assert_eq!(valid.timeout, Duration::from_secs(10));
+        assert!(valid.headers.is_empty());
 
         let invalid_url = valid.clone().with_widevine_license_url("not-a-valid-url");
         assert!(invalid_url.validate().is_err());

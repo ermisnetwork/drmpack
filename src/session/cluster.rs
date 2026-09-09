@@ -170,7 +170,9 @@ impl RepresentationCluster {
             let mut process_config = GpacProcessConfig::new(&drm_path, &output_dir)
                 .with_latency_mode(config.latency_mode)
                 .with_segment_duration(config.segment_duration)
-                .with_chunk_duration(config.chunk_duration);
+                .with_chunk_duration(config.chunk_duration)
+                .with_availability_time_offset(config.availability_time_offset)
+                .with_time_shift_buffer(config.time_shift_buffer);
             if let Some(bin) = &config.gpac_bin {
                 process_config = process_config.with_gpac_bin(bin);
             }
@@ -306,58 +308,14 @@ impl RepresentationCluster {
     pub async fn wait_for_exit(&self) -> (EncryptionScheme, ProcessExitStatus) {
         match self.representations.as_slice() {
             [] => std::future::pending().await,
-            [single] => {
-                let mut rx = single.subscribe_exit();
-                loop {
-                    match rx.recv().await {
-                        Ok(status) => return (single.scheme, status),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return std::future::pending().await
-                        }
-                    }
-                }
-            }
+            [single] => recv_exit(single).await,
             [first, second] => {
-                let mut rx1 = first.subscribe_exit();
-                let mut rx2 = second.subscribe_exit();
                 tokio::select! {
-                    res1 = async {
-                        loop {
-                            match rx1.recv().await {
-                                Ok(status) => return (first.scheme, status),
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                    return std::future::pending().await
-                                }
-                            }
-                        }
-                    } => res1,
-                    res2 = async {
-                        loop {
-                            match rx2.recv().await {
-                                Ok(status) => return (second.scheme, status),
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                    return std::future::pending().await
-                                }
-                            }
-                        }
-                    } => res2,
+                    res1 = recv_exit(first) => res1,
+                    res2 = recv_exit(second) => res2,
                 }
             }
-            [first, ..] => {
-                let mut rx = first.subscribe_exit();
-                loop {
-                    match rx.recv().await {
-                        Ok(status) => return (first.scheme, status),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return std::future::pending().await
-                        }
-                    }
-                }
-            }
+            [first, ..] => recv_exit(first).await,
         }
     }
 
@@ -399,6 +357,19 @@ impl RepresentationCluster {
             }
         }
         String::new()
+    }
+}
+
+async fn recv_exit(rep: &Representation) -> (EncryptionScheme, ProcessExitStatus) {
+    let mut rx = rep.subscribe_exit();
+    loop {
+        match rx.recv().await {
+            Ok(status) => return (rep.scheme, status),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return std::future::pending().await;
+            }
+        }
     }
 }
 

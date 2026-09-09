@@ -3,7 +3,6 @@ use crate::cpix::parser::CpixResponseParser;
 use crate::error::{DrmpackError, Result};
 use crate::key::{KeyProvider, KeyRequest, KeySet};
 use crate::speke::config::SpekeConfig;
-use async_trait::async_trait;
 use std::fmt;
 
 /// Response received from a raw SPEKE exchange.
@@ -211,7 +210,6 @@ impl SpekeClient {
     }
 }
 
-#[async_trait]
 impl KeyProvider for SpekeClient {
     async fn fetch_keys(&self, request: &KeyRequest) -> Result<KeySet> {
         let (xml_request, specs) = CpixRequestBuilder::build_with_specs(request)?;

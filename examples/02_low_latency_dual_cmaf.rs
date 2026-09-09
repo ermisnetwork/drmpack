@@ -130,8 +130,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(cenc_hls.exists(), "CENC HLS master manifest must exist");
     assert!(cbcs_hls.exists(), "CBCS HLS master manifest must exist");
 
-    let cenc_media_m3u8 = session.output_dir().join("cenc").join("live_1.m3u8");
-    let cbcs_media_m3u8 = session.output_dir().join("cbcs").join("live_1.m3u8");
+    let cenc_media_m3u8 = session.output_dir().join("cenc").join("video_720p.m3u8");
+    let cbcs_media_m3u8 = session.output_dir().join("cbcs").join("video_720p.m3u8");
 
     if cenc_media_m3u8.exists() && cbcs_media_m3u8.exists() {
         let cenc_content = tokio::fs::read_to_string(&cenc_media_m3u8).await?;

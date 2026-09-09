@@ -4,7 +4,6 @@ use crate::error::{DrmpackError, Result};
 use crate::key::{KeyProvider, KeyRequest, KeySet};
 use crate::speke::{SpekeAuth, SpekeClient, SpekeConfig};
 use crate::vendor::axinom::config::AxinomConfig;
-use async_trait::async_trait;
 use std::fmt;
 
 /// Axinom KeyProvider implementing SPEKE v2 over CPIX 2.3 protocol.
@@ -64,7 +63,6 @@ impl AxinomProvider {
     }
 }
 
-#[async_trait]
 impl KeyProvider for AxinomProvider {
     async fn fetch_keys(&self, request: &KeyRequest) -> Result<KeySet> {
         let concrete_schemes = request.concrete_schemes();

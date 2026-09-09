@@ -43,9 +43,9 @@ async fn test_packaging_session_detects_missing_gpac_binary() {
     let DrmpackError::PackagingSession(failure) = err else {
         panic!("Expected structured PackagingSession failure");
     };
-    assert_eq!(failure.cenc.len(), 1);
-    assert_eq!(failure.cenc[0].operation, PackagingOperation::Create);
-    assert!(failure.cenc[0]
+    assert_eq!(failure.cbcs.len(), 1);
+    assert_eq!(failure.cbcs[0].operation, PackagingOperation::Create);
+    assert!(failure.cbcs[0]
         .error
         .to_string()
         .contains("non_existent_gpac_binary_xyz_123"));

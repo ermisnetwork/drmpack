@@ -121,12 +121,12 @@ async fn test_tracer_session_detects_missing_gpac() {
     let DrmpackError::PackagingSession(failure) = err else {
         panic!("Expected structured PackagingSession failure");
     };
-    assert_eq!(failure.cenc.len(), 1);
+    assert_eq!(failure.cbcs.len(), 1);
     assert_eq!(
-        failure.cenc[0].operation,
+        failure.cbcs[0].operation,
         drmpack::PackagingOperation::Create
     );
-    assert!(failure.cenc[0]
+    assert!(failure.cbcs[0]
         .error
         .to_string()
         .contains("non_existent_gpac_binary_xyz_123"));
@@ -160,6 +160,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
         .with_latency_mode(LatencyMode::LowLatency)
         .with_segment_duration(1.0)
         .with_chunk_duration(0.2)
+        .with_availability_time_offset(Some(0.8))
         .with_output_dir(&out_dir)
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine);
@@ -228,7 +229,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
         .expect("Failed to push fMP4 into GPAC pipe");
 
     // Verify artifacts become available in Ramdisk during active push before session is closed
-    let init_path = out_dir.join("stdin_dashinit.mp4");
+    let init_path = out_dir.join("video_360p_init.mp4");
     let mut artifact_available_during_push = false;
     for _ in 0..50 {
         if init_path.exists() {
@@ -272,8 +273,11 @@ async fn test_tracer_gpac_e2e_live_packaging() {
         mpd_content
     );
 
-    let live_m3u8 = out_dir.join("live_1.m3u8");
-    assert!(live_m3u8.exists(), "live_1.m3u8 media manifest must exist");
+    let live_m3u8 = out_dir.join("video_360p.m3u8");
+    assert!(
+        live_m3u8.exists(),
+        "video_360p.m3u8 media manifest must exist"
+    );
     let m3u8_content = tokio::fs::read_to_string(&live_m3u8).await.unwrap();
     assert!(m3u8_content.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
     assert!(
@@ -292,7 +296,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
     assert!(m3u8_content.contains("#EXT-X-PART-INF:PART-TARGET=0.2"));
     assert!(m3u8_content.contains("#EXT-X-ENDLIST"));
 
-    let init_mp4 = out_dir.join("stdin_dashinit.mp4");
+    let init_mp4 = out_dir.join("video_360p_init.mp4");
     assert!(init_mp4.exists(), "Init segment must exist");
     let init_bytes = tokio::fs::read(&init_mp4).await.unwrap();
     assert_eq!(
@@ -306,7 +310,7 @@ async fn test_tracer_gpac_e2e_live_packaging() {
         "tenc must carry the RawKeyProvider KID"
     );
 
-    let seg_m4s = out_dir.join("stdin_dash1.m4s");
+    let seg_m4s = out_dir.join("video_360p_1.m4s");
     assert!(seg_m4s.exists(), "Encrypted CMAF media segment must exist");
     let seg_bytes = tokio::fs::read(&seg_m4s).await.unwrap();
     for box_type in [b"senc", b"saiz", b"saio"] {
@@ -376,8 +380,8 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
         .await
         .expect("Failed to fan out fMP4 to both Dual Representations");
 
-    let cenc_init = out_dir.join("cenc/stdin_dashinit.mp4");
-    let cbcs_init = out_dir.join("cbcs/stdin_dashinit.mp4");
+    let cenc_init = out_dir.join("cenc/video_360p_init.mp4");
+    let cbcs_init = out_dir.join("cbcs/video_360p_init.mp4");
     wait_for_path(&cenc_init).await;
     wait_for_path(&cbcs_init).await;
     session.close().await.expect("Failed to close Dual session");
@@ -396,10 +400,10 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
     assert!(cenc_mpd.contains(&kid.0.hyphenated().to_string()));
     assert!(cbcs_mpd.contains(&kid.0.hyphenated().to_string()));
 
-    let cenc_media_m3u8 = tokio::fs::read_to_string(out_dir.join("cenc/live_1.m3u8"))
+    let cenc_media_m3u8 = tokio::fs::read_to_string(out_dir.join("cenc/video_360p.m3u8"))
         .await
         .unwrap();
-    let cbcs_media_m3u8 = tokio::fs::read_to_string(out_dir.join("cbcs/live_1.m3u8"))
+    let cbcs_media_m3u8 = tokio::fs::read_to_string(out_dir.join("cbcs/video_360p.m3u8"))
         .await
         .unwrap();
     assert!(cenc_media_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
@@ -414,13 +418,13 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
         (
             "cenc",
             cenc_init,
-            out_dir.join("cenc/stdin_dash1.m4s"),
+            out_dir.join("cenc/video_360p_1.m4s"),
             b"cenc".as_slice(),
         ),
         (
             "cbcs",
             cbcs_init,
-            out_dir.join("cbcs/stdin_dash1.m4s"),
+            out_dir.join("cbcs/video_360p_1.m4s"),
             b"cbcs".as_slice(),
         ),
     ] {
@@ -558,8 +562,8 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
         .expect("Failed to close CBCS session cleanly");
 
     // Verify HLS manifest uses SAMPLE-AES method and FairPlay signaling
-    let live_m3u8 = out_dir.join("live_1.m3u8");
-    assert!(live_m3u8.exists(), "live_1.m3u8 must exist");
+    let live_m3u8 = out_dir.join("video_360p.m3u8");
+    assert!(live_m3u8.exists(), "video_360p.m3u8 must exist");
     let m3u8_content = tokio::fs::read_to_string(&live_m3u8).await.unwrap();
     assert!(
         m3u8_content.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"),
@@ -572,7 +576,7 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
         m3u8_content
     );
     assert!(
-        m3u8_content.contains(&format!("URI=\"skd://{}\"", kid.0.hyphenated())),
+        m3u8_content.contains(&format!("URI=\"skd://{}", kid.0.hyphenated())),
         "CBCS HLS manifest must carry the FairPlay skd URI; manifest was:\n{}",
         m3u8_content
     );
@@ -588,7 +592,7 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
     );
 
     // Verify Init Segment boxes
-    let init_mp4 = out_dir.join("stdin_dashinit.mp4");
+    let init_mp4 = out_dir.join("video_360p_init.mp4");
     assert!(init_mp4.exists(), "Init segment must exist");
     let init_bytes = tokio::fs::read(&init_mp4).await.unwrap();
 
@@ -605,7 +609,7 @@ async fn test_tracer_gpac_e2e_cbcs_packaging() {
     );
 
     // Verify encrypted CMAF media segment contains subsample encryption boxes
-    let seg_m4s = out_dir.join("stdin_dash1.m4s");
+    let seg_m4s = out_dir.join("video_360p_1.m4s");
     assert!(seg_m4s.exists(), "Encrypted CMAF media segment must exist");
     let seg_bytes = tokio::fs::read(&seg_m4s).await.unwrap();
     for box_type in [b"senc", b"saiz", b"saio"] {

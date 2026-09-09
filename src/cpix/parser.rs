@@ -518,15 +518,7 @@ fn parse_iv(s: &str) -> Option<[u8; 16]> {
         clean
     };
     if clean.len() == 32 {
-        let mut bytes = [0u8; 16];
-        for i in 0..16 {
-            if let Ok(b) = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16) {
-                bytes[i] = b;
-            } else {
-                return None;
-            }
-        }
-        Some(bytes)
+        u128::from_str_radix(clean, 16).ok().map(u128::to_be_bytes)
     } else {
         let base64_clean: String = clean.chars().filter(|c| !c.is_whitespace()).collect();
         BASE64_STANDARD
@@ -560,17 +552,22 @@ fn infer_track_type(intended: &str) -> TrackType {
 }
 
 fn infer_quality_tier(intended: &str) -> QualityTier {
-    let upper = intended.to_uppercase();
-    if let Some(suffix) = upper.strip_prefix("AUDIO_") {
-        infer_quality_tier(suffix)
-    } else if upper.contains("4K") || upper.contains("UHD") {
-        QualityTier::uhd_4k()
-    } else if upper.contains("HD") {
-        QualityTier::hd()
-    } else if upper.contains("SD") || upper == "AUDIO" {
-        QualityTier::sd()
-    } else {
-        QualityTier::new(intended)
+    let trimmed = intended.trim();
+    if trimmed.is_empty() {
+        return QualityTier::hd();
+    }
+    let upper = trimmed.to_uppercase();
+    if upper.starts_with("AUDIO_") {
+        return infer_quality_tier(&trimmed["AUDIO_".len()..]);
+    }
+    if upper.starts_with("VIDEO_") {
+        return infer_quality_tier(&trimmed["VIDEO_".len()..]);
+    }
+    match upper.as_str() {
+        "4K" | "UHD" => QualityTier::uhd_4k(),
+        "HD" => QualityTier::hd(),
+        "SD" | "AUDIO" => QualityTier::sd(),
+        _ => QualityTier::new(trimmed),
     }
 }
 
@@ -975,6 +972,30 @@ mod tests {
         assert_eq!(infer_quality_tier("audio"), QualityTier::sd());
         assert_eq!(infer_quality_tier("video_sd"), QualityTier::sd());
         assert_eq!(infer_quality_tier("AUDIO_SD"), QualityTier::sd());
+    }
+
+    #[test]
+    fn test_infer_quality_tier_preserves_custom_tier_names() {
+        assert_eq!(infer_quality_tier("FHD"), QualityTier::new("FHD"));
+        assert_eq!(infer_quality_tier("1080p_HD"), QualityTier::new("1080p_HD"));
+        assert_eq!(infer_quality_tier("720p_HD"), QualityTier::new("720p_HD"));
+    }
+
+    #[test]
+    fn test_infer_quality_tier_edge_cases() {
+        // Leading/trailing whitespace
+        assert_eq!(infer_quality_tier("  FHD  "), QualityTier::new("FHD"));
+        assert_eq!(infer_quality_tier("  HD  "), QualityTier::hd());
+        assert_eq!(
+            infer_quality_tier("\tVIDEO_1080p_HD\n"),
+            QualityTier::new("1080p_HD")
+        );
+        assert_eq!(infer_quality_tier("  VIDEO_HD  "), QualityTier::hd());
+        // Empty or whitespace-only inputs fallback to HD
+        assert_eq!(infer_quality_tier(""), QualityTier::hd());
+        assert_eq!(infer_quality_tier("   "), QualityTier::hd());
+        assert_eq!(infer_quality_tier("VIDEO_"), QualityTier::hd());
+        assert_eq!(infer_quality_tier("AUDIO_"), QualityTier::hd());
     }
 
     #[test]

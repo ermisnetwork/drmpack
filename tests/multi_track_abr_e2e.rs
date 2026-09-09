@@ -371,10 +371,9 @@ async fn test_multi_track_abr_e2e_cenc() {
         master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"),
         "Master manifest must declare #EXT-X-MEDIA:TYPE=SUBTITLES"
     );
-
     // 3. Verify Media Manifests
     // Video rendition 1 (1080p) must be encrypted
-    let v1_m3u8 = tokio::fs::read_to_string(out_dir.join("live_1.m3u8"))
+    let v1_m3u8 = tokio::fs::read_to_string(out_dir.join("video_1080p.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -383,7 +382,7 @@ async fn test_multi_track_abr_e2e_cenc() {
     );
 
     // Video rendition 2 (720p) must be encrypted
-    let v2_m3u8 = tokio::fs::read_to_string(out_dir.join("live_2.m3u8"))
+    let v2_m3u8 = tokio::fs::read_to_string(out_dir.join("video_720p.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -392,7 +391,7 @@ async fn test_multi_track_abr_e2e_cenc() {
     );
 
     // Audio media manifest must be encrypted
-    let a_m3u8 = tokio::fs::read_to_string(out_dir.join("live_3.m3u8"))
+    let a_m3u8 = tokio::fs::read_to_string(out_dir.join("audio.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -401,7 +400,7 @@ async fn test_multi_track_abr_e2e_cenc() {
     );
 
     // Subtitle media manifest must be CLEAR (NO #EXT-X-KEY)
-    let s_m3u8 = tokio::fs::read_to_string(out_dir.join("live_4.m3u8"))
+    let s_m3u8 = tokio::fs::read_to_string(out_dir.join("sub.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -417,17 +416,14 @@ async fn test_multi_track_abr_e2e_cenc() {
 
     for entry in std::fs::read_dir(&out_dir).unwrap().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with("_init.mp4")
-            || name.ends_with("_init_rep1.mp4")
-            || name.ends_with("_init_rep2.mp4")
-        {
+        if name.ends_with("_init.mp4") {
             let data = std::fs::read(entry.path()).unwrap();
-            if name.contains("rep1") || (name.contains("track1") && !name.contains("rep2")) {
+            if name.starts_with("video_1080p") {
                 let tenc = find_box(&data, b"tenc")
                     .expect("Video 1080p init segment must contain tenc box");
                 assert!(
                     tenc.windows(16).any(|b| b == kid_v_hd.as_bytes()),
-                    "Video 1080p (rep1) tenc must carry HD KID"
+                    "Video 1080p tenc must carry HD KID"
                 );
                 assert!(
                     find_box(&data, b"pssh").is_some(),
@@ -440,12 +436,12 @@ async fn test_multi_track_abr_e2e_cenc() {
                     "Video 1080p schm must declare cenc"
                 );
                 found_video_hd = true;
-            } else if name.contains("rep2") || (name.contains("track2") && !name.contains("rep1")) {
+            } else if name.starts_with("video_720p") {
                 let tenc = find_box(&data, b"tenc")
                     .expect("Video 720p init segment must contain tenc box");
                 assert!(
                     tenc.windows(16).any(|b| b == kid_v_sd.as_bytes()),
-                    "Video 720p (rep2) tenc must carry SD KID"
+                    "Video 720p tenc must carry SD KID"
                 );
                 assert!(
                     find_box(&data, b"pssh").is_some(),
@@ -457,7 +453,7 @@ async fn test_multi_track_abr_e2e_cenc() {
                     "Video 720p schm must declare cenc"
                 );
                 found_video_sd = true;
-            } else if name.contains("track3") {
+            } else if name.starts_with("audio") {
                 let tenc =
                     find_box(&data, b"tenc").expect("Audio init segment must contain tenc box");
                 assert!(
@@ -470,7 +466,7 @@ async fn test_multi_track_abr_e2e_cenc() {
                     "Audio schm must declare cenc"
                 );
                 found_audio = true;
-            } else if name.contains("track4") {
+            } else if name.starts_with("sub") {
                 assert!(
                     find_box(&data, b"tenc").is_none(),
                     "Subtitle init segment must NOT contain tenc box (must be clear)"
@@ -547,7 +543,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
     assert!(master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"));
 
     // 2. Verify HLS Media Manifests (FairPlay SAMPLE-AES)
-    let v1_m3u8 = tokio::fs::read_to_string(out_dir.join("live_1.m3u8"))
+    let v1_m3u8 = tokio::fs::read_to_string(out_dir.join("video_1080p.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -563,7 +559,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
         "CBCS video rendition 1 must contain skd:// URI"
     );
 
-    let v2_m3u8 = tokio::fs::read_to_string(out_dir.join("live_2.m3u8"))
+    let v2_m3u8 = tokio::fs::read_to_string(out_dir.join("video_720p.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -575,7 +571,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
         "CBCS video rendition 2 must specify FairPlay key format"
     );
 
-    let a_m3u8 = tokio::fs::read_to_string(out_dir.join("live_3.m3u8"))
+    let a_m3u8 = tokio::fs::read_to_string(out_dir.join("audio.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -584,7 +580,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
     );
 
     // Subtitle manifest must be CLEAR
-    let s_m3u8 = tokio::fs::read_to_string(out_dir.join("live_4.m3u8"))
+    let s_m3u8 = tokio::fs::read_to_string(out_dir.join("sub.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -600,12 +596,9 @@ async fn test_multi_track_abr_e2e_cbcs() {
 
     for entry in std::fs::read_dir(&out_dir).unwrap().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with("_init.mp4")
-            || name.ends_with("_init_rep1.mp4")
-            || name.ends_with("_init_rep2.mp4")
-        {
+        if name.ends_with("_init.mp4") {
             let data = std::fs::read(entry.path()).unwrap();
-            if name.contains("rep1") || (name.contains("track1") && !name.contains("rep2")) {
+            if name.starts_with("video_1080p") {
                 let schm =
                     find_box(&data, b"schm").expect("Video 1080p init must contain schm box");
                 assert!(
@@ -619,7 +612,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
                     "Video 1080p tenc must carry HD KID"
                 );
                 found_video_hd = true;
-            } else if name.contains("rep2") || (name.contains("track2") && !name.contains("rep1")) {
+            } else if name.starts_with("video_720p") {
                 let schm = find_box(&data, b"schm").expect("Video 720p init must contain schm box");
                 assert!(
                     schm.windows(4).any(|b| b == b"cbcs"),
@@ -631,7 +624,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
                     "Video 720p tenc must carry SD KID"
                 );
                 found_video_sd = true;
-            } else if name.contains("track3") {
+            } else if name.starts_with("audio") {
                 let schm = find_box(&data, b"schm").expect("Audio init must contain schm box");
                 assert!(
                     schm.windows(4).any(|b| b == b"cbcs"),
@@ -643,7 +636,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
                     "Audio tenc must carry audio KID"
                 );
                 found_audio = true;
-            } else if name.contains("track4") {
+            } else if name.starts_with("sub") {
                 assert!(
                     find_box(&data, b"tenc").is_none(),
                     "Subtitle init must be unencrypted"
@@ -769,22 +762,22 @@ async fn test_multi_track_abr_e2e_dual() {
     assert!(cenc_master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
     assert!(cenc_master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"));
 
-    let cenc_v1 = tokio::fs::read_to_string(out_dir.join("cenc/live_1.m3u8"))
+    let cenc_v1 = tokio::fs::read_to_string(out_dir.join("cenc/video_1080p.m3u8"))
         .await
         .unwrap();
     assert!(cenc_v1.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
 
-    let cenc_v2 = tokio::fs::read_to_string(out_dir.join("cenc/live_2.m3u8"))
+    let cenc_v2 = tokio::fs::read_to_string(out_dir.join("cenc/video_720p.m3u8"))
         .await
         .unwrap();
     assert!(cenc_v2.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
 
-    let cenc_audio = tokio::fs::read_to_string(out_dir.join("cenc/live_3.m3u8"))
+    let cenc_audio = tokio::fs::read_to_string(out_dir.join("cenc/audio.m3u8"))
         .await
         .unwrap();
     assert!(cenc_audio.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
 
-    let cenc_sub = tokio::fs::read_to_string(out_dir.join("cenc/live_4.m3u8"))
+    let cenc_sub = tokio::fs::read_to_string(out_dir.join("cenc/sub.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -800,24 +793,24 @@ async fn test_multi_track_abr_e2e_dual() {
     assert!(cbcs_master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
     assert!(cbcs_master.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"));
 
-    let cbcs_v1 = tokio::fs::read_to_string(out_dir.join("cbcs/live_1.m3u8"))
+    let cbcs_v1 = tokio::fs::read_to_string(out_dir.join("cbcs/video_1080p.m3u8"))
         .await
         .unwrap();
     assert!(cbcs_v1.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"));
     assert!(cbcs_v1.contains("com.apple.streamingkeydelivery"));
 
-    let cbcs_v2 = tokio::fs::read_to_string(out_dir.join("cbcs/live_2.m3u8"))
+    let cbcs_v2 = tokio::fs::read_to_string(out_dir.join("cbcs/video_720p.m3u8"))
         .await
         .unwrap();
     assert!(cbcs_v2.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"));
     assert!(cbcs_v2.contains("com.apple.streamingkeydelivery"));
 
-    let cbcs_audio = tokio::fs::read_to_string(out_dir.join("cbcs/live_3.m3u8"))
+    let cbcs_audio = tokio::fs::read_to_string(out_dir.join("cbcs/audio.m3u8"))
         .await
         .unwrap();
     assert!(cbcs_audio.contains("#EXT-X-KEY:METHOD=SAMPLE-AES"));
 
-    let cbcs_sub = tokio::fs::read_to_string(out_dir.join("cbcs/live_4.m3u8"))
+    let cbcs_sub = tokio::fs::read_to_string(out_dir.join("cbcs/sub.m3u8"))
         .await
         .unwrap();
     assert!(
@@ -836,12 +829,9 @@ async fn test_multi_track_abr_e2e_dual() {
         .filter_map(|e| e.ok())
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with("_init.mp4")
-            || name.ends_with("_init_rep1.mp4")
-            || name.ends_with("_init_rep2.mp4")
-        {
+        if name.ends_with("_init.mp4") {
             let data = std::fs::read(entry.path()).unwrap();
-            if name.contains("rep1") || (name.contains("track1") && !name.contains("rep2")) {
+            if name.starts_with("video_1080p") {
                 let schm =
                     find_box(&data, b"schm").expect("CENC HD video init must contain schm box");
                 assert!(
@@ -852,7 +842,7 @@ async fn test_multi_track_abr_e2e_dual() {
                     find_box(&data, b"tenc").expect("CENC HD video init must contain tenc box");
                 assert!(tenc.windows(16).any(|b| b == kid_v_hd.as_bytes()));
                 found_cenc_hd = true;
-            } else if name.contains("rep2") || (name.contains("track2") && !name.contains("rep1")) {
+            } else if name.starts_with("video_720p") {
                 let schm =
                     find_box(&data, b"schm").expect("CENC SD video init must contain schm box");
                 assert!(
@@ -863,14 +853,14 @@ async fn test_multi_track_abr_e2e_dual() {
                     find_box(&data, b"tenc").expect("CENC SD video init must contain tenc box");
                 assert!(tenc.windows(16).any(|b| b == kid_v_sd.as_bytes()));
                 found_cenc_sd = true;
-            } else if name.contains("track3") {
+            } else if name.starts_with("audio") {
                 let schm = find_box(&data, b"schm").expect("CENC Audio init must contain schm box");
                 assert!(
                     schm.windows(4).any(|b| b == b"cenc"),
                     "CENC audio schm must declare cenc"
                 );
                 found_cenc_audio = true;
-            } else if name.contains("track4") {
+            } else if name.starts_with("sub") {
                 assert!(
                     find_box(&data, b"tenc").is_none(),
                     "CENC subtitle must be unencrypted"
@@ -895,12 +885,9 @@ async fn test_multi_track_abr_e2e_dual() {
         .filter_map(|e| e.ok())
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with("_init.mp4")
-            || name.ends_with("_init_rep1.mp4")
-            || name.ends_with("_init_rep2.mp4")
-        {
+        if name.ends_with("_init.mp4") {
             let data = std::fs::read(entry.path()).unwrap();
-            if name.contains("rep1") || (name.contains("track1") && !name.contains("rep2")) {
+            if name.starts_with("video_1080p") {
                 let schm =
                     find_box(&data, b"schm").expect("CBCS HD video init must contain schm box");
                 assert!(
@@ -911,7 +898,7 @@ async fn test_multi_track_abr_e2e_dual() {
                     find_box(&data, b"tenc").expect("CBCS HD video init must contain tenc box");
                 assert!(tenc.windows(16).any(|b| b == kid_v_hd.as_bytes()));
                 found_cbcs_hd = true;
-            } else if name.contains("rep2") || (name.contains("track2") && !name.contains("rep1")) {
+            } else if name.starts_with("video_720p") {
                 let schm =
                     find_box(&data, b"schm").expect("CBCS SD video init must contain schm box");
                 assert!(
@@ -922,14 +909,14 @@ async fn test_multi_track_abr_e2e_dual() {
                     find_box(&data, b"tenc").expect("CBCS SD video init must contain tenc box");
                 assert!(tenc.windows(16).any(|b| b == kid_v_sd.as_bytes()));
                 found_cbcs_sd = true;
-            } else if name.contains("track3") {
+            } else if name.starts_with("audio") {
                 let schm = find_box(&data, b"schm").expect("CBCS Audio init must contain schm box");
                 assert!(
                     schm.windows(4).any(|b| b == b"cbcs"),
                     "CBCS audio schm must declare cbcs"
                 );
                 found_cbcs_audio = true;
-            } else if name.contains("track4") {
+            } else if name.starts_with("sub") {
                 assert!(
                     find_box(&data, b"tenc").is_none(),
                     "CBCS subtitle must be unencrypted"
@@ -1018,24 +1005,21 @@ async fn test_multi_track_abr_e2e_fallback_track_id() {
 
     for entry in std::fs::read_dir(&out_dir).unwrap().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with("_init.mp4")
-            || name.ends_with("_init_rep1.mp4")
-            || name.ends_with("_init_rep2.mp4")
-        {
+        if name.ends_with("_init.mp4") {
             let data = std::fs::read(entry.path()).unwrap();
-            if name.contains("rep1") || (name.contains("track1") && !name.contains("rep2")) {
+            if name.starts_with("video_1080p") {
                 let tenc = find_box(&data, b"tenc").expect("HD video init must contain tenc");
                 assert!(tenc.windows(16).any(|b| b == kid_v_hd.as_bytes()));
                 found_hd = true;
-            } else if name.contains("rep2") || (name.contains("track2") && !name.contains("rep1")) {
+            } else if name.starts_with("video_720p") {
                 let tenc = find_box(&data, b"tenc").expect("SD video init must contain tenc");
                 assert!(tenc.windows(16).any(|b| b == kid_v_sd.as_bytes()));
                 found_sd = true;
-            } else if name.contains("track3") {
+            } else if name.starts_with("audio") {
                 let tenc = find_box(&data, b"tenc").expect("Audio init must contain tenc");
                 assert!(tenc.windows(16).any(|b| b == kid_audio.as_bytes()));
                 found_audio = true;
-            } else if name.contains("track4") {
+            } else if name.starts_with("sub") {
                 assert!(find_box(&data, b"tenc").is_none());
                 found_sub = true;
             }
@@ -1168,17 +1152,17 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
     );
 
     // 3. Verify media manifests
-    let a_en_m3u8 = tokio::fs::read_to_string(out_dir.join("live_3.m3u8"))
+    let a_en_m3u8 = tokio::fs::read_to_string(out_dir.join("audio_eng.m3u8"))
         .await
         .unwrap();
     assert!(a_en_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
 
-    let a_es_m3u8 = tokio::fs::read_to_string(out_dir.join("live_4.m3u8"))
+    let a_es_m3u8 = tokio::fs::read_to_string(out_dir.join("audio_spa.m3u8"))
         .await
         .unwrap();
     assert!(a_es_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
 
-    let sub_m3u8 = tokio::fs::read_to_string(out_dir.join("live_5.m3u8"))
+    let sub_m3u8 = tokio::fs::read_to_string(out_dir.join("sub_eng.m3u8"))
         .await
         .unwrap();
     assert!(!sub_m3u8.contains("#EXT-X-KEY"), "Subtitles must be clear");
@@ -1192,28 +1176,25 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
 
     for entry in std::fs::read_dir(&out_dir).unwrap().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with("_init.mp4")
-            || name.ends_with("_init_rep1.mp4")
-            || name.ends_with("_init_rep2.mp4")
-        {
+        if name.ends_with("_init.mp4") {
             let data = std::fs::read(entry.path()).unwrap();
-            if name.contains("rep1") || (name.contains("track1") && !name.contains("rep2")) {
+            if name.starts_with("video_1080p") {
                 let tenc = find_box(&data, b"tenc").expect("HD video init must contain tenc");
                 assert!(tenc.windows(16).any(|b| b == kid_v_hd.as_bytes()));
                 found_hd = true;
-            } else if name.contains("rep2") || (name.contains("track2") && !name.contains("rep1")) {
+            } else if name.starts_with("video_720p") {
                 let tenc = find_box(&data, b"tenc").expect("SD video init must contain tenc");
                 assert!(tenc.windows(16).any(|b| b == kid_v_sd.as_bytes()));
                 found_sd = true;
-            } else if name.contains("track3") {
+            } else if name.starts_with("audio_eng") {
                 let tenc = find_box(&data, b"tenc").expect("Audio EN init must contain tenc");
                 assert!(tenc.windows(16).any(|b| b == kid_audio_en.as_bytes()));
                 found_a_en = true;
-            } else if name.contains("track4") {
+            } else if name.starts_with("audio_spa") {
                 let tenc = find_box(&data, b"tenc").expect("Audio ES init must contain tenc");
                 assert!(tenc.windows(16).any(|b| b == kid_audio_es.as_bytes()));
                 found_a_es = true;
-            } else if name.contains("track5") {
+            } else if name.starts_with("sub") {
                 assert!(find_box(&data, b"tenc").is_none());
                 found_sub = true;
             }

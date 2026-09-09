@@ -10,6 +10,11 @@ A Rust library orchestrating DRM packaging and manifest generation for media-ser
 The core controller unit of work. Manages key acquisition, GPAC subprocess lifecycle over anonymous Unix pipes, and manifest delivery into Ramdisk.
 _Avoid_: Job, task, pipeline, worker
 
+**SessionWriter**:
+An owned write handle implementing `tokio::io::AsyncWrite`, created via `PackagingSession::writer()`. Bridges poll-based I/O (e.g. `tokio::io::copy`) with the session's async data ingestion pipeline. Internally backed by a bounded channel and a forwarding task that replicates `push()` semantics (lifecycle checks, heartbeat, cluster fan-out).
+_Avoid_: Write adapter, pipe wrapper, session sink
+
+
 **ProcessSupervisor**:
 The asynchronous supervisor task monitoring a GPAC subprocess exit lifecycle and stderr stream, detecting unexpected crashes immediately and distinguishing them from graceful finalization.
 _Avoid_: Process monitor, child watcher, process tracker

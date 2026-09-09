@@ -10,5 +10,12 @@ coverage/
 .DS_Store
 /target
 repomix-output.xml
+# AI Agents, Skills & Scratchpads
 .agents/
+.claude/
+.claude.json
+CLAUDE.local.md
+.scratch/
 scratch/
+*.scratch.*
+.agent-scratchpad/

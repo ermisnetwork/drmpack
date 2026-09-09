@@ -1,7 +1,6 @@
 use crate::error::{DrmpackError, Result};
 use crate::key::{ContentKey, KeyID, KeyProvider, KeyRequest, KeySet, PsshData};
 use crate::types::{EncryptionScheme, QualityTier, TrackType};
-use async_trait::async_trait;
 use std::collections::HashMap;
 
 /// In-memory test double and pre-shared key store supplying manually configured
@@ -58,10 +57,6 @@ impl StaticKeySource {
         self
     }
 
-    pub fn add_key(&mut self, key: ContentKey) {
-        self.insert_key(key);
-    }
-
     pub fn insert_key(&mut self, key: ContentKey) {
         self.keys.insert(
             (
@@ -74,7 +69,6 @@ impl StaticKeySource {
     }
 }
 
-#[async_trait]
 impl KeyProvider for StaticKeySource {
     async fn fetch_keys(&self, request: &KeyRequest) -> Result<KeySet> {
         let mut set = KeySet::new();

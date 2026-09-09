@@ -618,7 +618,7 @@ async fn test_cpix_provider_e2e_real_packaging_cenc() {
         "DASH MPD must contain CPIX KID"
     );
 
-    let init_mp4 = out_dir.join("stdin_dashinit.mp4");
+    let init_mp4 = out_dir.join("video_360p_init.mp4");
     assert!(init_mp4.exists(), "Init segment must exist");
     let init_bytes = tokio::fs::read(&init_mp4).await.unwrap();
     let tenc = find_box(&init_bytes, b"tenc").expect("Init segment must contain tenc box");
@@ -648,7 +648,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_cpix_e2e_dual_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::new("cpix-e2e-dual")
+    let session_config = PackagingSessionConfig::new("cpix-e2e-dual")
         .with_rendition(rendition)
         .with_latency_mode(LatencyMode::LowLatency)
         .with_segment_duration(1.0)
@@ -658,7 +658,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
         .with_drm_system(DrmSystem::Widevine)
         .with_drm_system(DrmSystem::FairPlay);
 
-    let mut session = PackagingSession::create(config, &provider)
+    let mut session = PackagingSession::create(session_config, &provider)
         .await
         .expect("Failed to create Dual PackagingSession with CpixProvider");
 
@@ -675,7 +675,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
         .expect("Failed to close session cleanly");
 
     // Verify CENC Representation has CENC CPIX KID
-    let cenc_init = out_dir.join("cenc/stdin_dashinit.mp4");
+    let cenc_init = out_dir.join("cenc/video_360p_init.mp4");
     assert!(cenc_init.exists());
     let cenc_init_bytes = tokio::fs::read(&cenc_init).await.unwrap();
     let cenc_tenc = find_box(&cenc_init_bytes, b"tenc").expect("cenc must have tenc");
@@ -686,7 +686,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
     );
 
     // Verify CBCS Representation has distinct CBCS CPIX KID
-    let cbcs_init = out_dir.join("cbcs/stdin_dashinit.mp4");
+    let cbcs_init = out_dir.join("cbcs/video_360p_init.mp4");
     assert!(cbcs_init.exists());
     let cbcs_init_bytes = tokio::fs::read(&cbcs_init).await.unwrap();
     let cbcs_tenc = find_box(&cbcs_init_bytes, b"tenc").expect("cbcs must have tenc");

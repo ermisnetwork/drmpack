@@ -510,7 +510,9 @@ async fn test_direct_output_channel_ephemeral_staging_during_active_push() {
 
     let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         while let Some(artifact) = rx.recv().await {
-            if artifact.kind == ArtifactKind::InitSegment || artifact.kind == ArtifactKind::MediaSegment {
+            if artifact.kind == ArtifactKind::InitSegment
+                || artifact.kind == ArtifactKind::MediaSegment
+            {
                 received_artifact = true;
                 artifact_filename = artifact.filename;
                 artifact_kind = artifact.kind;

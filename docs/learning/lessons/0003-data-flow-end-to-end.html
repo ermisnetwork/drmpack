@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>Lesson 3 — Luồng Data End-to-End trong drmpack</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    .flow-step {
+      position: relative;
+      padding: 1.2rem 1.2rem 1.2rem 4rem;
+      margin: 1.2rem 0;
+      background: #fafbfc;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      border-left: 4px solid var(--accent);
+    }
+    .flow-step .step-num {
+      position: absolute;
+      left: 0.8rem;
+      top: 1rem;
+      width: 2rem;
+      height: 2rem;
+      background: var(--accent);
+      color: white;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 2rem;
+      font-family: var(--font-sans);
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+    .flow-step h3 { margin-top: 0; font-size: 1.1rem; }
+    .flow-step .file-ref {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: #666;
+      display: block;
+      margin-top: 0.3rem;
+    }
+    .arrow-down {
+      text-align: center;
+      font-size: 1.5rem;
+      color: var(--accent);
+      margin: 0;
+      line-height: 1;
+    }
+    .quiz {
+      background: #fff8e1;
+      border: 2px solid #ffb300;
+      border-radius: 8px;
+      padding: 1.2rem;
+      margin: 2rem 0;
+    }
+    .quiz h3 { color: #e65100; margin-top: 0; }
+    .quiz label {
+      display: block;
+      margin: 0.5rem 0;
+      cursor: pointer;
+      font-family: var(--font-sans);
+      font-size: 0.95rem;
+    }
+    .quiz .answer {
+      display: none;
+      margin-top: 1rem;
+      padding: 0.8rem;
+      border-radius: 6px;
+      font-family: var(--font-sans);
+    }
+    .quiz .answer.correct { background: #e8f5e9; border: 1px solid #4caf50; }
+    .quiz .answer.wrong { background: #ffebee; border: 1px solid #f44336; }
+    .analogy {
+      background: #e8f5e9;
+      border-left: 4px solid #4caf50;
+      padding: 1rem 1.2rem;
+      margin: 1.5rem 0;
+      border-radius: 0 6px 6px 0;
+    }
+    .analogy strong { color: #2e7d32; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+<h1>Lesson 3 — Luồng Data End-to-End</h1>
+<p><em>Mục tiêu:</em> Hiểu toàn bộ hành trình của media bytes từ khi đi vào <code>drmpack</code> cho đến khi ra ngoài dưới dạng encrypted segments — sẵn sàng để phát trên player.</p>
+
+<div class="analogy">
+  <strong>🍕 Ví von nhà bếp:</strong> Hãy tưởng tượng <code>drmpack</code> là một nhà bếp pizza tự động:
+  <ul>
+    <li>Bạn đưa <strong>bột pizza</strong> (media bytes) vào băng chuyền</li>
+    <li>Nhà bếp gọi điện lấy <strong>công thức mật</strong> (DRM keys) từ nhà cung cấp</li>
+    <li>Lò nướng (<strong>GPAC</strong>) cắt nhỏ thành miếng và niêm phong mỗi miếng bằng ổ khóa riêng</li>
+    <li>Nhân viên giao hàng (<strong>Harvester</strong>) đợi pizza ra lò, kiểm tra chất lượng, rồi đặt lên xe giao hàng (<strong>output channel</strong>)</li>
+  </ul>
+</div>
+
+<h2>Tổng quan: 6 bước</h2>
+
+<div class="box-diagram">Media bytes (fMP4)
+       │
+       ▼
+  ┌─────────────────────────────┐
+  │  ① PackagingSession::push() │  ← Nhận media bytes
+  └──────────────┬──────────────┘
+                 │
+       ▼ fan-out (CENC / CBCS)
+  ┌─────────────────────────────┐
+  │  ② KeyProvider::fetch_keys()│  ← Lấy encryption keys từ DRM vendor
+  └──────────────┬──────────────┘
+                 │
+       ▼ keys → XML config
+  ┌─────────────────────────────┐
+  │  ③ GPAC cecrypt + dasher    │  ← Mã hóa + cắt segment + tạo manifest
+  └──────────────┬──────────────┘
+                 │
+       ▼ .m4s + .m3u8 + .mpd → disk
+  ┌─────────────────────────────┐
+  │  ④ Harvester::harvest()     │  ← Đọc segments từ disk khi HLS manifest xác nhận
+  └──────────────┬──────────────┘
+                 │
+       ▼ Bytes → mpsc channel
+  ┌─────────────────────────────┐
+  │  ⑤ PackagedArtifact → rx    │  ← Consumer nhận qua async channel
+  └─────────────────────────────┘</div>
+
+<h2>Chi tiết từng bước</h2>
+
+<!-- STEP 1 -->
+<div class="flow-step">
+  <span class="step-num">1</span>
+  <h3>Input — Nhận media bytes</h3>
+  <span class="file-ref">src/session/mod.rs → push() → push_data()</span>
+
+  <p>Consumer (media-server) gọi <code>session.push(bytes)</code> truyền vào raw <strong>fragmented MP4</strong> (fMP4) — đã được encode bằng ffmpeg hoặc encoder khác. Bytes chứa các ISO-BMFF box: <code>ftyp</code>, <code>moov</code>, <code>moof</code>, <code>mdat</code>.</p>
+
+  <p><code>push()</code> làm 3 việc:</p>
+  <ol>
+    <li>Scan bytes tìm <code>b"moof"</code> → đánh dấu "đã có media thật"</li>
+    <li>Gọi <code>harvester.ping()</code> → đánh thức Harvester ngay (không đợi 200ms tick)</li>
+    <li>Gọi <code>cluster.write_data(bytes)</code> → fan-out tới mọi Representation</li>
+  </ol>
+
+  <div class="callout">
+    <strong>Fan-out là gì?</strong> Nếu bạn dùng <code>EncryptionScheme::Dual</code>, cùng 1 luồng media sẽ được gửi đồng thời tới 2 GPAC process: một mã hóa bằng CENC (AES-CTR), một bằng CBCS (AES-CBC pattern). Mỗi process là một <strong>Representation</strong>.
+  </div>
+</div>
+
+<p class="arrow-down">⬇</p>
+
+<!-- STEP 2 -->
+<div class="flow-step">
+  <span class="step-num">2</span>
+  <h3>Key Acquisition — Lấy khóa mã hóa</h3>
+  <span class="file-ref">src/key/policy.rs → KeyPolicyEngine::plan() → fetch_keys() → resolve()</span>
+
+  <p>Bước này xảy ra <strong>trước khi push()</strong>, trong <code>PackagingSession::create()</code>. Gồm 3 pha:</p>
+
+  <table>
+    <tr><th>Pha</th><th>Làm gì</th><th>Output</th></tr>
+    <tr>
+      <td><strong>Plan</strong></td>
+      <td><code>KeyPolicyEngine::plan()</code> nhìn vào danh sách Rendition + KeyMappingPolicy để quyết định cần bao nhiêu key</td>
+      <td><code>KeyPlan</code> — chứa <code>KeyRequest</code></td>
+    </tr>
+    <tr>
+      <td><strong>Fetch</strong></td>
+      <td>Gọi <code>provider.fetch_keys(request)</code>. Provider có thể là:
+        <ul style="margin:0.3rem 0">
+          <li><code>RawKeyProvider</code> — key cứng, dùng cho test</li>
+          <li><code>CpixProvider</code> — gửi CPIX XML qua HTTP POST</li>
+          <li><code>SpekeV2Provider</code> — gửi SPEKE v2 qua HTTPS</li>
+          <li><code>AxinomProvider</code> — adapter cho Axinom Key Service</li>
+        </ul>
+      </td>
+      <td><code>KeySet</code> — chứa <code>ContentKey</code>(s) + <code>PsshData</code></td>
+    </tr>
+    <tr>
+      <td><strong>Resolve</strong></td>
+      <td><code>KeyPolicyEngine::resolve()</code> map mỗi key về đúng Rendition theo policy</td>
+      <td>Mỗi Rendition có key + KID riêng</td>
+    </tr>
+  </table>
+
+  <div class="callout">
+    <strong>ContentKey là gì?</strong> Một AES-128 key (16 bytes) + một KeyID (UUID). KeyID xuất hiện trong PSSH box và manifest DRM signaling để player biết cần xin license cho key nào.
+  </div>
+</div>
+
+<p class="arrow-down">⬇</p>
+
+<!-- STEP 3 -->
+<div class="flow-step">
+  <span class="step-num">3</span>
+  <h3>Encryption — GPAC mã hóa + đóng gói</h3>
+  <span class="file-ref">src/gpac/xml.rs → generate() | src/gpac/process.rs → spawn()</span>
+
+  <p>Đây là bước nặng nhất — nhưng <code>drmpack</code> không tự mã hóa! Nó giao cho <strong>GPAC</strong> (binary bên ngoài) chạy như subprocess.</p>
+
+  <p><strong>Trước khi GPAC chạy</strong>, drmpack tạo 1 file XML chứa thông tin mã hóa:</p>
+
+<pre>&lt;DRMInfo type="pssh" value="..."&gt;
+  &lt;BS ID128="edef8ba9-..." /&gt;  &lt;!-- Widevine System ID --&gt;
+&lt;/DRMInfo&gt;
+&lt;CrypTrack trackID="1"
+  crypt_byte_block="1" skip_byte_block="9"&gt;  &lt;!-- CBCS 1:9 pattern --&gt;
+  &lt;key KID="01020304-..." value="QUJDRA...==" /&gt;
+&lt;/CrypTrack&gt;</pre>
+
+  <p><strong>GPAC filter chain</strong> (3 filter nối tiếp):</p>
+
+<pre>stdin:ext=mp4    →    cecrypt:cfile=drm.xml    →    dasher:live.mpd
+  (đọc fMP4)           (mã hóa AES)                 (cắt segment + manifest)</pre>
+
+  <p>Giải thích:</p>
+  <ol>
+    <li><strong>stdin filter</strong> — đọc fMP4 từ pipe (drmpack ghi vào qua <code>BufWriter&lt;ChildStdin&gt;</code>)</li>
+    <li><strong>cecrypt filter</strong> — mã hóa mỗi media sample bằng AES-128 theo mode CENC hoặc CBCS</li>
+    <li><strong>dasher filter</strong> — cắt thành segment <code>.m4s</code> (mỗi 2s), tạo <code>init.mp4</code>, viết manifest <code>.m3u8</code> (HLS) và <code>.mpd</code> (DASH)</li>
+  </ol>
+
+  <p>Output ghi ra <strong>staging directory</strong> (thường là <code>/tmp</code> hoặc ramdisk).</p>
+</div>
+
+<p class="arrow-down">⬇</p>
+
+<!-- STEP 4 -->
+<div class="flow-step">
+  <span class="step-num">4</span>
+  <h3>Harvesting — Thu hoạch segment từ disk</h3>
+  <span class="file-ref">src/session/harvester.rs → harvest_target()</span>
+
+  <p>Harvester chạy background, tick mỗi <strong>200ms</strong>. Mỗi tick nó:</p>
+  <ol>
+    <li>Quét staging directory tìm file <code>.m3u8</code>, <code>.mpd</code>, <code>.m4s</code>, <code>init.mp4</code></li>
+    <li>Đọc HLS manifest, parse segment filenames vào <code>HashSet</code></li>
+    <li>Với mỗi <code>.m4s</code> file: kiểm tra tên có trong HLS manifest không? (<strong>Manifest-Driven Readiness</strong>)</li>
+    <li>Nếu có → đọc file, kiểm tra ISO-BMFF box (<code>moof</code> + <code>mdat</code>) đầy đủ → emit</li>
+    <li><strong>Xoá file khỏi disk</strong> ngay sau khi đọc vào memory (<strong>Ephemeral Staging</strong>)</li>
+  </ol>
+
+  <div class="callout">
+    <strong>Tại sao cần Manifest-Driven Readiness?</strong> GPAC ghi segment ra disk <em>trong khi đang ghi</em>. Nếu Harvester đọc file trước khi GPAC ghi xong → nhận được segment bị cắt nửa chừng → player crash. Giải pháp: chỉ đọc khi HLS manifest xác nhận segment đã hoàn chỉnh.
+  </div>
+
+  <div class="callout">
+    <strong>Init segment là ngoại lệ.</strong> Init segment (<code>video_720p_init.mp4</code>) nhỏ (~1KB), GPAC ghi atomic. Nó bypass manifest readiness và chỉ cần qua ISOBMFF completeness check (<code>ftyp</code> + <code>moov</code> box).
+  </div>
+</div>
+
+<p class="arrow-down">⬇</p>
+
+<!-- STEP 5 -->
+<div class="flow-step">
+  <span class="step-num">5</span>
+  <h3>Output — Giao segment cho consumer</h3>
+  <span class="file-ref">src/types.rs → PackagedArtifact | src/session/mod.rs → take_output_receiver()</span>
+
+  <p>Harvester wrap bytes vào <code>PackagedArtifact</code>:</p>
+
+<pre>PackagedArtifact {
+    filename: "video_720p_1.m4s",
+    data: Bytes(...),           // zero-copy, refcounted
+    kind: ArtifactKind::MediaSegment,
+    scheme: EncryptionScheme::Cbcs,
+}</pre>
+
+  <p>Rồi gửi qua <code>mpsc::channel(1024)</code>. Consumer nhận bằng:</p>
+
+<pre>let mut rx = session.take_output_receiver().unwrap();
+while let Some(artifact) = rx.recv().await {
+    // Upload artifact.data lên S3, CDN, hoặc serve qua HTTP
+}</pre>
+
+  <p>Khi <code>session.close()</code> được gọi → stdin EOF → GPAC flush → Harvester chạy final pass → channel đóng → <code>rx.recv()</code> trả <code>None</code>.</p>
+</div>
+
+<h2>Tổng kết</h2>
+
+<table>
+  <tr><th>Bước</th><th>Module</th><th>Ai làm việc nặng</th><th>I/O</th></tr>
+  <tr><td>① Input</td><td><code>session</code></td><td>drmpack</td><td>Pipe write</td></tr>
+  <tr><td>② Keys</td><td><code>key + cpix/speke/vendor</code></td><td>DRM vendor HTTP API</td><td>Network</td></tr>
+  <tr><td>③ Encrypt</td><td><code>gpac</code></td><td>GPAC subprocess</td><td>Pipe read + disk write</td></tr>
+  <tr><td>④ Harvest</td><td><code>harvester</code></td><td>drmpack async task</td><td>Disk read + unlink</td></tr>
+  <tr><td>⑤ Output</td><td><code>session</code></td><td>Consumer</td><td>Channel recv</td></tr>
+</table>
+
+<!-- QUIZ -->
+<div class="quiz">
+  <h3>🧠 Kiểm tra hiểu biết</h3>
+
+  <p><strong>Q1: Tại sao Harvester không đọc segment ngay khi thấy file <code>.m4s</code> trên disk?</strong></p>
+  <label><input type="radio" name="q1" onclick="document.getElementById('a1w').style.display='none';document.getElementById('a1c').style.display='block'"> Vì GPAC có thể đang ghi dở — file chưa hoàn chỉnh</label>
+  <label><input type="radio" name="q1" onclick="document.getElementById('a1c').style.display='none';document.getElementById('a1w').style.display='block'"> Vì file cần được mã hóa trước</label>
+  <label><input type="radio" name="q1" onclick="document.getElementById('a1c').style.display='none';document.getElementById('a1w').style.display='block'"> Vì cần đợi key từ DRM vendor</label>
+  <div id="a1c" class="answer correct">✅ Đúng! GPAC ghi segment ra disk incrementally. Đọc trước khi ghi xong = nhận segment cắt nửa chừng. HLS manifest chỉ list segment SAU KHI GPAC ghi xong → đó là tín hiệu an toàn.</div>
+  <div id="a1w" class="answer wrong">❌ Sai. Keys đã được fetch trước khi GPAC chạy, và file đã được mã hóa rồi. Vấn đề là file có thể đang được ghi dở bởi GPAC.</div>
+
+  <p><strong>Q2: drmpack tự mã hóa media bằng AES không?</strong></p>
+  <label><input type="radio" name="q2" onclick="document.getElementById('a2w').style.display='none';document.getElementById('a2c').style.display='block'"> Không — nó giao cho GPAC subprocess làm</label>
+  <label><input type="radio" name="q2" onclick="document.getElementById('a2c').style.display='none';document.getElementById('a2w').style.display='block'"> Có — dùng thư viện ring trong Rust</label>
+  <div id="a2c" class="answer correct">✅ Đúng! drmpack chỉ orchestrate: lấy key, tạo XML config, spawn GPAC, rồi thu hoạch output. GPAC cecrypt filter làm việc mã hóa thật sự.</div>
+  <div id="a2w" class="answer wrong">❌ Sai. <code>ring</code> chỉ là dev-dependency dùng cho test. drmpack không tự mã hóa — nó giao cho GPAC binary bên ngoài.</div>
+
+  <p><strong>Q3: Khi dùng <code>EncryptionScheme::Dual</code>, chuyện gì xảy ra?</strong></p>
+  <label><input type="radio" name="q3" onclick="document.getElementById('a3w').style.display='none';document.getElementById('a3c').style.display='block'"> Cùng 1 media được gửi tới 2 GPAC process, mỗi cái mã hóa bằng scheme khác nhau</label>
+  <label><input type="radio" name="q3" onclick="document.getElementById('a3c').style.display='none';document.getElementById('a3w').style.display='block'"> GPAC mã hóa 2 lần tuần tự trong cùng 1 process</label>
+  <div id="a3c" class="answer correct">✅ Đúng! RepresentationCluster fan-out media tới 2 GPAC process đồng thời: một CENC (AES-CTR), một CBCS (AES-CBC 1:9 pattern). Output riêng biệt.</div>
+  <div id="a3w" class="answer wrong">❌ Sai. Dual mode spawn 2 GPAC process song song, không phải tuần tự trong 1 process.</div>
+</div>
+
+<h2>Đọc thêm</h2>
+<ul>
+  <li><a href="./0001-tracer-cenc-hls-deep-dive.html">Lesson 1 — CENC + HLS Deep Dive</a></li>
+  <li><a href="./0002-ll-cmaf-cbcs-multidrm-deep-dive.html">Lesson 2 — LL-CMAF + CBCS Multi-DRM</a></li>
+  <li><strong>Primary source:</strong> <a href="https://wiki.gpac.io/Filters/cecrypt/">GPAC cecrypt filter documentation</a></li>
+  <li><strong>ADR-0015:</strong> <a href="../../adr/0015-direct-output-channel-and-safe-storage.md">Direct Output Channel and Safe Storage</a></li>
+</ul>
+
+<div class="footer">
+  <p>Có gì chưa hiểu? Hỏi agent — mình là giáo viên của bạn và có thể giải thích sâu hơn bất kỳ bước nào. 🎓</p>
+  <p><em>drmpack learning workspace · Lesson 3 · 2026-09-08</em></p>
+</div>
+
+</div>
+</body>
+</html>

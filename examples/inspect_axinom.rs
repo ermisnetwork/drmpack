@@ -133,12 +133,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  Total Keys Acquired: {}", key_set.len());
             for key in key_set.all_keys() {
                 println!(
-                    "  - KID: {} | Scheme: {:?} | Tier: {:?} | Track: {:?} | Key: {}",
+                    "  - KID: {} | Scheme: {:?} | Tier: {:?} | Track: {:?} | Key: {:032x}",
                     key.kid.0.hyphenated(),
                     key.encryption_scheme,
                     key.quality_tier.0.as_str(),
                     key.track_type,
-                    hex::encode(key.key)
+                    u128::from_be_bytes(key.key)
                 );
             }
             println!("  DRM Signaling / PSSH entries: {}", key_set.pssh.len());
@@ -160,10 +160,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================================================\n");
 
     Ok(())
-}
-
-mod hex {
-    pub fn encode(data: [u8; 16]) -> String {
-        data.iter().map(|b| format!("{b:02x}")).collect()
-    }
 }

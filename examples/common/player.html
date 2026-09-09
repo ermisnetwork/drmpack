@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>drmpack - Live Playback Player</title>
+  <script src="https://ajax.googleapis.com/ajax/libs/shaka-player/4.12.5/shaka-player.compiled.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #111827;
+      color: #f3f4f6;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px;
+      margin: 0;
+    }
+    h1 {
+      font-size: 22px;
+      margin-bottom: 8px;
+    }
+    .container {
+      max-width: 860px;
+      width: 100%;
+    }
+    .status-bar {
+      margin-bottom: 12px;
+      padding: 8px 12px;
+      background: #1f2937;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #9ca3af;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .status-bar.error {
+      background: #7f1d1d;
+      color: #fca5a5;
+    }
+    .video-wrapper {
+      position: relative;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      aspect-ratio: 16 / 9;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .info-table {
+      margin-top: 16px;
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .info-table td {
+      padding: 6px 12px;
+      border-bottom: 1px solid #374151;
+    }
+    .info-table td:first-child {
+      color: #9ca3af;
+      width: 140px;
+      font-weight: 500;
+    }
+    .controls {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 13px;
+    }
+    .controls a {
+      color: #60a5fa;
+      text-decoration: none;
+    }
+    .controls a:hover {
+      text-decoration: underline;
+    }
+    .btn {
+      background: #374151;
+      border: none;
+      color: #f3f4f6;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .btn:hover {
+      background: #4b5563;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>drmpack Live Player</h1>
+    <div id="status" class="status-bar">Initializing Shaka Player...</div>
+    <div class="video-wrapper">
+      <video id="video" controls autoplay playsinline muted></video>
+    </div>
+    <div class="controls" id="controls-row">
+      <span style="color: #9ca3af; font-weight: 600;">Stream Mode:</span>
+      <a href="?stream=live.mpd">DASH (.mpd)</a>
+      <span style="color: #4b5563;">|</span>
+      <a href="?stream=live.m3u8">HLS (.m3u8)</a>
+      <span style="color: #4b5563;">|</span>
+      <span style="color: #9ca3af; font-weight: 600;">Latency:</span>
+      <a href="javascript:void(0)" onclick="setLatencyMode(false)" id="mode-std">Standard</a>
+      <span style="color: #4b5563;">/</span>
+      <a href="javascript:void(0)" onclick="setLatencyMode(true)" id="mode-ll">Low-Latency</a>
+      <span style="color: #4b5563;">|</span>
+      <button class="btn" onclick="window.location.reload()">Reload</button>
+    </div>
+    <table class="info-table">
+      <tr><td>Manifest URL</td><td id="val-stream">-</td></tr>
+      <tr><td>Latency Mode</td><td id="val-latency">Auto-detected</td></tr>
+      <tr><td>DRM System</td><td id="val-drm">Detecting...</td></tr>
+      <tr><td>License Proxy</td><td id="val-license">-</td></tr>
+      <tr><td>Active KIDs</td><td id="val-kids">-</td></tr>
+    </table>
+  </div>
+  <script>
+    function setLatencyMode(enableLL) {
+      const u = new URL(window.location.href);
+      u.searchParams.set('ll', enableLL ? '1' : '0');
+      window.location.href = u.toString();
+    }
+    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+    const defaultManifest = isSafari ? '/live.m3u8' : '{manifest_path}';
+    const urlParams = new URLSearchParams(window.location.search);
+    const streamParam = urlParams.get('stream') || urlParams.get('manifest');
+
+    async function checkStreamReady(url) {
+      try {
+        const res = await fetch(url, { method: 'HEAD' });
+        return res.ok;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    async function initPlayer() {
+      shaka.polyfill.installAll();
+      if (!shaka.Player.isBrowserSupported()) {
+        const s = document.getElementById('status');
+        s.textContent = 'Browser does not support EME / Shaka Player!';
+        s.className = 'status-bar error';
+        return;
+      }
+
+      let sessionInfo = null;
+      try {
+        const res = await fetch('/api/session-info');
+        if (res.ok) {
+          sessionInfo = await res.json();
+        }
+      } catch (err) {
+        console.log('Fetch /api/session-info failed:', err);
+      }
+
+      let streamUrl = streamParam
+        ? (streamParam.startsWith('http') ? streamParam : window.location.origin + '/' + streamParam.replace(/^\//, ''))
+        : defaultManifest;
+
+      if (!streamParam && sessionInfo && sessionInfo.drm_scheme === 'dual') {
+        streamUrl = isSafari
+          ? (window.location.origin + '/cbcs/live.m3u8')
+          : (window.location.origin + '/cenc/live.mpd');
+      }
+
+      if (sessionInfo && sessionInfo.drm_scheme === 'dual') {
+        const controlsEl = document.getElementById('controls-row');
+        if (controlsEl) {
+          controlsEl.innerHTML = `
+            <span style="color: #9ca3af; font-weight: 600;">Dual Streams:</span>
+            <a href="?stream=cenc/live.mpd">CENC DASH</a>
+            <span style="color: #4b5563;">|</span>
+            <a href="?stream=cenc/live.m3u8">CENC HLS</a>
+            <span style="color: #4b5563;">|</span>
+            <a href="?stream=cbcs/live.m3u8">CBCS HLS (FairPlay)</a>
+            <span style="color: #4b5563;">|</span>
+            <a href="?stream=cbcs/live.mpd">CBCS DASH</a>
+            <span style="color: #4b5563;">|</span>
+            <span style="color: #9ca3af; font-weight: 600;">Latency:</span>
+            <a href="javascript:void(0)" onclick="setLatencyMode(false)" id="mode-std">Standard</a>
+            <span style="color: #4b5563;">/</span>
+            <a href="javascript:void(0)" onclick="setLatencyMode(true)" id="mode-ll">Low-Latency</a>
+            <span style="color: #4b5563;">|</span>
+            <button class="btn" onclick="window.location.reload()">Reload</button>
+          `;
+        }
+      }
+
+      document.getElementById('val-stream').textContent = streamUrl;
+      const statusEl = document.getElementById('status');
+
+      let isReady = await checkStreamReady(streamUrl);
+      if (!isReady) {
+        statusEl.textContent = 'Waiting for live packager stream... (Please start 06_e2e_live_clearkey or 07_e2e_live_axinom)';
+        statusEl.className = 'status-bar';
+        while (!isReady) {
+          await new Promise((r) => setTimeout(r, 1000));
+          isReady = await checkStreamReady(streamUrl);
+        }
+      }
+
+      const video = document.getElementById('video');
+      const player = new shaka.Player();
+      await player.attach(video);
+
+      let isLowLatency = false;
+      if (urlParams.has('ll')) {
+        isLowLatency = (urlParams.get('ll') === '1' || urlParams.get('ll') === 'true');
+      } else if (sessionInfo && sessionInfo.latency_mode) {
+        isLowLatency = (sessionInfo.latency_mode === 'low-latency');
+      } else if (streamUrl.includes('.mpd')) {
+        try {
+          const mpdRes = await fetch(streamUrl);
+          if (mpdRes.ok) {
+            const mpdText = await mpdRes.text();
+            if (mpdText.includes('availabilityTimeOffset') || mpdText.includes('cdur=')) {
+              isLowLatency = true;
+            }
+          }
+        } catch (_) {}
+      }
+
+      const latencyEl = document.getElementById('val-latency');
+      if (latencyEl) {
+        latencyEl.textContent = isLowLatency
+          ? 'Low-Latency (CMAF 200ms chunks)'
+          : 'Standard (2.0s segments)';
+      }
+      const stdBtn = document.getElementById('mode-std');
+      const llBtn = document.getElementById('mode-ll');
+      if (stdBtn && llBtn) {
+        if (isLowLatency) {
+          llBtn.style.fontWeight = '700';
+          llBtn.style.color = '#10b981';
+          stdBtn.style.color = '#9ca3af';
+        } else {
+          stdBtn.style.fontWeight = '700';
+          stdBtn.style.color = '#10b981';
+          llBtn.style.color = '#9ca3af';
+        }
+      }
+
+      player.configure({
+        streaming: {
+          lowLatencyMode: isLowLatency,
+          preferNativeHls: false,
+          useNativeHlsForFairPlay: false
+        }
+      });
+
+      player.addEventListener('error', (event) => {
+        const detail = event.detail;
+        let msg = (detail && detail.code) ? ('Error ' + detail.code + ' (category ' + detail.category + ')') : 'Playback Error';
+        if (detail && detail.data) {
+          console.error('Shaka error details:', detail.data);
+          for (const item of detail.data) {
+            if (item && typeof item === 'object') {
+              if (item['x-axdrm-errormessage']) {
+                msg += ' - Axinom: ' + item['x-axdrm-errormessage'];
+              }
+            } else if (typeof item === 'string' || typeof item === 'number') {
+              msg += ' (' + item + ')';
+            }
+          }
+        }
+        statusEl.textContent = 'Playback Error: ' + msg;
+        statusEl.className = 'status-bar error';
+      });
+
+      video.addEventListener('error', () => {
+        const err = video.error;
+        if (err) {
+          console.error('HTMLVideoElement error:', err.code, err.message);
+          statusEl.textContent = 'Video Error ' + err.code + ': ' + (err.message || 'Media decode error');
+          statusEl.className = 'status-bar error';
+        }
+      });
+
+      video.addEventListener('playing', () => {
+        statusEl.textContent = 'Decrypted & Streaming Live';
+        statusEl.className = 'status-bar';
+      });
+
+      if (sessionInfo && sessionInfo.drm_system === 'axinom') {
+        const wvUrl = window.location.origin + '/license/widevine';
+        const fpUrl = window.location.origin + '/license/fairplay';
+        const fpCert = window.location.origin + '/fairplay.cer';
+
+        const schemeName = sessionInfo.drm_scheme === 'fairplay'
+          ? 'Axinom (Apple FairPlay / CBCS)'
+          : (sessionInfo.drm_scheme === 'dual' ? 'Axinom Dual (Widevine + FairPlay)' : 'Axinom (Widevine L3 / SPEKE v2)');
+
+        document.getElementById('val-drm').textContent = schemeName;
+        document.getElementById('val-license').textContent = isSafari ? fpUrl : wvUrl;
+        document.getElementById('val-kids').textContent =
+          sessionInfo.kids && sessionInfo.kids.length > 0 ? sessionInfo.kids.join(', ') : '-';
+
+        // Pre-fetch FairPlay Application Certificate via proxy endpoint if on Safari
+        let certBytes = null;
+        if (isSafari || streamUrl.includes('.m3u8')) {
+          try {
+            const certRes = await fetch(fpCert);
+            if (certRes.ok) {
+              certBytes = new Uint8Array(await certRes.arrayBuffer());
+              console.log('FairPlay Application Certificate loaded via proxy (' + certBytes.length + ' bytes)');
+            } else {
+              console.warn('FairPlay cert fetch returned status:', certRes.status);
+            }
+          } catch (e) {
+            console.warn('FairPlay cert fetch error:', e);
+          }
+        }
+
+        const fpsAdvanced = {
+          serverCertificateUri: fpCert
+        };
+        if (certBytes) {
+          fpsAdvanced.serverCertificate = certBytes;
+        }
+
+        const fpUtils = (shaka.drm && shaka.drm.FairPlay) || (shaka.util && shaka.util.FairPlayUtils);
+
+        player.configure({
+          streaming: {
+            lowLatencyMode: isLowLatency,
+            preferNativeHls: false,
+            useNativeHlsForFairPlay: false
+          },
+          drm: {
+            servers: {
+              'com.widevine.alpha': wvUrl,
+              'com.apple.fps': fpUrl,
+              'com.apple.fps.1_0': fpUrl
+            },
+            advanced: {
+              'com.apple.fps': fpsAdvanced,
+              'com.apple.fps.1_0': fpsAdvanced
+            },
+            initDataTransform: (initData, initDataType, drmInfo) => {
+              if (initDataType !== 'skd') {
+                return initData;
+              }
+              const rawId = (fpUtils && fpUtils.defaultGetContentId)
+                ? fpUtils.defaultGetContentId(initData)
+                : shaka.util.StringUtils.fromBytesAutoDetect(initData).replace(/^skd:\/\//, '');
+              const contentId = String(rawId).split(':')[0].replace(/^skd:\/\//, '').trim();
+              const cert = (drmInfo && drmInfo.serverCertificate) || certBytes;
+              console.log('FairPlay initDataTransform: contentId =', contentId, 'cert size =', cert ? cert.length : 0);
+              if (fpUtils && fpUtils.initDataTransform) {
+                return fpUtils.initDataTransform(initData, contentId, cert);
+              }
+              return initData;
+            }
+          }
+        });
+
+        player.getNetworkingEngine().registerRequestFilter((type, request) => {
+          if (type === shaka.net.NetworkingEngine.RequestType.LICENSE) {
+            request.headers['Content-Type'] = 'application/octet-stream';
+          }
+        });
+
+        player.getNetworkingEngine().registerResponseFilter((type, response) => {
+          if (type === shaka.net.NetworkingEngine.RequestType.LICENSE) {
+            const ct = ((response.headers && (response.headers['content-type'] || response.headers['Content-Type'])) || '').toLowerCase();
+            let isText = ct.includes('text') || ct.includes('json') || ct.includes('xml');
+            if (!isText && response.data) {
+              const u8 = response.data instanceof Uint8Array ? response.data : new Uint8Array(response.data);
+              if (u8.length > 0 && (u8[0] === 0x3c || u8[0] === 0x7b)) {
+                isText = true;
+              }
+            }
+            if (isText && fpUtils && fpUtils.commonFairPlayResponse) {
+              fpUtils.commonFairPlayResponse(type, response);
+            }
+          }
+        });
+      } else if (sessionInfo && sessionInfo.drm_system === 'clearkey') {
+        document.getElementById('val-drm').textContent = 'ClearKey DRM (W3C EME)';
+        document.getElementById('val-license').textContent = window.location.origin + '/license/clearkey';
+        document.getElementById('val-kids').textContent =
+          sessionInfo.kids && sessionInfo.kids.length > 0 ? sessionInfo.kids.join(', ') : '-';
+
+        const clearKeys = {};
+        for (const [k, v] of Object.entries(sessionInfo.clear_keys || {})) {
+          clearKeys[k.replace(/-/g, '').toLowerCase()] = v.replace(/-/g, '').toLowerCase();
+        }
+        player.configure({
+          drm: {
+            servers: {
+              'org.w3.clearkey': window.location.origin + '/license/clearkey'
+            },
+            clearKeys: clearKeys
+          }
+        });
+      } else {
+        document.getElementById('val-drm').textContent = 'Clear / Unencrypted';
+        document.getElementById('val-kids').textContent = '-';
+      }
+
+      try {
+        statusEl.textContent = 'Loading live manifest...';
+        await player.load(streamUrl);
+        statusEl.textContent = 'Live Manifest Loaded';
+      } catch (err) {
+        let msg = (err && err.code) ? ('Shaka Error ' + err.code + ' (category ' + err.category + ')') : (err.message || String(err));
+        if (err && err.code === 6012) {
+          msg += ' - No DRM license server configured for encrypted stream!';
+        }
+        statusEl.textContent = 'Failed to load live stream: ' + msg;
+        statusEl.className = 'status-bar error';
+      }
+    }
+    document.addEventListener('DOMContentLoaded', initPlayer);
+  </script>
+</body>
+</html>

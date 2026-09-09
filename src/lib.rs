@@ -33,11 +33,11 @@ pub use key::{
 };
 pub use session::{
     PackagingResult, PackagingSession, PackagingSessionConfig, Representation,
-    RepresentationCluster,
+    RepresentationCluster, SessionWriter,
 };
 pub use types::{
-    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, QualityTier,
-    Rendition, TrackType,
+    ArtifactKind, DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat,
+    PackagedArtifact, QualityTier, Rendition, TrackType,
 };
 
 #[cfg(feature = "cpix")]
@@ -50,7 +50,9 @@ pub use speke::{
 };
 
 #[cfg(feature = "axinom")]
-pub use vendor::axinom::{AxinomConfig, AxinomProvider, DEFAULT_AXINOM_ENDPOINT};
+pub use vendor::axinom::{
+    generate_axinom_jwt, AxinomConfig, AxinomKeyConfig, AxinomProvider, DEFAULT_AXINOM_ENDPOINT,
+};
 
 #[cfg(any(feature = "axinom", feature = "license-proxy"))]
 pub use vendor::axinom::{

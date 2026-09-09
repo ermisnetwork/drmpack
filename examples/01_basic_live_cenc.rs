@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let master_m3u8 = tokio::fs::read_to_string(session.hls_manifest_path()?).await?;
     println!("Master HLS Manifest contents:\n{}", master_m3u8.trim());
 
-    let media_m3u8_path = session.output_dir().join("live_1.m3u8");
+    let media_m3u8_path = session.output_dir().join("video_720p.m3u8");
     if media_m3u8_path.exists() {
         let media_m3u8 = tokio::fs::read_to_string(&media_m3u8_path).await?;
         assert!(
@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Media manifest must contain #EXT-X-ENDLIST"
         );
         assert!(media_m3u8.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR"));
-        println!("Verified: Media playlist (live_1.m3u8) has Widevine DRM key signaling and #EXT-X-ENDLIST!");
+        println!("Verified: Media playlist (video_720p.m3u8) has Widevine DRM key signaling and #EXT-X-ENDLIST!");
     }
 
     let _ = tokio::fs::remove_dir_all(&output_dir).await;

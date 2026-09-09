@@ -84,7 +84,7 @@ impl CpixRequestBuilder {
         writeln!(
             xml,
             r#"<cpix:CPIX xmlns:cpix="urn:dashif:org:cpix" xmlns:pskc="urn:ietf:params:xml:ns:keyprov:pskc" version="2.3" contentId="{}">"#,
-            escape_xml(&request.content_id)
+            quick_xml::escape::escape(&request.content_id)
         )
         .unwrap();
 
@@ -140,7 +140,7 @@ impl CpixRequestBuilder {
                 xml,
                 r#"    <cpix:ContentKeyUsageRule kid="{}" intendedTrackType="{}">"#,
                 spec.kid.0.hyphenated(),
-                escape_xml(&intended_track_type)
+                quick_xml::escape::escape(&intended_track_type)
             )
             .unwrap();
 
@@ -161,14 +161,6 @@ impl CpixRequestBuilder {
         writeln!(xml, "</cpix:CPIX>").unwrap();
         Ok((xml, specs))
     }
-}
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]

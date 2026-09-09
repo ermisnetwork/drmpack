@@ -2,7 +2,6 @@ use crate::cpix::builder::CpixRequestBuilder;
 use crate::cpix::parser::CpixResponseParser;
 use crate::error::{DrmpackError, Result};
 use crate::key::{KeyProvider, KeyRequest, KeySet};
-use async_trait::async_trait;
 use std::time::Duration;
 
 /// Configuration options for connecting to a CPIX 2.3 Provider.
@@ -74,7 +73,6 @@ impl CpixProvider {
     }
 }
 
-#[async_trait]
 impl KeyProvider for CpixProvider {
     async fn fetch_keys(&self, request: &KeyRequest) -> Result<KeySet> {
         let (xml_request, specs) = CpixRequestBuilder::build_with_specs(request)?;

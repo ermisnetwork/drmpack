@@ -169,8 +169,7 @@ pub struct Rendition {
 }
 
 fn generate_track_identifier(track_type: TrackType) -> String {
-    let short_uuid = &uuid::Uuid::new_v4().simple().to_string()[..8];
-    format!("track_{}_{}", track_type, short_uuid)
+    format!("track_{}_{:.8}", track_type, uuid::Uuid::new_v4().simple())
 }
 
 impl Rendition {
@@ -244,6 +243,40 @@ impl Rendition {
         self.encrypted = encrypted;
         self
     }
+}
+
+/// Classification of an emitted PackagedArtifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ArtifactKind {
+    /// An initialization segment containing container headers (e.g. `ftyp`, `moov`).
+    InitSegment,
+    /// A media segment containing encoded samples (e.g. `moof`, `mdat`).
+    MediaSegment,
+    /// A manifest playlist or description file (e.g. `.m3u8` or `.mpd`).
+    Manifest,
+}
+
+impl fmt::Display for ArtifactKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArtifactKind::InitSegment => write!(f, "init_segment"),
+            ArtifactKind::MediaSegment => write!(f, "media_segment"),
+            ArtifactKind::Manifest => write!(f, "manifest"),
+        }
+    }
+}
+
+/// An encrypted media segment or updated manifest emitted directly to callers via an async output channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackagedArtifact {
+    /// Relative filename of the artifact (e.g. `video_1080p_1.m4s`, `live.m3u8`).
+    pub filename: String,
+    /// In-memory binary payload.
+    pub data: bytes::Bytes,
+    /// Structural classification of the artifact.
+    pub kind: ArtifactKind,
+    /// Concrete encryption scheme of the artifact.
+    pub scheme: EncryptionScheme,
 }
 
 #[cfg(test)]
@@ -350,8 +383,34 @@ mod tests {
         assert!(json.contains(r#""track_id":"track_video_custom123""#));
         assert!(json.contains(r#""container_track_id":1"#));
         assert!(json.contains(r#""encrypted":true"#));
-
         let deserialized: Rendition = serde_json::from_str(&json).expect("Deserialization failed");
         assert_eq!(r, deserialized);
+    }
+
+    #[test]
+    fn test_packaged_artifact_and_kind() {
+        let artifact = PackagedArtifact {
+            filename: "video_1080p_1.m4s".to_string(),
+            data: bytes::Bytes::from_static(b"test-segment-bytes"),
+            kind: ArtifactKind::MediaSegment,
+            scheme: EncryptionScheme::Cbcs,
+        };
+        assert_eq!(artifact.filename, "video_1080p_1.m4s");
+        assert_eq!(artifact.data.as_ref(), b"test-segment-bytes");
+        assert_eq!(artifact.kind, ArtifactKind::MediaSegment);
+        assert_eq!(artifact.scheme, EncryptionScheme::Cbcs);
+
+        let json = serde_json::to_string(&artifact).expect("Serialization failed");
+        assert!(json.contains(r#""filename":"video_1080p_1.m4s""#));
+        assert!(json.contains(r#""kind":"MediaSegment""#));
+        assert!(json.contains(r#""scheme":"Cbcs""#));
+
+        let deserialized: PackagedArtifact =
+            serde_json::from_str(&json).expect("Deserialization failed");
+        assert_eq!(deserialized, artifact);
+
+        assert_eq!(ArtifactKind::InitSegment.to_string(), "init_segment");
+        assert_eq!(ArtifactKind::MediaSegment.to_string(), "media_segment");
+        assert_eq!(ArtifactKind::Manifest.to_string(), "manifest");
     }
 }
