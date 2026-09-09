@@ -18,9 +18,10 @@ mod common;
 
 use common::playback_server::PlaybackServer;
 use drmpack::axinom::{AxinomLicenseConfig, AxinomSigningConfig};
+use drmpack::key::KeyID;
 use drmpack::license::LicenseProxy;
-use drmpack::session::DrmStreamMetadata;
-use drmpack::types::LatencyMode;
+use drmpack::session::{DrmKeyEntry, DrmStreamMetadata};
+use drmpack::types::{EncryptionScheme, LatencyMode, QualityTier, TrackType};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -508,27 +509,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     println!("Axinom Credentials loaded safely: {signing_config:?}");
 
-    // Load DRM stream metadata (simulating querying the database record for this stream)
-    let meta_file = stream_dir.join("drm_metadata.json");
-    if !meta_file.exists() {
-        eprintln!(
-            "FATAL: Missing DRM metadata file at: {}",
-            meta_file.display()
-        );
-        eprintln!("Run example 08 first to generate content and metadata:");
-        eprintln!(
-            "  cargo run --example 08_in_memory_live_stream -- --dual --axinom --duration 30"
-        );
-        std::process::exit(1);
+    // =========================================================================
+    // NOTE (Production Architecture):
+    // In a production media pipeline (e.g. Ermis Stream), `DrmStreamMetadata` is
+    // stored in your application database (PostgreSQL / Redis) when the packager
+    // starts the stream:
+    //
+    //   // Packager side:
+    //   let meta = session.playback_metadata();
+    //   db.save_stream_drm(stream_id, &meta.to_json()?).await?;
+    //
+    //   // Playback server side (API backend):
+    //   let meta_json = db.get_stream_drm(stream_id).await?;
+    //   let metadata = DrmStreamMetadata::from_json(&meta_json)?;
+    //
+    // In this standalone example, we construct it directly from in-memory variables
+    // (configurable via CLI: --cenc-kid <UUID> and --cbcs-kid <UUID>).
+    // =========================================================================
+    let cenc_kid = parse_arg(&args, "--cenc-kid")
+        .or_else(|| parse_arg(&args, "--kid"))
+        .unwrap_or_else(|| "5a638bec-98da-4ff9-b00b-e13b619e7b54".to_string());
+    let cbcs_kid = parse_arg(&args, "--cbcs-kid")
+        .unwrap_or_else(|| "dc28f232-e82d-45d9-89a9-7b99a40b6a29".to_string());
+
+    let cenc_uuid = uuid::Uuid::parse_str(&cenc_kid).unwrap_or_default();
+    let cbcs_uuid = uuid::Uuid::parse_str(&cbcs_kid).unwrap_or_default();
+
+    let mut keys = Vec::new();
+    if !cenc_uuid.is_nil() {
+        keys.push(DrmKeyEntry {
+            kid: KeyID::new(cenc_uuid),
+            scheme: EncryptionScheme::Cenc,
+            track_type: TrackType::Video,
+            quality_tier: QualityTier::hd(),
+            iv: None,
+        });
     }
-    let meta_json = std::fs::read_to_string(&meta_file)?;
-    let metadata = DrmStreamMetadata::from_json(&meta_json).map_err(|e| {
-        eprintln!("FATAL: Failed to parse DRM metadata JSON: {e}");
-        "Corrupted DRM metadata"
-    })?;
+    if !cbcs_uuid.is_nil() {
+        keys.push(DrmKeyEntry {
+            kid: KeyID::new(cbcs_uuid),
+            scheme: EncryptionScheme::Cbcs,
+            track_type: TrackType::Video,
+            quality_tier: QualityTier::hd(),
+            iv: Some(*cbcs_uuid.as_bytes()),
+        });
+    }
+
+    let metadata = DrmStreamMetadata {
+        content_id: "example08_live".to_string(),
+        scheme: EncryptionScheme::Dual,
+        keys,
+    };
 
     println!(
-        "Loaded DRM Stream Metadata for content: {}",
+        "In-Memory DRM Metadata initialized for content: {}",
         metadata.content_id
     );
     for k in &metadata.keys {

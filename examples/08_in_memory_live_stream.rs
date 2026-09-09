@@ -129,22 +129,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Persist DRM stream metadata for playback servers (simulates database/state persistence)
-    let meta = session.playback_metadata();
-    if let Ok(json) = meta.to_json_pretty() {
-        let meta_path = dump_path.join("drm_metadata.json");
-        if let Err(e) = std::fs::write(&meta_path, json) {
-            eprintln!(
-                "Warning: failed to write DRM metadata to {}: {e}",
-                meta_path.display()
-            );
-        } else {
-            println!(
-                "DRM Playback Metadata saved (for Playback Server): {}",
-                meta_path.display()
-            );
-        }
-    }
+    // NOTE (Production):
+    // Save `session.playback_metadata()` into your database (PostgreSQL/Redis)
+    // so playback API backends can retrieve it by stream_id without scanning storage:
+    // let meta = session.playback_metadata();
+    // db.save_stream_drm(&content_id, &meta).await?;
     println!();
     let tracker = LatencyTracker::default();
     // Consumer: log artifacts + dump to disk
