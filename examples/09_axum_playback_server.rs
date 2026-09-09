@@ -44,7 +44,7 @@ fn parse_arg(args: &[String], flag: &str) -> Option<String> {
 struct AppState {
     com_key_id: String,
     com_key: String,
-    kids: Vec<String>, // KIDs extracted from MPD on disk
+    extracted_keys: Vec<ExtractedKey>, // KIDs with scheme info from MPD
     stream_dir: PathBuf,
     port: u16,
     // ponytail: hardcoded demo token instead of a real session store
@@ -53,39 +53,71 @@ struct AppState {
 
 // ── KID extraction from MPD ──────────────────────────────────────────
 
-/// Parse default_KID values from MPD XML on disk.
-/// ponytail: regex over XML parse — good enough for extracting UUIDs from ContentProtection.
-fn extract_kids_from_dir(dir: &std::path::Path) -> Vec<String> {
-    let mut kids = Vec::new();
-    // Try cenc/ and cbcs/ subdirs, then root
-    let search_dirs: Vec<PathBuf> = ["cenc", "cbcs", ""]
-        .iter()
-        .map(|sub| dir.join(sub))
-        .filter(|p| p.is_dir())
-        .collect();
+/// Extracted key info: KID string + whether it's from a CBCS directory.
+#[derive(Clone, Debug)]
+struct ExtractedKey {
+    kid: String,
+    is_cbcs: bool,
+}
 
-    for search_dir in search_dirs {
-        if let Ok(entries) = std::fs::read_dir(&search_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("mpd") {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        // Extract default_KID="uuid" from ContentProtection elements
-                        for segment in content.split("default_KID=\"") {
-                            if let Some(end) = segment.find('"') {
-                                let kid = &segment[..end];
-                                // Validate UUID-like format
-                                if kid.len() >= 32 && !kids.contains(&kid.to_string()) {
-                                    kids.push(kid.to_string());
-                                }
-                            }
-                        }
+/// Parse default_KID values from MPD XML on disk, tracking scheme per KID.
+/// ponytail: string split over XML parse — good enough for extracting UUIDs.
+fn extract_keys_from_dir(dir: &std::path::Path) -> Vec<ExtractedKey> {
+    let mut keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Check cenc/ and cbcs/ subdirs, then root
+    for (subdir, is_cbcs) in [("cenc", false), ("cbcs", true), ("", false)] {
+        let search_dir = dir.join(subdir);
+        if !search_dir.is_dir() {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&search_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("mpd") {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // Also detect scheme from the MPD value="cbcs" if in root dir
+            let mpd_is_cbcs = is_cbcs || content.contains("value=\"cbcs\"");
+            for segment in content.split("default_KID=\"") {
+                if let Some(end) = segment.find('"') {
+                    let kid = &segment[..end];
+                    if kid.len() >= 32 && seen.insert(kid.to_string()) {
+                        keys.push(ExtractedKey {
+                            kid: kid.to_string(),
+                            is_cbcs: mpd_is_cbcs,
+                        });
                     }
                 }
             }
         }
     }
-    kids
+    keys
+}
+
+/// Build AxinomKeyConfigs from extracted keys.
+/// For CBCS keys, derive IV from KID bytes (FairPlay convention: IV = KID as 16 bytes).
+fn build_key_configs(keys: &[ExtractedKey]) -> Vec<AxinomKeyConfig> {
+    keys.iter()
+        .map(|ek| {
+            let mut cfg = AxinomKeyConfig::new(ek.kid.clone());
+            if ek.is_cbcs {
+                // Parse UUID string → 16 bytes → use as IV
+                if let Ok(uuid) = uuid::Uuid::parse_str(&ek.kid) {
+                    cfg = cfg.with_iv(*uuid.as_bytes());
+                }
+            }
+            cfg
+        })
+        .collect()
 }
 
 // ── Detect dual mode ─────────────────────────────────────────────────
@@ -172,22 +204,19 @@ async fn handle_playback_info(
     let scheme = query.scheme.to_lowercase();
     let dual = is_dual_stream(&state.stream_dir);
 
-    // Build manifest URL based on scheme and dual mode
+    // Always use MPD — Shaka handles Widevine+FairPlay via DASH on all browsers.
+    // HLS only has FairPlay signaling, which fails on Chrome.
     let manifest_url = if dual {
         match scheme.as_str() {
-            "cbcs" => "/cbcs/live.m3u8".to_string(),
+            "cbcs" => "/cbcs/live.mpd".to_string(),
             _ => "/cenc/live.mpd".to_string(),
         }
     } else {
         "/live.mpd".to_string()
     };
 
-    // Generate Axinom JWT for the requested KIDs
-    let key_configs: Vec<AxinomKeyConfig> = state
-        .kids
-        .iter()
-        .map(|kid| AxinomKeyConfig::new(kid.clone()))
-        .collect();
+    // Generate Axinom JWT with proper IVs for CBCS keys
+    let key_configs = build_key_configs(&state.extracted_keys);
 
     let drm_token =
         generate_axinom_jwt(&state.com_key_id, &state.com_key, &key_configs).map_err(|e| {
@@ -196,6 +225,7 @@ async fn handle_playback_info(
         })?;
 
     let origin = format!("http://127.0.0.1:{}", state.port);
+    let kid_strings: Vec<String> = state.extracted_keys.iter().map(|k| k.kid.clone()).collect();
     Ok(Json(PlaybackInfoResponse {
         manifest_url,
         drm_token,
@@ -205,7 +235,7 @@ async fn handle_playback_info(
             playready: format!("{origin}/license/playready"),
         },
         certificate_url: format!("{origin}/fairplay.cer"),
-        kids: state.kids.clone(),
+        kids: kid_strings,
         scheme,
     }))
 }
@@ -557,14 +587,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Missing AXINOM_COMMUNICATION_KEY"
     })?;
 
-    // Extract KIDs from MPD files on disk
-    let kids = extract_kids_from_dir(&stream_dir);
-    if kids.is_empty() {
+    // Extract KIDs from MPD files on disk (with scheme info for IV generation)
+    let extracted_keys = extract_keys_from_dir(&stream_dir);
+    if extracted_keys.is_empty() {
         eprintln!("WARNING: No KIDs found in MPD files. JWT token will have no keys.");
     } else {
         println!("Detected KIDs from content:");
-        for kid in &kids {
-            println!("  - {kid}");
+        for ek in &extracted_keys {
+            let scheme_tag = if ek.is_cbcs { "cbcs" } else { "cenc" };
+            println!("  - [{scheme_tag}] {}", ek.kid);
         }
     }
 
@@ -580,17 +611,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = Arc::new(AppState {
         com_key_id: com_key_id.clone(),
         com_key: com_key.clone(),
-        kids: kids.clone(),
+        extracted_keys: extracted_keys.clone(),
         stream_dir: stream_dir.clone(),
         port,
         demo_token,
     });
 
-    // Generate the Axinom JWT for the PlaybackServer's license proxy
-    let key_configs: Vec<AxinomKeyConfig> = kids
-        .iter()
-        .map(|kid| AxinomKeyConfig::new(kid.clone()))
-        .collect();
+    // Generate the Axinom JWT for the PlaybackServer's license proxy (with IVs for CBCS)
+    let key_configs = build_key_configs(&extracted_keys);
     let auth_token = generate_axinom_jwt(&com_key_id, &com_key, &key_configs)?;
 
     // Set up license proxy
@@ -622,7 +650,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let drm_scheme = if dual { "dual" } else { "widevine" };
-    let kids_strings: Vec<String> = kids.clone();
+    let kids_strings: Vec<String> = extracted_keys.iter().map(|k| k.kid.clone()).collect();
 
     let base_router = PlaybackServer::new(stream_dir, manifest_url)
         .with_latency_mode(LatencyMode::Standard)
