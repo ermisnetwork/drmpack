@@ -631,13 +631,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_license_proxy(license_proxy, auth_token)
         .into_router();
 
-    // Layer our custom routes on top (they take priority over base_router's catch-all)
+    // Our custom routes take priority; unmatched requests fall through to PlaybackServer
     let app = Router::new()
         .route("/", get(handle_player))
         .route("/api/login", post(handle_login))
         .route("/api/playback-info", get(handle_playback_info))
         .with_state(app_state)
-        .merge(base_router);
+        .fallback_service(base_router);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     println!();
