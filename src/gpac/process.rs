@@ -128,8 +128,8 @@ impl GpacProcessConfig {
         args.push("-logs=ncl".into());
 
         // 1. Disable GPAC filter session blocking regulation for live stdin streaming.
-        // In live piped ingest, demuxed samples must flow freely without artificial PID buffer throttling,
-        // preventing sample accumulation in in-memory queues and eliminating packager latency drift.
+        // In live piped ingest, disables filter blocking regulation to avoid backpressure deadlocks
+        // on the stdin pipe when downstream filters process packets at varying rates.
         args.push("-no-block=all".into());
 
         // 2. Enable multi-threaded filter execution to prevent pipeline starvation in encryption filters.
@@ -200,8 +200,9 @@ impl GpacProcessConfig {
             "sbound=out".into(),
             // check_dur=false: relax strict cross-track duration matching on continuous live streams
             "check_dur=false".into(),
-            // seg_sync=no: announce segments immediately without waiting for final packet flush
-            "seg_sync=no".into(),
+            // seg_sync=auto: wait for the final packet of a segment to be flushed before announcing in HLS playlist.
+            // Guarantees downstream harvesters never read incomplete multi-fragment media segments.
+            "seg_sync=auto".into(),
             // template: segment filename pattern ($RepresentationID$_init.mp4 and $RepresentationID$_<Number>.m4s)
             "template=$RepresentationID$_$Init=init$$Number$".into(),
         ];
@@ -538,7 +539,7 @@ mod tests {
         assert_eq!(args[6], "-o");
         assert!(args[7].contains("/dev/shm/test_stream/live.mpd:dual"));
         assert!(args[7].contains(
-            "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=no:template=$RepresentationID$_$Init=init$$Number$"
+            "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=auto:template=$RepresentationID$_$Init=init$$Number$"
         ));
         assert!(args[7].contains("keep_segs=true"));
         assert!(args[7].contains(":cdur=0.2:asto=0.0:llhls=br:cmaf=cmfc"));
@@ -577,7 +578,7 @@ mod tests {
         assert_eq!(args[1], "-no-block=all");
         assert_eq!(args[2], "-threads=-1");
         assert_eq!(args[6], "-o");
-        assert!(args[7].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=no:template=$RepresentationID$_$Init=init$$Number$"));
+        assert!(args[7].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=auto:template=$RepresentationID$_$Init=init$$Number$"));
         assert!(args[7].contains("keep_segs=true"));
         assert!(!args[7].contains(":cdur="));
         assert!(!args[7].contains(":llhls="));
