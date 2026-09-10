@@ -39,5 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install GPAC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gpac
       - name: Run library unit tests
         run: cargo test --lib --all-features

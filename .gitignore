@@ -20,3 +20,4 @@ scratch/
 *.scratch.*
 .agent-scratchpad/
 skills-lock.json
+test_consumer/

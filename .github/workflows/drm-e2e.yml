@@ -12,27 +12,30 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       DRMPACK_REQUIRE_MEDIA_TOOLS: "1"
-      GPAC_VERSION: "26.07.0"
+      GPAC_VERSION: "26.07"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install FFmpeg and GPAC build dependencies
+      - name: Install GPAC 26.07 and media tools
         run: |
+          sudo apt-get update && sudo apt-get install -y ca-certificates curl
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://dist.gpac.io/gpac/linux/gpg.asc -o /etc/apt/keyrings/gpac.asc
+          sudo chmod a+r /etc/apt/keyrings/gpac.asc
+
+          sudo tee /etc/apt/sources.list.d/gpac.sources <<EOF
+          Types: deb
+          URIs: https://dist.gpac.io/gpac/linux/ubuntu
+          Suites: noble
+          Components: main
+          Signed-By: /etc/apt/keyrings/gpac.asc
+          EOF
+
           sudo apt-get update
-          sudo apt-get install --yes \
-            build-essential cmake git pkg-config \
-            libfreetype6-dev libjpeg-dev libpng-dev libssl-dev \
-            zlib1g-dev libxml2-dev libcurl4-openssl-dev ffmpeg
-      - name: Build pinned GPAC
-        run: |
-          git clone --depth 1 --branch "v${GPAC_VERSION}" https://github.com/gpac/gpac.git /tmp/gpac
-          cmake -S /tmp/gpac -B /tmp/gpac/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build /tmp/gpac/build --parallel
-          sudo cmake --install /tmp/gpac/build
+          sudo apt-get install -y gpac ffmpeg
       - name: Preflight media tools
         run: |
-          gpac -version
-          gpac -version | grep -F "${GPAC_VERSION}"
+          gpac -version 2>&1 | grep -F "${GPAC_VERSION}"
           ffmpeg -version
       - name: Run required DRM end-to-end tests
         run: cargo test --all-targets
