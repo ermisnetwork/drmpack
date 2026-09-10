@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 /// Trait converting various types into an optional FairPlay Certificate URL.
 pub trait IntoCertUrl {
@@ -332,6 +333,8 @@ impl LicenseProxy {
 
         req = req.header("X-AxDRM-Message", trimmed_token);
 
+        debug!(system = %system_name, url = %trimmed_url, payload_len = payload.len(), "Forwarding DRM license challenge");
+
         let resp = req.send().await.map_err(|e| DrmpackError::LicenseProxy {
             status: e.status().unwrap_or(reqwest::StatusCode::BAD_GATEWAY),
             message: format!(
@@ -342,7 +345,9 @@ impl LicenseProxy {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(parse_license_error_response(resp, system_name).await);
+            let err = parse_license_error_response(resp, system_name).await;
+            warn!(system = %system_name, url = %trimmed_url, error = %err, "DRM license challenge rejected by upstream provider");
+            return Err(err);
         }
 
         let headers = resp.headers().clone();
@@ -367,6 +372,8 @@ impl LicenseProxy {
             });
         }
 
+        debug!(system = %system_name, url = %trimmed_url, payload_len = data.len(), "DRM license response successfully received");
+
         Ok(LicenseResponse::new(data, content_type, headers))
     }
 }
@@ -376,6 +383,8 @@ async fn parse_license_error_response(resp: reqwest::Response, context: &str) ->
     let headers = resp.headers().clone();
     let diagnostic = headers
         .get("x-axdrm-errormessage")
+        .or_else(|| headers.get("x-speke-error-message"))
+        .or_else(|| headers.get("x-amzn-errortype"))
         .map(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_string())
         .filter(|s| !s.is_empty());
 

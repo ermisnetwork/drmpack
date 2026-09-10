@@ -5,11 +5,27 @@ use std::collections::HashMap;
 
 /// In-memory test double and pre-shared key store supplying manually configured
 /// ContentKeys and PSSH boxes for unit/E2E testing and offline packaging without network I/O.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct StaticKeySource {
     keys: HashMap<(Option<EncryptionScheme>, TrackType, QualityTier), ContentKey>,
     pssh: Vec<PsshData>,
     shared_fallback: Option<(KeyID, [u8; 16])>,
+}
+
+impl std::fmt::Debug for StaticKeySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticKeySource")
+            .field("keys", &self.keys)
+            .field("pssh", &self.pssh)
+            .field(
+                "shared_fallback",
+                &self
+                    .shared_fallback
+                    .as_ref()
+                    .map(|(kid, _)| (kid, "[REDACTED]")),
+            )
+            .finish()
+    }
 }
 
 /// Legacy alias for [`StaticKeySource`]. Prefer using [`StaticKeySource`].
@@ -208,5 +224,14 @@ mod tests {
             .is_some());
         assert_eq!(keyset.pssh.len(), 1);
         assert_eq!(keyset.pssh[0].drm_system, DrmSystem::Widevine);
+    }
+
+    #[test]
+    fn test_static_key_source_debug_redaction() {
+        let key_bytes = [0x55; 16];
+        let provider = StaticKeySource::shared_key(key_bytes);
+        let debug_output = format!("{provider:?}");
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("85, 85, 85, 85"));
     }
 }

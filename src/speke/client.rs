@@ -4,6 +4,7 @@ use crate::error::{DrmpackError, Result};
 use crate::key::{KeyProvider, KeyRequest, KeySet};
 use crate::speke::config::SpekeConfig;
 use std::fmt;
+use tracing::{debug, warn};
 
 /// Response received from a raw SPEKE exchange.
 #[derive(Debug, Clone)]
@@ -186,6 +187,8 @@ impl SpekeClient {
             req = signer.sign(req, &self.config.endpoint, xml_body);
         }
 
+        debug!(endpoint = %self.config.endpoint, "Sending SPEKE v2 key exchange request");
+
         let resp = req.send().await.map_err(|e| {
             DrmpackError::KeyProvider(format!(
                 "Failed to send SPEKE v2 request to '{}': {}",
@@ -195,6 +198,8 @@ impl SpekeClient {
 
         let status = resp.status();
         let headers = resp.headers().clone();
+        debug!(endpoint = %self.config.endpoint, ?status, "Received SPEKE v2 response");
+
         let body = resp.text().await.map_err(|e| {
             DrmpackError::KeyProvider(format!(
                 "Failed to read SPEKE v2 response from '{}': {}",
@@ -218,6 +223,7 @@ impl KeyProvider for SpekeClient {
 
         if !resp.status.is_success() {
             let detail = resp.format_error_detail();
+            warn!(endpoint = %self.config.endpoint, ?resp.status, %detail, "SPEKE v2 key request rejected by endpoint");
             return Err(DrmpackError::KeyProvider(format!(
                 "SPEKE v2 endpoint at '{}' returned HTTP {}: {}",
                 self.config.endpoint, resp.status, detail

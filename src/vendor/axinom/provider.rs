@@ -5,6 +5,7 @@ use crate::key::{KeyProvider, KeyRequest, KeySet};
 use crate::speke::{SpekeAuth, SpekeClient, SpekeConfig};
 use crate::vendor::axinom::config::AxinomConfig;
 use std::fmt;
+use tracing::warn;
 
 /// Axinom KeyProvider implementing SPEKE v2 over CPIX 2.3 protocol.
 pub struct AxinomProvider {
@@ -112,6 +113,7 @@ impl AxinomProvider {
 
         if !resp.status.is_success() {
             let detail = resp.format_error_detail();
+            warn!(endpoint = %self.config.endpoint, ?resp.status, %detail, "Axinom Key Service rejected key request");
             return Err(DrmpackError::KeyProvider(format!(
                 "Axinom Key Service at '{}' returned HTTP {}: {}",
                 self.config.endpoint, resp.status, detail

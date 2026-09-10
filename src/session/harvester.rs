@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, warn};
 
 const MAX_EMITTED_HISTORY: usize = 5000;
 const WATCHDOG_INTERVAL_MS: u64 = 50;
@@ -301,7 +301,10 @@ async fn harvest_target(
 
     let mut read_dir = match tokio::fs::read_dir(dir).await {
         Ok(d) => d,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            warn!(?dir, error = %e, "ArtifactHarvester: failed to read staging directory");
+            return Ok(());
+        }
     };
 
     let mut manifests = Vec::new();
@@ -311,7 +314,10 @@ async fn harvest_target(
         let path = entry.path();
         let file_type = match entry.file_type().await {
             Ok(ft) => ft,
-            Err(_) => continue,
+            Err(e) => {
+                debug!(?path, error = %e, "ArtifactHarvester: failed to get entry file_type");
+                continue;
+            }
         };
         if !file_type.is_file() {
             continue;
@@ -338,7 +344,10 @@ async fn harvest_target(
         // Metadata guard: skip reading file if mtime and size unchanged
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(e) => {
+                debug!(?path, error = %e, "ArtifactHarvester: failed to read manifest metadata");
+                continue;
+            }
         };
         let mtime = meta.modified().ok();
         let file_size = meta.len();
@@ -415,9 +424,14 @@ async fn harvest_target(
                 if complete {
                     (true, Some(data))
                 } else {
+                    debug!(?path, is_init, "ArtifactHarvester: segment is not yet a complete ISOBMFF box; waiting for next flush");
                     (false, None)
                 }
             } else {
+                debug!(
+                    ?path,
+                    "ArtifactHarvester: failed to read segment file from staging"
+                );
                 (false, None)
             }
         } else {
@@ -454,9 +468,15 @@ async fn harvest_target(
         };
         tokio::select! {
             result = tx.send(artifact) => {
-                if result.is_err() { return Err(()); }
+                if result.is_err() {
+                    debug!("ArtifactHarvester: output channel receiver dropped");
+                    return Err(());
+                }
+                debug!(filename = %file_name, ?kind, ?scheme, "Emitted packaged artifact");
                 state.record_emitted(scheme, file_name);
-                let _ = tokio::fs::remove_file(&path).await;
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    warn!(?path, error = %e, "ArtifactHarvester: failed to remove ephemeral segment");
+                }
             }
             _ = shutdown.cancelled() => { return Err(()); }
         }
@@ -501,13 +521,19 @@ async fn harvest_target(
             };
             tokio::select! {
                 result = tx.send(artifact) => {
-                    if result.is_err() { return Err(()); }
+                    if result.is_err() {
+                        debug!("ArtifactHarvester: output channel receiver dropped on manifest send");
+                        return Err(());
+                    }
+                    debug!(filename = %file_name, kind = ?ArtifactKind::Manifest, ?scheme, "Emitted manifest artifact");
                 }
                 _ = shutdown.cancelled() => { return Err(()); }
             }
         }
         if is_final {
-            let _ = tokio::fs::remove_file(path).await;
+            if let Err(e) = tokio::fs::remove_file(path).await {
+                debug!(?path, error = %e, "ArtifactHarvester: failed to remove final manifest");
+            }
         }
     }
 

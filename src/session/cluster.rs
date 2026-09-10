@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 /// An individual media Representation managed within a `RepresentationCluster`.
 pub struct Representation {
@@ -335,6 +336,7 @@ impl RepresentationCluster {
         let mut failures = Vec::new();
         for rep in &self.representations {
             if rep.scheme != failed_scheme {
+                warn!(failed_scheme = %failed_scheme, target_peer = %rep.scheme, "Aborting peer representation due to failure in primary representation");
                 rep.kill();
                 let _ = rep.close_and_wait(Duration::from_millis(500)).await;
                 failures.push(RepresentationFailure::new(

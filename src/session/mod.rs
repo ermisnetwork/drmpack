@@ -503,7 +503,9 @@ impl PackagingSession {
                 if bytes.windows(4).any(|w| w == b"moof") {
                     has_pushed_media.store(true, Ordering::Release);
                 }
-                if !cluster.write_data(&bytes).await.is_empty() {
+                let write_failures = cluster.write_data(&bytes).await;
+                if !write_failures.is_empty() {
+                    error!(failures = ?write_failures, "SessionWriter: write_data failed, stopping forwarding task");
                     break;
                 }
             }
@@ -825,6 +827,7 @@ impl PackagingSession {
             PackagingSessionFailure::from_failures(failures)
                 .with_cleanup_failures(None, control_cleanup),
         );
+        error!(failure = %failure, "PackagingSession failed terminally");
         lifecycle.terminal_failure = Some(Arc::clone(&failure));
         self.is_terminal.store(true, Ordering::Release);
         DrmpackError::PackagingSession(failure)

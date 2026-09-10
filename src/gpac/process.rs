@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
-pub const DEFAULT_STDERR_RING_BUFFER_CAPACITY: usize = 64;
+pub const DEFAULT_STDERR_RING_BUFFER_CAPACITY: usize = 256;
 
 /// Default suggested presentation delay factor (multiplier of segment duration).
 ///
@@ -39,7 +39,11 @@ pub enum LogSeverity {
 /// All other lines default to `LogSeverity::Debug`.
 pub fn classify_log_severity(line: &str) -> LogSeverity {
     let lower = line.to_ascii_lowercase();
-    if lower.contains("error") || lower.contains("failed to") || lower.contains("fatal") {
+    if lower.contains("error")
+        || lower.contains("failed to")
+        || lower.contains("fatal")
+        || lower.contains("fail to fetch")
+    {
         LogSeverity::Error
     } else if lower.contains("warning") || lower.contains("warn") {
         LogSeverity::Warn
@@ -256,6 +260,8 @@ impl GpacProcess {
             ))
         })?;
 
+        let pid = child.id();
+
         let stdin = child.stdin.take().ok_or_else(|| {
             DrmpackError::Gpac("Failed to capture stdin pipe for GPAC process".into())
         })?;
@@ -350,7 +356,7 @@ impl GpacProcess {
             let _ = exit_tx_clone.send(exit_status);
         });
 
-        info!(bin = %config.gpac_bin, "GPAC subprocess successfully spawned");
+        info!(bin = %config.gpac_bin, pid = ?pid, "GPAC subprocess successfully spawned");
 
         Ok(Self {
             config,
