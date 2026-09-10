@@ -223,7 +223,9 @@ impl AxinomLicenseConfig {
         Self::validate_url("widevine_license_url", &self.widevine_license_url)?;
         Self::validate_url("fairplay_license_url", &self.fairplay_license_url)?;
         Self::validate_url("playready_license_url", &self.playready_license_url)?;
-        Self::validate_url("fairplay_cert_url", &self.fairplay_cert_url)?;
+        if !self.fairplay_cert_url.trim().is_empty() {
+            Self::validate_url("fairplay_cert_url", &self.fairplay_cert_url)?;
+        }
         if self.timeout.is_zero() {
             return Err(DrmpackError::InvalidConfig(
                 "License proxy timeout duration cannot be zero".into(),
@@ -295,13 +297,7 @@ impl AxinomLicenseConfig {
             .filter(|s| !s.is_empty());
 
         let config = Self::new(wv, fp, pr, cert.as_deref().unwrap_or(""));
-        if let Some(ref cert_url) = cert {
-            Self::validate_url("fairplay_cert_url", cert_url)?;
-        }
-        // Validate license URLs (always required) and timeout
-        Self::validate_url("widevine_license_url", &config.widevine_license_url)?;
-        Self::validate_url("fairplay_license_url", &config.fairplay_license_url)?;
-        Self::validate_url("playready_license_url", &config.playready_license_url)?;
+        config.validate()?;
         Ok(config)
     }
 }
@@ -973,6 +969,14 @@ mod tests {
         assert_eq!(valid.timeout, Duration::from_secs(10));
         assert!(valid.headers.is_empty());
 
+        // Empty cert_url is allowed (optional for FairPlay)
+        let empty_cert = valid.clone().with_fairplay_cert_url("");
+        assert!(empty_cert.validate().is_ok());
+
+        // Invalid non-empty cert_url fails
+        let invalid_cert = valid.clone().with_fairplay_cert_url("ftp://not-http.com");
+        assert!(invalid_cert.validate().is_err());
+
         let invalid_url = valid.clone().with_widevine_license_url("not-a-valid-url");
         assert!(invalid_url.validate().is_err());
 
@@ -981,6 +985,40 @@ mod tests {
 
         let zero_timeout = valid.clone().with_timeout(Duration::ZERO);
         assert!(zero_timeout.validate().is_err());
+    }
+
+    #[test]
+    fn test_from_axinom_license_config_to_license_proxy_config() {
+        use crate::license::config::LicenseProxyConfig;
+
+        // Case 1: Non-empty cert URL converts to Some(...)
+        let axinom_cfg = AxinomLicenseConfig::new(
+            "https://wv.axprod.net",
+            "https://fp.axprod.net",
+            "https://pr.axprod.net",
+            "https://tools.axinom.com/cert.cer",
+        )
+        .with_timeout(Duration::from_secs(15));
+
+        let proxy_cfg: LicenseProxyConfig = axinom_cfg.clone().into();
+        assert_eq!(proxy_cfg.widevine_license_url, "https://wv.axprod.net");
+        assert_eq!(proxy_cfg.fairplay_license_url, "https://fp.axprod.net");
+        assert_eq!(proxy_cfg.playready_license_url, "https://pr.axprod.net");
+        assert_eq!(
+            proxy_cfg.fairplay_cert_url,
+            Some("https://tools.axinom.com/cert.cer".to_string())
+        );
+        assert_eq!(proxy_cfg.timeout, Duration::from_secs(15));
+
+        // Case 2: Empty / whitespace cert URL converts to None
+        let axinom_no_cert = AxinomLicenseConfig::new(
+            "https://wv.axprod.net",
+            "https://fp.axprod.net",
+            "https://pr.axprod.net",
+            "   ",
+        );
+        let proxy_cfg_no_cert: LicenseProxyConfig = axinom_no_cert.into();
+        assert_eq!(proxy_cfg_no_cert.fairplay_cert_url, None);
     }
 
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());

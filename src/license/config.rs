@@ -119,3 +119,128 @@ impl LicenseProxyConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderName, HeaderValue};
+
+    #[test]
+    fn test_license_proxy_config_new_and_builders() {
+        let config = LicenseProxyConfig::new(
+            "https://wv.example.com",
+            "https://fp.example.com",
+            "https://pr.example.com",
+            None,
+        );
+        assert_eq!(config.widevine_license_url, "https://wv.example.com");
+        assert_eq!(config.fairplay_license_url, "https://fp.example.com");
+        assert_eq!(config.playready_license_url, "https://pr.example.com");
+        assert_eq!(config.fairplay_cert_url, None);
+        assert_eq!(config.timeout, Duration::from_secs(10));
+        assert!(config.headers.is_empty());
+
+        let mut custom_headers = reqwest::header::HeaderMap::new();
+        custom_headers.insert(
+            HeaderName::from_static("x-tenant-id"),
+            HeaderValue::from_static("tenant-123"),
+        );
+
+        let updated = config
+            .with_widevine_license_url("https://wv2.example.com")
+            .with_fairplay_license_url("https://fp2.example.com")
+            .with_playready_license_url("https://pr2.example.com")
+            .with_fairplay_cert_url("https://cert.example.com/fp.cer")
+            .with_timeout(Duration::from_secs(20))
+            .with_header(
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Bearer token"),
+            )
+            .with_headers(custom_headers);
+
+        assert_eq!(updated.widevine_license_url, "https://wv2.example.com");
+        assert_eq!(updated.fairplay_license_url, "https://fp2.example.com");
+        assert_eq!(updated.playready_license_url, "https://pr2.example.com");
+        assert_eq!(
+            updated.fairplay_cert_url,
+            Some("https://cert.example.com/fp.cer".to_string())
+        );
+        assert_eq!(updated.timeout, Duration::from_secs(20));
+        assert_eq!(
+            updated.headers.get("x-tenant-id"),
+            Some(&HeaderValue::from_static("tenant-123"))
+        );
+    }
+
+    #[test]
+    fn test_license_proxy_config_validate_success() {
+        let config_no_cert = LicenseProxyConfig::new(
+            "https://wv.example.com",
+            "https://fp.example.com",
+            "https://pr.example.com",
+            None,
+        );
+        assert!(config_no_cert.validate().is_ok());
+
+        let config_with_cert = config_no_cert
+            .clone()
+            .with_fairplay_cert_url("https://cert.example.com/fairplay.cer");
+        assert!(config_with_cert.validate().is_ok());
+    }
+
+    #[test]
+    fn test_license_proxy_config_validate_errors() {
+        let valid = LicenseProxyConfig::new(
+            "https://wv.example.com",
+            "https://fp.example.com",
+            "https://pr.example.com",
+            Some("https://cert.example.com".to_string()),
+        );
+
+        // Empty URLs
+        assert!(valid
+            .clone()
+            .with_widevine_license_url("  ")
+            .validate()
+            .is_err());
+        assert!(valid
+            .clone()
+            .with_fairplay_license_url("")
+            .validate()
+            .is_err());
+        assert!(valid
+            .clone()
+            .with_playready_license_url("")
+            .validate()
+            .is_err());
+
+        // Invalid URL schemes
+        assert!(valid
+            .clone()
+            .with_widevine_license_url("ftp://example.com")
+            .validate()
+            .is_err());
+        assert!(valid
+            .clone()
+            .with_fairplay_license_url("custom://example.com")
+            .validate()
+            .is_err());
+        assert!(valid
+            .clone()
+            .with_fairplay_cert_url("file:///etc/cert.der")
+            .validate()
+            .is_err());
+        assert!(valid
+            .clone()
+            .with_fairplay_cert_url("  ")
+            .validate()
+            .is_err());
+
+        // Zero timeout
+        assert!(valid
+            .clone()
+            .with_timeout(Duration::ZERO)
+            .validate()
+            .is_err());
+    }
+}

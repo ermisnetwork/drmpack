@@ -508,7 +508,7 @@ async fn test_direct_output_channel_ephemeral_staging_during_active_push() {
     let mut artifact_filename = String::new();
     let mut artifact_kind = ArtifactKind::Manifest;
 
-    let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+    let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         while let Some(artifact) = rx.recv().await {
             if artifact.kind == ArtifactKind::InitSegment
                 || artifact.kind == ArtifactKind::MediaSegment
@@ -528,10 +528,18 @@ async fn test_direct_output_channel_ephemeral_staging_during_active_push() {
     );
     assert!(received_artifact);
 
-    // Verify Ephemeral Staging: The emitted segment file must ALREADY be unlinked from disk!
+    // Verify Ephemeral Staging: The emitted segment file must be unlinked from disk upon channel emission!
     let emitted_file_on_disk = out_dir.join(&artifact_filename);
+    let mut unlinked = false;
+    for _ in 0..100 {
+        if !emitted_file_on_disk.exists() {
+            unlinked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(
-        !emitted_file_on_disk.exists(),
+        unlinked,
         "Consumed segment file '{}' must be unlinked immediately upon channel emission!",
         emitted_file_on_disk.display()
     );

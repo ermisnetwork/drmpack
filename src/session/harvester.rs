@@ -578,13 +578,23 @@ impl Harvester {
                 }
 
                 // Single reconciliation pass — shared by all wake-up sources
+                let mut should_break = false;
                 for (dir, scheme) in &targets {
                     if harvest_target(dir, *scheme, &tx, &mut state, false, &loop_shutdown)
                         .await
                         .is_err()
                     {
-                        return;
+                        if loop_shutdown.is_cancelled() {
+                            should_break = true;
+                            break;
+                        } else {
+                            // Receiver was dropped while not shutting down
+                            return;
+                        }
                     }
+                }
+                if should_break {
+                    break;
                 }
             }
 
@@ -1246,6 +1256,116 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(200),
             "harvest_target for {total_segments} segments took {elapsed:?}, expected < 200ms"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_harvester_cancellation_unblocks_full_channel() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("drmpack_cancel_test_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        // Write complete init segment (emitted without manifest)
+        let mut complete_init = Vec::new();
+        complete_init.extend_from_slice(&make_box(b"ftyp", b"isom"));
+        complete_init.extend_from_slice(&make_box(b"moov", b"moov_payload"));
+        let init_path = temp_dir.join("video_720p_init.mp4");
+        tokio::fs::write(&init_path, &complete_init).await.unwrap();
+
+        // Write an HLS manifest that lists video_720p_1.m4s
+        let playlist =
+            "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nvideo_720p_1.m4s\n";
+        tokio::fs::write(temp_dir.join("video_720p.m3u8"), playlist)
+            .await
+            .unwrap();
+
+        let mut seg_data = Vec::new();
+        seg_data.extend_from_slice(&make_box(b"moof", b"moof_data"));
+        seg_data.extend_from_slice(&make_box(b"mdat", b"mdat_data"));
+
+        let seg1_path = temp_dir.join("video_720p_1.m4s");
+        tokio::fs::write(&seg1_path, &seg_data).await.unwrap();
+
+        // Channel buffer capacity 1:
+        // InitSegment will fill the buffer (1/1).
+        // Next segment (video_720p_1.m4s) will block on tx.send()!
+        let (tx, _rx) = mpsc::channel(1);
+        let mut state = HarvesterState::default();
+        let shutdown = CancellationToken::new();
+
+        let shutdown_clone = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            shutdown_clone.cancel();
+        });
+
+        let res = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            false,
+            &shutdown,
+        )
+        .await;
+
+        // Must return Err(()) due to cancellation without hanging
+        assert!(
+            res.is_err(),
+            "harvest_target must exit with error on cancellation"
+        );
+
+        // First item (init segment) was sent and deleted
+        assert!(
+            !init_path.exists(),
+            "Init segment was sent and should be deleted"
+        );
+
+        // The blocked segment was NOT sent, so it MUST NOT be deleted from disk
+        assert!(seg1_path.exists(), "Blocked segment must remain on disk");
+        assert!(
+            !state.is_emitted(EncryptionScheme::Cenc, "video_720p_1.m4s"),
+            "Blocked segment must not be recorded as emitted"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_harvester_finish_and_flush_graceful_shutdown() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("drmpack_flush_test_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let harvester = Harvester::spawn(vec![(temp_dir.clone(), EncryptionScheme::Cenc)], tx);
+
+        // Spawn a background consumer to keep receiving artifacts
+        let consumer = tokio::spawn(async move {
+            let mut count = 0;
+            while let Some(_art) = rx.recv().await {
+                count += 1;
+            }
+            count
+        });
+
+        // Write an init segment
+        let mut complete_init = Vec::new();
+        complete_init.extend_from_slice(&make_box(b"ftyp", b"isom"));
+        complete_init.extend_from_slice(&make_box(b"moov", b"moov_payload"));
+        tokio::fs::write(temp_dir.join("video_init.mp4"), &complete_init)
+            .await
+            .unwrap();
+
+        // Calling finish_and_flush should complete promptly and flush remaining artifacts
+        harvester.finish_and_flush().await;
+
+        let received = consumer.await.unwrap();
+        assert!(
+            received >= 1,
+            "Should receive at least the init segment on flush"
         );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
