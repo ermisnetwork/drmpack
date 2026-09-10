@@ -356,21 +356,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 3. Ingesting Media via SessionWriter or push()
+### 3. Ingesting Media via push() or SessionWriter
 
 `drmpack` provides two ingestion methods:
 
-- `session.push(bytes)`: Async call accepting any byte container implementing `Into<Bytes>`.
-- `session.writer()`: Creates an owned `SessionWriter` implementing `tokio::io::AsyncWrite`, ideal for `tokio::io::copy` or piping directly from network sockets.
+- `session.push(bytes)`: Primary async ingestion method accepting any byte slice or buffer implementing `AsRef<[u8]>` (`&[u8]`, `Vec<u8>`, `bytes::Bytes`).
+- `session.writer()`: Secondary adapter returning an owned `SessionWriter` implementing `tokio::io::AsyncWrite`, ideal for `tokio::io::copy` or direct I/O pipe integration.
+
+```rust,no_run
+use drmpack::session::PackagingSession;
+use tokio::io::AsyncReadExt;
+
+async fn ingest(
+    session: &mut PackagingSession,
+    mut source_socket: tokio::net::TcpStream,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buffer = vec![0u8; 64 * 1024];
+
+    // Read incoming fMP4 chunks and push directly into packaging session
+    loop {
+        let n = source_socket.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        session.push(&buffer[..n]).await?;
+    }
+
+    Ok(())
+}
+```
+
+Alternatively, when streaming directly between reader and writer interfaces via `tokio::io::copy`, use `session.writer()`:
 
 ```rust,no_run
 use drmpack::session::PackagingSession;
 use tokio::io::AsyncWriteExt;
 
-async fn ingest(session: &mut PackagingSession, mut source_socket: tokio::net::TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+async fn ingest_with_writer(
+    session: &mut PackagingSession,
+    mut source_socket: tokio::net::TcpStream,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = session.writer();
-
-    // Stream incoming bytes directly to GPAC stdin
     tokio::io::copy(&mut source_socket, &mut writer).await?;
     writer.shutdown().await?;
     Ok(())
