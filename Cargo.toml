@@ -5,6 +5,7 @@ edition = "2021"
 description = "Native Rust DRM packaging library for CENC/CBCS fMP4 and HLS/DASH manifests"
 authors = ["ermis-stream"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ermisnetwork/drmpack"
 
 [features]
 default = ["cpix", "speke-v2", "axinom", "license-proxy"]

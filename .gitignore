@@ -19,3 +19,4 @@ CLAUDE.local.md
 scratch/
 *.scratch.*
 .agent-scratchpad/
+skills-lock.json
