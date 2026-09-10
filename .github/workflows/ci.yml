@@ -39,9 +39,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install GPAC
+      - name: Install GPAC 26.07
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gpac
+          sudo apt-get update && sudo apt-get install -y ca-certificates curl
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://dist.gpac.io/gpac/linux/gpg.asc -o /etc/apt/keyrings/gpac.asc
+          sudo chmod a+r /etc/apt/keyrings/gpac.asc
+
+          sudo tee /etc/apt/sources.list.d/gpac.sources <<EOF
+          Types: deb
+          URIs: https://dist.gpac.io/gpac/linux/ubuntu
+          Suites: noble
+          Components: main
+          Signed-By: /etc/apt/keyrings/gpac.asc
+          EOF
+
+          sudo apt-get update && sudo apt-get install -y gpac
       - name: Run library unit tests
         run: cargo test --lib --all-features

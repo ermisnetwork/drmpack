@@ -5,6 +5,7 @@ use drmpack::types::{
     DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, QualityTier,
     Rendition, TrackType,
 };
+use std::time::Duration;
 use uuid::Uuid;
 
 mod common;
@@ -282,6 +283,7 @@ async fn test_multi_track_abr_e2e_cenc() {
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine)
         .with_latency_mode(LatencyMode::LowLatency)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
@@ -512,6 +514,7 @@ async fn test_multi_track_abr_e2e_cbcs() {
         .with_encryption_scheme(EncryptionScheme::Cbcs)
         .with_drm_system(DrmSystem::FairPlay)
         .with_latency_mode(LatencyMode::LowLatency)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
@@ -692,6 +695,7 @@ async fn test_multi_track_abr_e2e_dual() {
         .with_drm_system(DrmSystem::Widevine)
         .with_drm_system(DrmSystem::FairPlay)
         .with_latency_mode(LatencyMode::LowLatency)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
@@ -964,6 +968,7 @@ async fn test_multi_track_abr_e2e_fallback_track_id() {
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine)
         .with_latency_mode(LatencyMode::LowLatency)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
@@ -1091,6 +1096,7 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine)
         .with_latency_mode(LatencyMode::LowLatency)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_output_dir(&out_dir);
