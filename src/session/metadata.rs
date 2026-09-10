@@ -12,10 +12,15 @@ use serde::{Deserialize, Serialize};
 /// A single content key entry in stream DRM metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DrmKeyEntry {
+    /// Associated KeyID.
     pub kid: KeyID,
+    /// Concrete encryption scheme (CENC or CBCS).
     pub scheme: EncryptionScheme,
+    /// Elementary track type (video or audio).
     pub track_type: TrackType,
+    /// Associated quality tier (e.g. SD, HD, 4K).
     pub quality_tier: QualityTier,
+    /// Optional 128-bit initialization vector.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iv: Option<[u8; 16]>,
 }
@@ -28,8 +33,11 @@ pub struct DrmKeyEntry {
 /// raw key leakage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DrmStreamMetadata {
+    /// Content or stream identifier string.
     pub content_id: String,
+    /// Packaging encryption mode.
     pub scheme: EncryptionScheme,
+    /// List of public key entries.
     pub keys: Vec<DrmKeyEntry>,
 }
 

@@ -10,8 +10,11 @@ use std::time::Duration;
 /// For Axinom users, `AxinomLicenseConfig` implements `Into<LicenseProxyConfig>` for seamless conversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LicenseProxyConfig {
+    /// URL for Google Widevine license acquisition requests.
     pub widevine_license_url: String,
+    /// URL for Apple FairPlay license acquisition requests.
     pub fairplay_license_url: String,
+    /// URL for Microsoft PlayReady license acquisition requests.
     pub playready_license_url: String,
     /// Optional FairPlay Application Certificate URL.
     ///
@@ -20,7 +23,9 @@ pub struct LicenseProxyConfig {
     /// - The deployment only serves Widevine/PlayReady (no Apple devices)
     /// - The certificate is loaded from a local file via `LicenseProxy::set_fairplay_certificate()`
     pub fairplay_cert_url: Option<String>,
+    /// Request timeout for upstream license proxying.
     pub timeout: Duration,
+    /// Custom HTTP headers forwarded to the license server.
     pub headers: reqwest::header::HeaderMap,
 }
 

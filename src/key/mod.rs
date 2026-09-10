@@ -1,3 +1,8 @@
+//! DRM key management, key sets, PSSH boxes, and key provider abstractions.
+//!
+//! Provides [`ContentKey`], [`KeyID`], [`KeySet`], and the [`KeyProvider`] trait
+//! implemented by vendor adapters and local test doubles.
+
 use crate::error::Result;
 use crate::types::{DrmSystem, EncryptionScheme, QualityTier, TrackType};
 use bytes::Bytes;
@@ -19,7 +24,9 @@ pub use crate::speke::{
 #[cfg(feature = "axinom")]
 pub use crate::vendor::axinom::AxinomProvider;
 
+/// Key mapping policy evaluation and resolution engine.
 pub mod policy;
+/// In-memory pre-shared key store and test double.
 pub mod raw;
 
 pub use policy::{KeyPlan, KeyPolicyEngine};
@@ -30,18 +37,22 @@ pub use raw::{RawKeyProvider, StaticKeySource};
 pub struct KeyID(pub Uuid);
 
 impl KeyID {
+    /// Construct a KeyID wrapping a known UUID.
     pub fn new(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
+    /// Generate a random version-4 UUID KeyID.
     pub fn random() -> Self {
         Self(Uuid::new_v4())
     }
 
+    /// Return the raw 16-byte representation.
     pub fn as_bytes(&self) -> &[u8; 16] {
         self.0.as_bytes()
     }
 
+    /// Return the 32-character lowercase hex string without hyphens.
     pub fn to_hex(&self) -> String {
         self.0.simple().to_string()
     }
@@ -50,11 +61,17 @@ impl KeyID {
 /// AES-128 Content Key with associated KeyID and metadata.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentKey {
+    /// Associated KeyID.
     pub kid: KeyID,
+    /// 128-bit raw AES encryption key bytes.
     pub key: [u8; 16],
+    /// Target quality tier bound to this key.
     pub quality_tier: QualityTier,
+    /// Elementary track type (video or audio) bound to this key.
     pub track_type: TrackType,
+    /// Optional explicit 128-bit initialization vector.
     pub iv: Option<[u8; 16]>,
+    /// Optional concrete encryption scheme (CENC or CBCS).
     pub encryption_scheme: Option<EncryptionScheme>,
 }
 
@@ -72,6 +89,7 @@ impl fmt::Debug for ContentKey {
 }
 
 impl ContentKey {
+    /// Construct a new ContentKey without explicit IV or scheme.
     pub fn new(
         kid: KeyID,
         key: [u8; 16],
@@ -88,6 +106,7 @@ impl ContentKey {
         }
     }
 
+    /// Construct a new ContentKey bound to a specific encryption scheme.
     pub fn new_with_scheme(
         kid: KeyID,
         key: [u8; 16],
@@ -105,11 +124,13 @@ impl ContentKey {
         }
     }
 
+    /// Set an explicit 128-bit IV for this key.
     pub fn with_iv(mut self, iv: [u8; 16]) -> Self {
         self.iv = Some(iv);
         self
     }
 
+    /// Set an explicit encryption scheme for this key.
     pub fn with_encryption_scheme(mut self, scheme: EncryptionScheme) -> Self {
         self.encryption_scheme = Some(scheme);
         self
@@ -119,14 +140,20 @@ impl ContentKey {
 /// PSSH (Protection System Specific Header) box data for a specific DRM system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PsshData {
+    /// Target DRM system.
     pub drm_system: DrmSystem,
+    /// 16-byte UUID identifying the DRM system.
     pub system_id: [u8; 16],
+    /// Binary PSSH box payload bytes.
     pub data: Bytes,
+    /// Optional KeyID bound to this PSSH box.
     pub kid: Option<KeyID>,
+    /// Optional encryption scheme bound to this PSSH box.
     pub encryption_scheme: Option<EncryptionScheme>,
 }
 
 impl PsshData {
+    /// Construct PSSH box data for a target DRM system.
     pub fn new(drm_system: DrmSystem, system_id: [u8; 16], data: Bytes) -> Self {
         Self {
             drm_system,
@@ -137,11 +164,13 @@ impl PsshData {
         }
     }
 
+    /// Associate a specific KeyID with this PSSH box.
     pub fn with_kid(mut self, kid: KeyID) -> Self {
         self.kid = Some(kid);
         self
     }
 
+    /// Associate a specific encryption scheme with this PSSH box.
     pub fn with_encryption_scheme(mut self, scheme: EncryptionScheme) -> Self {
         self.encryption_scheme = Some(scheme);
         self
@@ -151,13 +180,18 @@ impl PsshData {
 /// Description of keys requested from a KeyProvider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRequest {
+    /// Content or asset identifier string.
     pub content_id: String,
+    /// Requested combinations of track types and quality tiers.
     pub requested_quality_tiers: Vec<(TrackType, QualityTier)>,
+    /// Target DRM systems requiring PSSH boxes.
     pub drm_systems: Vec<DrmSystem>,
+    /// Target encryption schemes.
     pub encryption_schemes: Vec<EncryptionScheme>,
 }
 
 impl KeyRequest {
+    /// Create a new key request for a content ID.
     pub fn new(content_id: impl Into<String>) -> Self {
         Self {
             content_id: content_id.into(),
@@ -167,6 +201,7 @@ impl KeyRequest {
         }
     }
 
+    /// Request a key for a given track type and quality tier.
     pub fn with_quality_tier(mut self, track_type: TrackType, tier: QualityTier) -> Self {
         self.requested_quality_tiers.push((track_type, tier));
         self
@@ -177,15 +212,19 @@ impl KeyRequest {
         self.with_quality_tier(track_type, tier)
     }
 
+    /// Add a target DRM system to the request.
     pub fn with_drm_system(mut self, drm: DrmSystem) -> Self {
         self.drm_systems.push(drm);
         self
     }
 
+    /// Add a target encryption scheme to the request.
     pub fn with_encryption_scheme(mut self, scheme: EncryptionScheme) -> Self {
         self.encryption_schemes.push(scheme);
         self
     }
+
+    /// Return deduplicated concrete encryption schemes for this request.
     pub fn concrete_schemes(&self) -> Vec<Option<EncryptionScheme>> {
         if self.encryption_schemes.is_empty() {
             vec![None]
@@ -207,15 +246,19 @@ impl KeyRequest {
 /// The set of ContentKeys and PSSH boxes returned by a KeyProvider.
 #[derive(Debug, Clone, Default)]
 pub struct KeySet {
+    /// Map of keys indexed by scheme, track type, and quality tier.
     pub keys: HashMap<(Option<EncryptionScheme>, TrackType, QualityTier), ContentKey>,
+    /// Collected PSSH box descriptors for manifest signaling.
     pub pssh: Vec<PsshData>,
 }
 
 impl KeySet {
+    /// Construct an empty key set.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Insert a ContentKey into the set.
     pub fn insert_key(&mut self, key: ContentKey) {
         self.keys.insert(
             (
@@ -227,6 +270,7 @@ impl KeySet {
         );
     }
 
+    /// Retrieve a key matching the track type and quality tier regardless of scheme.
     pub fn get_key(
         &self,
         track_type: TrackType,
@@ -242,6 +286,7 @@ impl KeySet {
             })
     }
 
+    /// Retrieve a key matching an explicit encryption scheme, track type, and quality tier.
     pub fn get_key_for_scheme(
         &self,
         scheme: EncryptionScheme,
@@ -253,6 +298,7 @@ impl KeySet {
             .or_else(|| self.keys.get(&(None, track_type, quality_tier.clone())))
     }
 
+    /// Add a PSSH box to the set if not already present.
     pub fn add_pssh(&mut self, pssh: PsshData) {
         if !self.pssh.iter().any(|p| p == &pssh) {
             self.pssh.push(pssh);
@@ -273,14 +319,17 @@ impl KeySet {
             .filter(move |p| p.encryption_scheme.is_none_or(|s| s == scheme))
     }
 
+    /// Iterate over all stored ContentKeys.
     pub fn all_keys(&self) -> impl Iterator<Item = &ContentKey> {
         self.keys.values()
     }
 
+    /// Check whether the key set contains no keys.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 
+    /// Return the total number of keys in the set.
     pub fn len(&self) -> usize {
         self.keys.len()
     }
@@ -310,7 +359,7 @@ impl KeySet {
         crate::vendor::axinom::generate_axinom_jwt(com_key_id, com_key, &configs)
     }
 
-    /// Generate a signed Axinom JWT entitlement token using an [`AxinomSigningConfig`].
+    /// Generate a signed Axinom JWT entitlement token using an [`AxinomSigningConfig`](crate::vendor::axinom::AxinomSigningConfig).
     pub fn generate_axinom_jwt_with_config(
         &self,
         signing_config: &crate::vendor::axinom::AxinomSigningConfig,
@@ -321,6 +370,7 @@ impl KeySet {
 
 /// Pluggable trait for DRM key acquisition.
 pub trait KeyProvider: Send + Sync {
+    /// Fetch keys matching the provided key request.
     fn fetch_keys(
         &self,
         request: &KeyRequest,

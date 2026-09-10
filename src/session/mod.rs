@@ -1,7 +1,14 @@
+//! Packaging session orchestration and lifecycle management.
+//!
+//! Provides [`PackagingSession`], [`PackagingSessionConfig`], and [`SessionWriter`].
+
+/// Multi-representation process clusters and lifecycle coordination.
 pub mod cluster;
 pub use cluster::{Representation, RepresentationCluster};
+/// Manifest-driven artifact harvesting and ephemeral staging monitor.
 pub mod harvester;
 use harvester::Harvester;
+/// DRM stream playback metadata and key transfer objects.
 pub mod metadata;
 pub use metadata::{DrmKeyEntry, DrmStreamMetadata};
 
@@ -31,9 +38,13 @@ use uuid::Uuid;
 const DEFAULT_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WATCHDOG_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Default media segment duration in seconds (2.0s).
 pub const DEFAULT_SEGMENT_DURATION: f64 = 2.0;
+/// Default low-latency CMAF chunk duration in seconds (0.2s).
 pub const DEFAULT_CHUNK_DURATION: f64 = 0.2;
+/// Minimum allowed segment duration in seconds (0.5s).
 pub const MIN_SEGMENT_DURATION: f64 = 0.5;
+/// Maximum allowed segment duration in seconds (30.0s).
 pub const MAX_SEGMENT_DURATION: f64 = 30.0;
 pub use crate::gpac::process::DEFAULT_TIME_SHIFT_BUFFER;
 
@@ -45,18 +56,29 @@ fn default_output_dir(content_id: &str) -> PathBuf {
 /// Configuration for creating a `PackagingSession`.
 #[derive(Debug, Clone)]
 pub struct PackagingSessionConfig {
+    /// Content or stream identifier.
     pub content_id: String,
+    /// Declared track renditions.
     pub renditions: Vec<Rendition>,
     /// The effective encryption mode. `Dual` creates one CENC and one CBCS Representation.
     pub encryption_scheme: EncryptionScheme,
+    /// Target DRM systems to generate signaling and PSSH boxes for.
     pub drm_systems: Vec<DrmSystem>,
+    /// Delivery latency profile.
     pub latency_mode: LatencyMode,
+    /// Target media segment duration in seconds.
     pub segment_duration: f64,
+    /// Target CMAF chunk duration in seconds for LowLatency mode.
     pub chunk_duration: f64,
+    /// Availability time offset in seconds for LowLatency DASH.
     pub availability_time_offset: Option<f64>,
+    /// Time shift buffer depth (DVR window) in seconds.
     pub time_shift_buffer: Duration,
+    /// Storage staging output directory.
     pub output_dir: PathBuf,
+    /// Whether `output_dir` was explicitly set by the caller.
     pub is_custom_output_dir: bool,
+    /// Whether to preserve staging output files on Drop.
     pub preserve_output: bool,
     /// Parent directory for private, session-scoped GPAC DRM XML files.
     pub control_dir: Option<PathBuf>,
@@ -64,11 +86,14 @@ pub struct PackagingSessionConfig {
     pub session_timeout: Option<Duration>,
     /// Per-Representation deadline for GPAC finalization after stdin closes.
     pub finalization_timeout: Duration,
+    /// Binary executable name or path for GPAC (defaults to `"gpac"`).
     pub gpac_bin: Option<String>,
+    /// Policy for mapping ContentKeys across declared Renditions.
     pub key_mapping_policy: KeyMappingPolicy,
 }
 
 impl PackagingSessionConfig {
+    /// Construct a new session configuration with defaults (CBCS, Standard Latency, 2.0s segments).
     pub fn new(content_id: impl Into<String>) -> Self {
         let cid = content_id.into();
         Self {
@@ -137,11 +162,13 @@ impl PackagingSessionConfig {
         s
     }
 
+    /// Add a rendition declaration to the session.
     pub fn with_rendition(mut self, rendition: Rendition) -> Self {
         self.renditions.push(rendition);
         self
     }
 
+    /// Add multiple rendition declarations to the session.
     pub fn with_renditions(mut self, renditions: impl IntoIterator<Item = Rendition>) -> Self {
         self.renditions.extend(renditions);
         self
@@ -161,6 +188,7 @@ impl PackagingSessionConfig {
         self
     }
 
+    /// Set the key mapping policy for assigning ContentKeys to renditions.
     pub fn with_key_mapping_policy(mut self, policy: KeyMappingPolicy) -> Self {
         self.key_mapping_policy = policy;
         self
@@ -172,6 +200,7 @@ impl PackagingSessionConfig {
         self
     }
 
+    /// Add a target DRM system to the session.
     pub fn with_drm_system(mut self, drm: DrmSystem) -> Self {
         if !self.drm_systems.contains(&drm) {
             self.drm_systems.push(drm);
@@ -179,6 +208,7 @@ impl PackagingSessionConfig {
         self
     }
 
+    /// Set the streaming latency profile.
     pub fn with_latency_mode(mut self, mode: LatencyMode) -> Self {
         self.latency_mode = mode;
         self
@@ -219,6 +249,7 @@ impl PackagingSessionConfig {
         self
     }
 
+    /// Set an explicit custom directory for staging packaged artifacts.
     pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.output_dir = dir.into();
         self.is_custom_output_dir = true;
@@ -237,16 +268,19 @@ impl PackagingSessionConfig {
         self
     }
 
+    /// Set an inactivity timeout for the session input pipe.
     pub fn with_session_timeout(mut self, timeout: Duration) -> Self {
         self.session_timeout = Some(timeout);
         self
     }
 
+    /// Set the deadline for GPAC finalization after stdin closes.
     pub fn with_finalization_timeout(mut self, timeout: Duration) -> Self {
         self.finalization_timeout = timeout;
         self
     }
 
+    /// Override the binary executable name or path for GPAC.
     pub fn with_gpac_bin(mut self, bin: impl Into<String>) -> Self {
         self.gpac_bin = Some(bin.into());
         self
@@ -286,18 +320,28 @@ impl Lifecycle {
 /// Output manifest paths and packaging statistics returned by `PackagingSession::run_to_completion`.
 #[derive(Debug, Clone)]
 pub struct PackagingResult {
+    /// Total number of media segments pushed during the session.
     pub segments_ingested: u64,
+    /// Storage staging output directory containing media and playlists.
     pub output_dir: PathBuf,
+    /// All discovered manifest playlist paths.
     pub manifests: Vec<PathBuf>,
+    /// Primary HLS master manifest path, if generated.
     pub hls_manifest: Option<PathBuf>,
+    /// Primary DASH MPD manifest path, if generated.
     pub dash_manifest: Option<PathBuf>,
+    /// CENC-specific HLS master playlist path.
     pub cenc_hls: Option<PathBuf>,
+    /// CENC-specific DASH MPD manifest path.
     pub cenc_dash: Option<PathBuf>,
+    /// CBCS-specific HLS master playlist path.
     pub cbcs_hls: Option<PathBuf>,
+    /// CBCS-specific DASH MPD manifest path.
     pub cbcs_dash: Option<PathBuf>,
 }
 
 impl PackagingResult {
+    /// Resolve the manifest path for an encryption scheme and format.
     pub fn manifest_path(
         &self,
         scheme: EncryptionScheme,
@@ -322,6 +366,7 @@ impl PackagingResult {
         }
     }
 
+    /// Explicitly remove the output directory and all contents from storage staging.
     pub async fn cleanup(&self) -> Result<()> {
         if self.output_dir.exists() {
             tokio::fs::remove_dir_all(&self.output_dir)

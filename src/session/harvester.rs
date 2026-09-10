@@ -58,6 +58,7 @@ impl HarvesterState {
     }
 }
 
+/// Parse the numeric sequence number from a segment filename (e.g. `"video_1080p_1.m4s"` -> `Some(1)`).
 pub fn parse_segment_number(filename: &str) -> Option<u64> {
     if let Some(stem) = filename.strip_suffix(".m4s") {
         if let Some(pos) = stem.rfind('_') {
@@ -540,6 +541,7 @@ async fn harvest_target(
     Ok(())
 }
 
+/// Background harvester task monitoring staging directories for packaged artifacts.
 pub struct Harvester {
     shutdown_token: CancellationToken,
     join_handle: Option<JoinHandle<()>>,
@@ -564,6 +566,7 @@ fn try_register_watches(
 }
 
 impl Harvester {
+    /// Spawn a background harvester task monitoring staging directories.
     pub fn spawn(
         targets: Vec<(PathBuf, EncryptionScheme)>,
         tx: mpsc::Sender<PackagedArtifact>,
@@ -638,12 +641,14 @@ impl Harvester {
         }
     }
 
+    /// Abort the background harvester task immediately.
     pub fn cancel(&mut self) {
         if let Some(handle) = self.join_handle.take() {
             handle.abort();
         }
     }
 
+    /// Signal graceful shutdown, perform a final flush pass, and wait for task termination.
     pub async fn finish_and_flush(mut self) {
         self.shutdown_token.cancel();
         if let Some(handle) = self.join_handle.take() {

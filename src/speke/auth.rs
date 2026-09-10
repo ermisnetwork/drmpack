@@ -62,11 +62,21 @@ impl From<SigV4Credentials> for SpekeAuth {
 #[derive(Clone, PartialEq, Eq)]
 pub enum SpekeAuth {
     /// HTTP Basic authentication with username and password.
-    Basic { username: String, password: String },
+    Basic {
+        /// HTTP Basic auth username.
+        username: String,
+        /// HTTP Basic auth password.
+        password: String,
+    },
     /// HTTP Bearer token authentication.
     Bearer(String),
     /// Custom API key header authentication.
-    ApiKey { header_name: String, key: String },
+    ApiKey {
+        /// Header name (e.g. `"X-API-Key"`).
+        header_name: String,
+        /// Secret API key value.
+        key: String,
+    },
     /// AWS SigV4 static signature or pre-signed authorization header.
     SigV4(SigV4Credentials),
 }

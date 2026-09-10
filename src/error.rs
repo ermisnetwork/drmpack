@@ -1,42 +1,62 @@
+//! Error types and diagnostics for `drmpack`.
+//!
+//! Provides [`DrmpackError`] for operational failures across key acquisition,
+//! GPAC process supervision, session orchestration, and DRM license proxying.
+
 use thiserror::Error;
 
+/// The primary error enumeration for `drmpack` operations.
 #[derive(Error, Debug)]
 pub enum DrmpackError {
+    /// Underlying I/O failure (e.g. pipe read/write or staging directory manipulation).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// DRM key acquisition failure from a key provider.
     #[error("Key provider error: {0}")]
     KeyProvider(String),
 
+    /// DRM encryption configuration or PSSH synthesis error.
     #[error("Encryption error: {0}")]
     Encryption(String),
 
+    /// Invalid configuration supplied to a session or provider.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 
+    /// Orchestration error within a packaging session.
     #[error("Session error: {0}")]
     Session(String),
 
+    /// Internal error reported by the GPAC engine.
     #[error("GPAC engine error: {0}")]
     Gpac(String),
 
+    /// A GPAC worker subprocess exited unexpectedly.
     #[error("GPAC process crashed with exit code {exit_code:?}: {stderr}{}", diagnose_gpac_crash(*exit_code, stderr))]
     ProcessCrashed {
+        /// The OS exit code, if available.
         exit_code: Option<i32>,
+        /// Captured standard error stream from the GPAC process.
         stderr: String,
     },
 
+    /// Consolidated failure across active representations in a packaging session.
     #[error("PackagingSession failure: {0}")]
     PackagingSession(std::sync::Arc<PackagingSessionFailure>),
 
+    /// Upstream HTTP or payload failure encountered during DRM license proxying.
     #[cfg(feature = "license-proxy")]
     #[error(
         "License proxy error (HTTP {status}): {message}{}",
         format_license_diagnostic(diagnostic)
     )]
     LicenseProxy {
+        /// HTTP status code returned by the upstream license service.
         status: reqwest::StatusCode,
+        /// Diagnostic message or error summary.
         message: String,
+        /// Upstream vendor diagnostic header, if returned.
         diagnostic: Option<String>,
     },
 }
@@ -65,11 +85,17 @@ fn format_license_diagnostic(diagnostic: &Option<String>) -> String {
 /// The lifecycle operation performed on an encryption Representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackagingOperation {
+    /// Initializing and spawning the representation.
     Create,
+    /// Writing media bytes to the stdin pipe.
     Write,
+    /// Polling process or manifest status.
     Status,
+    /// Terminating due to an inactivity watchdog timeout.
     Watchdog,
+    /// Finalizing the representation and closing pipes cleanly.
     Close,
+    /// Process supervisor exit monitoring.
     Supervisor,
 }
 
@@ -89,8 +115,11 @@ impl std::fmt::Display for PackagingOperation {
 /// A failure originating from one concrete encryption Representation.
 #[derive(Debug)]
 pub struct RepresentationFailure {
+    /// Concrete cipher scheme of the failed representation (CENC or CBCS).
     pub scheme: crate::types::EncryptionScheme,
+    /// Lifecycle operation during which the failure occurred.
     pub operation: PackagingOperation,
+    /// Underlying error.
     pub error: DrmpackError,
 }
 
@@ -128,9 +157,13 @@ impl std::fmt::Display for RepresentationFailure {
 /// The terminal failure of a PackagingSession, including every Representation failure observed.
 #[derive(Debug)]
 pub struct PackagingSessionFailure {
+    /// Observed failures in the CENC representation.
     pub cenc: Vec<RepresentationFailure>,
+    /// Observed failures in the CBCS representation.
     pub cbcs: Vec<RepresentationFailure>,
+    /// Optional failure encountered during staging directory cleanup.
     pub output_cleanup: Option<DrmpackError>,
+    /// Optional failure encountered during control directory cleanup.
     pub control_cleanup: Option<DrmpackError>,
 }
 
@@ -165,6 +198,7 @@ impl PackagingSessionFailure {
         self
     }
 
+    /// Returns an iterator over all representation failures across CENC and CBCS.
     pub fn failures(&self) -> impl Iterator<Item = &RepresentationFailure> {
         self.cenc.iter().chain(self.cbcs.iter())
     }
@@ -185,6 +219,7 @@ impl std::fmt::Display for PackagingSessionFailure {
 
 impl std::error::Error for PackagingSessionFailure {}
 
+/// A specialized Result type for `drmpack` operations.
 pub type Result<T> = std::result::Result<T, DrmpackError>;
 
 #[cfg(test)]

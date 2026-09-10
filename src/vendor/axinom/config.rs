@@ -5,11 +5,17 @@ use std::time::Duration;
 /// Configuration for connecting to the Axinom Key Service (SPEKE v2 over CPIX 2.3).
 #[derive(Clone)]
 pub struct AxinomConfig {
+    /// Axinom tenant ID UUID.
     pub tenant_id: String,
+    /// Axinom Key Service management API key.
     pub management_key: String,
+    /// Tenant-specific SPEKE v2 endpoint URL.
     pub endpoint: String,
+    /// Whether to instruct Axinom to retain the exact KeyIDs sent in the CPIX request.
     pub override_key_ids: bool,
+    /// HTTP request timeout.
     pub timeout: Duration,
+    /// Custom headers forwarded with key requests.
     pub headers: reqwest::header::HeaderMap,
 }
 
@@ -146,11 +152,17 @@ impl fmt::Debug for AxinomConfig {
 /// Configuration for the Axinom License Proxy endpoints and connection parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AxinomLicenseConfig {
+    /// Tenant-specific Widevine license acquisition URL.
     pub widevine_license_url: String,
+    /// Tenant-specific FairPlay license acquisition URL.
     pub fairplay_license_url: String,
+    /// Tenant-specific PlayReady license acquisition URL.
     pub playready_license_url: String,
+    /// URL to fetch the FairPlay Application Certificate (`.cer` / `.der`).
     pub fairplay_cert_url: String,
+    /// HTTP request timeout.
     pub timeout: Duration,
+    /// Custom headers forwarded with license acquisition requests.
     pub headers: reqwest::header::HeaderMap,
 }
 

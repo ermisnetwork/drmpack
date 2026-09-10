@@ -16,7 +16,9 @@ use tracing::warn;
 
 /// An individual media Representation managed within a `RepresentationCluster`.
 pub struct Representation {
+    /// Concrete encryption scheme of this representation.
     pub scheme: EncryptionScheme,
+    /// Mutex-wrapped GPAC child process handle.
     pub gpac: Arc<Mutex<GpacProcess>>,
     pub(crate) is_running: Arc<AtomicBool>,
     pub(crate) exit_tx: broadcast::Sender<ProcessExitStatus>,
@@ -24,6 +26,7 @@ pub struct Representation {
 }
 
 impl Representation {
+    /// Construct a new Representation wrapping an active GPAC process.
     pub fn new(scheme: EncryptionScheme, gpac: GpacProcess) -> Self {
         let is_running = Arc::clone(&gpac.is_running);
         let exit_tx = gpac.exit_tx.clone();
@@ -52,14 +55,17 @@ impl Representation {
         self.exit_tx.subscribe()
     }
 
+    /// Write media bytes into this representation's GPAC stdin pipe.
     pub async fn write_data(&self, bytes: &[u8]) -> (EncryptionScheme, Result<()>) {
         (self.scheme, self.gpac.lock().await.write_data(bytes).await)
     }
 
+    /// Check if the representation is healthy or if the child process has terminated prematurely.
     pub async fn check_status(&self) -> Result<()> {
         self.gpac.lock().await.check_status()
     }
 
+    /// Finalize this representation, flush manifests, and wait for process completion.
     pub async fn close_and_wait(&self, timeout: Duration) -> Result<()> {
         self.gpac.lock().await.close_and_wait(timeout).await
     }
@@ -280,22 +286,27 @@ impl RepresentationCluster {
         }
     }
 
+    /// Return a vector of all encryption schemes present in this cluster.
     pub fn schemes(&self) -> Vec<EncryptionScheme> {
         self.representations.iter().map(|r| r.scheme).collect()
     }
 
+    /// Check if a specific encryption scheme is active in this cluster.
     pub fn has_scheme(&self, scheme: EncryptionScheme) -> bool {
         self.representations.iter().any(|r| r.scheme == scheme)
     }
 
+    /// Return the count of active representations.
     pub fn len(&self) -> usize {
         self.representations.len()
     }
 
+    /// Return true if the cluster contains no representations.
     pub fn is_empty(&self) -> bool {
         self.representations.is_empty()
     }
 
+    /// Return a slice of all active representations.
     pub fn representations(&self) -> &[Representation] {
         &self.representations
     }

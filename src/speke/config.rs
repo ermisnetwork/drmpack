@@ -6,10 +6,15 @@ use std::time::Duration;
 /// Configuration options for AWS SPEKE v2.0 REST protocol client.
 #[derive(Clone)]
 pub struct SpekeConfig {
+    /// SPEKE v2 endpoint URL.
     pub endpoint: String,
+    /// Request timeout duration.
     pub timeout: Duration,
+    /// Optional authentication credentials.
     pub auth: Option<SpekeAuth>,
+    /// Custom HTTP headers to include with each request.
     pub headers: reqwest::header::HeaderMap,
+    /// Optional dynamic request signer.
     pub signer: Option<Arc<dyn SpekeSigner>>,
 }
 

@@ -9,8 +9,11 @@ use tracing::{debug, warn};
 /// Response received from a raw SPEKE exchange.
 #[derive(Debug, Clone)]
 pub struct SpekeExchangeResponse {
+    /// HTTP status code returned by the key server.
     pub status: reqwest::StatusCode,
+    /// HTTP response headers.
     pub headers: reqwest::header::HeaderMap,
+    /// Response payload body string.
     pub body: String,
 }
 

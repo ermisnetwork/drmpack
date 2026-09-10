@@ -7,10 +7,15 @@ use crate::types::{
 /// The execution plan computed by `KeyPolicyEngine::plan`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyPlan {
+    /// Active key mapping policy.
     pub policy: KeyMappingPolicy,
+    /// Generated key request to send to the KeyProvider, if encryption is required.
     pub request: Option<KeyRequest>,
+    /// Source track type and quality tier used for replicating keys in SharedAll mode.
     pub shared_all_source: Option<(TrackType, QualityTier)>,
+    /// Canonical quality tier used for video keys in SharedVideoSingleAudio mode.
     pub shared_video_tier: Option<QualityTier>,
+    /// Canonical quality tier used for audio keys in SharedVideoSingleAudio mode.
     pub shared_audio_tier: Option<QualityTier>,
 }
 

@@ -7,12 +7,16 @@ use std::time::Duration;
 /// Configuration options for connecting to a CPIX 2.3 Provider.
 #[derive(Debug, Clone)]
 pub struct CpixConfig {
+    /// CPIX 2.3 HTTP endpoint URL.
     pub endpoint: String,
+    /// HTTP request timeout.
     pub timeout: Duration,
+    /// Custom HTTP headers forwarded with the CPIX XML payload.
     pub headers: reqwest::header::HeaderMap,
 }
 
 impl CpixConfig {
+    /// Construct a new configuration with the target endpoint URL.
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
@@ -21,11 +25,13 @@ impl CpixConfig {
         }
     }
 
+    /// Set a custom HTTP request timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Add a custom header to include in requests.
     pub fn with_header(
         mut self,
         name: reqwest::header::HeaderName,

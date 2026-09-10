@@ -7,9 +7,13 @@ use uuid::Uuid;
 /// Description of a key specification generated for a CPIX request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpixKeySpec {
+    /// Generated or requested KeyID.
     pub kid: KeyID,
+    /// Target encryption scheme.
     pub scheme: EncryptionScheme,
+    /// Elementary track type (video or audio).
     pub track_type: TrackType,
+    /// Associated quality tier.
     pub quality_tier: QualityTier,
 }
 

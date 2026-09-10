@@ -1,3 +1,8 @@
+//! Core domain types and enumerations for `drmpack`.
+//!
+//! Defines fundamental types including [`EncryptionScheme`], [`LatencyMode`],
+//! [`Rendition`], [`QualityTier`], [`DrmSystem`], and [`PackagedArtifact`].
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -68,7 +73,9 @@ impl fmt::Display for EncryptionScheme {
 /// The manifest protocol used to deliver a Representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManifestFormat {
+    /// Dynamic Adaptive Streaming over HTTP (`.mpd`).
     Dash,
+    /// HTTP Live Streaming playlist (`.m3u8`).
     Hls,
 }
 
@@ -103,8 +110,11 @@ impl fmt::Display for LatencyMode {
 /// DRM system targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DrmSystem {
+    /// Google Widevine Modular DRM (Common System ID: `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`).
     Widevine,
+    /// Apple FairPlay Streaming DRM (Common System ID: `94ce86fb-07ff-4f43-adb8-93d2fa968ca2`).
     FairPlay,
+    /// Microsoft PlayReady DRM (Common System ID: `9a04f079-9840-4286-ab92-e65be0885f95`).
     PlayReady,
 }
 
@@ -134,8 +144,11 @@ impl DrmSystem {
 /// Media track type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TrackType {
+    /// Video elementary stream.
     Video,
+    /// Audio elementary stream.
     Audio,
+    /// Timed text or subtitle elementary stream.
     Subtitle,
 }
 
@@ -154,18 +167,22 @@ impl fmt::Display for TrackType {
 pub struct QualityTier(pub String);
 
 impl QualityTier {
+    /// Create a custom quality tier name.
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
 
+    /// Predefined Standard Definition (SD) quality tier.
     pub fn sd() -> Self {
         Self("SD".into())
     }
 
+    /// Predefined High Definition (HD) quality tier.
     pub fn hd() -> Self {
         Self("HD".into())
     }
 
+    /// Predefined Ultra High Definition 4K quality tier.
     pub fn uhd_4k() -> Self {
         Self("4K".into())
     }
@@ -192,10 +209,15 @@ pub enum KeyMappingPolicy {
 /// A single rendition declaration bound to a QualityTier for DRM key association.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rendition {
+    /// Logical track identifier (e.g. `track_video_{uuid}`).
     pub track_id: String,
+    /// Elementary stream type of this rendition.
     pub track_type: TrackType,
+    /// Quality tier for ContentKey mapping.
     pub quality_tier: QualityTier,
+    /// Optional 1-based ISO-BMFF container track ID.
     pub container_track_id: Option<u32>,
+    /// Whether this rendition is encrypted via DRM.
     pub encrypted: bool,
 }
 

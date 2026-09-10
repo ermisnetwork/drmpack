@@ -8,13 +8,18 @@ use uuid::Uuid;
 /// Track encryption configuration for GPAC DRM XML.
 #[derive(Debug, Clone)]
 pub struct GpacTrackConfig {
+    /// 1-based ISO-BMFF track ID.
     pub track_id: u32,
+    /// Elementary track type (video or audio).
     pub track_type: TrackType,
+    /// Quality tier for ContentKey mapping.
     pub quality_tier: QualityTier,
+    /// Whether this track is encrypted.
     pub encrypted: bool,
 }
 
 impl GpacTrackConfig {
+    /// Construct a new track configuration.
     pub fn new(track_id: u32, track_type: TrackType, quality_tier: QualityTier) -> Self {
         Self {
             track_id,
@@ -24,6 +29,7 @@ impl GpacTrackConfig {
         }
     }
 
+    /// Set explicit encryption flag for this track.
     pub fn with_encrypted(mut self, encrypted: bool) -> Self {
         self.encrypted = encrypted;
         self
@@ -33,11 +39,14 @@ impl GpacTrackConfig {
 /// Configuration container for generating GPAC DRM XML.
 #[derive(Debug, Clone)]
 pub struct GpacDrmConfig {
+    /// Concrete encryption scheme (CENC or CBCS).
     pub scheme: EncryptionScheme,
+    /// List of track configurations included in the DRM XML.
     pub tracks: Vec<GpacTrackConfig>,
 }
 
 impl GpacDrmConfig {
+    /// Construct a new DRM configuration for an encryption scheme.
     pub fn new(scheme: EncryptionScheme) -> Self {
         Self {
             scheme,
@@ -45,6 +54,7 @@ impl GpacDrmConfig {
         }
     }
 
+    /// Add an encrypted track to the configuration.
     pub fn with_track(
         mut self,
         track_id: u32,
@@ -56,6 +66,7 @@ impl GpacDrmConfig {
         self
     }
 
+    /// Add a clear (unencrypted) track to the configuration.
     pub fn with_clear_track(
         mut self,
         track_id: u32,

@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 /// Trait converting various types into an optional FairPlay Certificate URL.
 pub trait IntoCertUrl {
+    /// Convert self into an optional URL string.
     fn into_cert_url(self) -> Option<String>;
 }
 

@@ -6,8 +6,11 @@ use std::ops::Deref;
 /// and all upstream response headers (such as Axinom's `X-AxDRM-Message` used for device tracking).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LicenseResponse {
+    /// Raw DRM license response payload bytes.
     pub data: bytes::Bytes,
+    /// MIME type returned by the upstream license service.
     pub content_type: Option<String>,
+    /// Response headers returned by the upstream license service.
     pub headers: reqwest::header::HeaderMap,
 }
 

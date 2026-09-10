@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
+/// Default maximum lines retained in the stderr ring buffer for crash diagnostics.
 pub const DEFAULT_STDERR_RING_BUFFER_CAPACITY: usize = 256;
 
 /// Default suggested presentation delay factor (multiplier of segment duration).
@@ -25,9 +26,13 @@ pub const DEFAULT_SPD_SEGMENT_FACTOR: f64 = 2.0;
 /// Log severity classification for GPAC stderr output lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogSeverity {
+    /// Error log level.
     Error,
+    /// Warning log level.
     Warn,
+    /// Informational log level.
     Info,
+    /// Debug trace log level.
     Debug,
 }
 
@@ -57,26 +62,38 @@ pub fn classify_log_severity(line: &str) -> LogSeverity {
 /// Captured exit status of a GPAC child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessExitStatus {
+    /// Exit code returned by the process, if exited normally.
     pub code: Option<i32>,
+    /// Whether the process exited with success (exit code 0).
     pub success: bool,
 }
 
+/// Default timeshift buffer depth for live manifests (60 seconds).
 pub const DEFAULT_TIME_SHIFT_BUFFER: Duration = Duration::from_secs(60);
 
 /// Configuration for launching a GPAC packaging process.
 #[derive(Debug, Clone)]
 pub struct GpacProcessConfig {
+    /// Filesystem path to the generated GPAC cecrypt DRM XML file.
     pub drm_xml_path: PathBuf,
+    /// Directory where GPAC writes manifests and media segments.
     pub output_dir: PathBuf,
+    /// Streaming delivery latency profile.
     pub latency_mode: LatencyMode,
+    /// Target media segment duration in seconds.
     pub segment_duration: f64,
+    /// Low-latency CMAF chunk duration in seconds.
     pub chunk_duration: f64,
+    /// Low-latency DASH availability time offset in seconds.
     pub availability_time_offset: Option<f64>,
+    /// Manifest time shift buffer depth.
     pub time_shift_buffer: Duration,
+    /// Binary executable name or path for GPAC (defaults to `"gpac"`).
     pub gpac_bin: String,
 }
 
 impl GpacProcessConfig {
+    /// Construct a new configuration with mandatory DRM XML and output directory paths.
     pub fn new(drm_xml_path: impl Into<PathBuf>, output_dir: impl Into<PathBuf>) -> Self {
         Self {
             drm_xml_path: drm_xml_path.into(),
@@ -90,31 +107,37 @@ impl GpacProcessConfig {
         }
     }
 
+    /// Set the latency profile (LowLatency or Standard).
     pub fn with_latency_mode(mut self, mode: LatencyMode) -> Self {
         self.latency_mode = mode;
         self
     }
 
+    /// Set the segment duration in seconds.
     pub fn with_segment_duration(mut self, duration: f64) -> Self {
         self.segment_duration = duration;
         self
     }
 
+    /// Set the chunk duration in seconds for LowLatency mode.
     pub fn with_chunk_duration(mut self, duration: f64) -> Self {
         self.chunk_duration = duration;
         self
     }
 
+    /// Set the availability time offset in seconds for LowLatency DASH.
     pub fn with_availability_time_offset(mut self, asto: impl Into<Option<f64>>) -> Self {
         self.availability_time_offset = asto.into();
         self
     }
 
+    /// Set the manifest timeshift buffer depth.
     pub fn with_time_shift_buffer(mut self, buffer: Duration) -> Self {
         self.time_shift_buffer = buffer;
         self
     }
 
+    /// Override the path or binary name for the GPAC executable.
     pub fn with_gpac_bin(mut self, bin: impl Into<String>) -> Self {
         self.gpac_bin = bin.into();
         self

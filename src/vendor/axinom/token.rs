@@ -9,7 +9,9 @@ use base64::prelude::*;
 /// Configuration of a content key to be authorized within an Axinom entitlement token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxinomKeyConfig {
+    /// KeyID as hex string or UUID.
     pub kid: String,
+    /// Optional 16-byte initialization vector.
     pub iv: Option<[u8; 16]>,
 }
 
@@ -126,6 +128,7 @@ use std::fmt;
 /// Configuration and credentials for signing Axinom DRM JWT entitlement tokens.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AxinomSigningConfig {
+    /// Communication Key ID UUID.
     pub key_id: String,
     secret: String,
 }
@@ -165,6 +168,7 @@ impl AxinomSigningConfig {
         Ok(Self::new(key_id, secret))
     }
 
+    /// Access the communication key ID.
     pub fn key_id(&self) -> &str {
         &self.key_id
     }

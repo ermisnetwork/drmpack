@@ -32,6 +32,7 @@ impl std::fmt::Debug for StaticKeySource {
 pub type RawKeyProvider = StaticKeySource;
 
 impl StaticKeySource {
+    /// Create an empty static key source.
     pub fn new() -> Self {
         Self::default()
     }
@@ -63,16 +64,19 @@ impl StaticKeySource {
         source
     }
 
+    /// Builder method to register a ContentKey.
     pub fn with_key(mut self, key: ContentKey) -> Self {
         self.insert_key(key);
         self
     }
 
+    /// Builder method to register a PSSH box.
     pub fn with_pssh(mut self, pssh: PsshData) -> Self {
         self.pssh.push(pssh);
         self
     }
 
+    /// Insert a ContentKey into the static key store.
     pub fn insert_key(&mut self, key: ContentKey) {
         self.keys.insert(
             (
