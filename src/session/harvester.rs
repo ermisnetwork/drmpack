@@ -446,9 +446,8 @@ async fn harvest_target(
     });
 
     for (path, file_name, data, kind) in ready_segments {
-        state.record_emitted(scheme, file_name.clone());
         let artifact = PackagedArtifact {
-            filename: file_name,
+            filename: file_name.clone(),
             data,
             kind,
             scheme,
@@ -456,6 +455,7 @@ async fn harvest_target(
         tokio::select! {
             result = tx.send(artifact) => {
                 if result.is_err() { return Err(()); }
+                state.record_emitted(scheme, file_name);
                 let _ = tokio::fs::remove_file(&path).await;
             }
             _ = shutdown.cancelled() => { return Err(()); }
@@ -588,9 +588,11 @@ impl Harvester {
                 }
             }
 
-            // Final harvest pass to flush remaining segments and unlink all staging manifests
+            // Final harvest pass to flush remaining segments and unlink all staging manifests.
+            // Use a fresh token — loop_shutdown is already cancelled at this point.
+            let flush_token = CancellationToken::new();
             for (dir, scheme) in &targets {
-                let _ = harvest_target(dir, *scheme, &tx, &mut state, true, &loop_shutdown).await;
+                let _ = harvest_target(dir, *scheme, &tx, &mut state, true, &flush_token).await;
             }
         });
 

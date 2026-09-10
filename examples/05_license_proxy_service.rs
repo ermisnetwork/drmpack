@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  AXINOM_WIDEVINE_LICENSE_URL=https://<tenant-id>.drm-widevine-licensing.axprod.net/AcquireLicense");
         eprintln!("  AXINOM_FAIRPLAY_LICENSE_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/AcquireLicense");
         eprintln!("  AXINOM_PLAYREADY_LICENSE_URL=https://<tenant-id>.drm-playready-licensing.axprod.net/AcquireLicense");
-        eprintln!("  AXINOM_FAIRPLAY_CERT_URL=https://<tenant-id>.drm-fairplay-licensing.axprod.net/v2/Certificate");
+        eprintln!("  AXINOM_FAIRPLAY_CERT_URL=... (optional)");
         e
     })?;
     let proxy = LicenseProxy::new(license_config);
