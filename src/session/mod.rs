@@ -671,9 +671,6 @@ impl PackagingSession {
 
         if failures.is_empty() && control_cleanup.is_none() {
             lifecycle.state = SessionState::Closed;
-            if !self.output_receiver_claimed {
-                self.preserve_output = true;
-            }
             self.is_terminal.store(true, Ordering::Release);
             info!("PackagingSession closed successfully");
             Ok(())
@@ -2478,7 +2475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ramdisk_lifecycle_close_preserves_output_after_drop() {
+    async fn test_ramdisk_lifecycle_close_cleans_up_after_drop() {
         let mock_bin = std::env::temp_dir().join(format!("mock_gpac_{}.sh", Uuid::new_v4()));
         std::fs::write(&mock_bin, "#!/bin/sh\ncat > /dev/null\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -2502,16 +2499,14 @@ mod tests {
             session.close().await.unwrap();
             assert!(
                 out_dir.exists(),
-                "Output dir must be preserved after close()"
+                "Output dir must still exist after close() (before drop)"
             );
         }
-        // PackagingSession dropped here after successful close()
-        // If close() did NOT set self.preserve_output = true, Drop will delete out_dir!
+        // PackagingSession dropped here — Drop cleans up auto-allocated output dir
         assert!(
-            out_dir.exists(),
-            "Auto-allocated output dir must be preserved after successful close() even after Drop"
+            !out_dir.exists(),
+            "Auto-allocated output dir must be deleted after Drop (no preserve_output)"
         );
-        let _ = tokio::fs::remove_dir_all(&out_dir).await;
         let _ = tokio::fs::remove_file(&mock_bin).await;
     }
 

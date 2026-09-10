@@ -293,6 +293,7 @@ async fn harvest_target(
     tx: &mpsc::Sender<PackagedArtifact>,
     state: &mut HarvesterState,
     is_final: bool,
+    shutdown: &CancellationToken,
 ) -> Result<(), ()> {
     if !dir.exists() {
         return Ok(());
@@ -445,7 +446,6 @@ async fn harvest_target(
     });
 
     for (path, file_name, data, kind) in ready_segments {
-        let _ = tokio::fs::remove_file(&path).await;
         state.record_emitted(scheme, file_name.clone());
         let artifact = PackagedArtifact {
             filename: file_name,
@@ -453,8 +453,12 @@ async fn harvest_target(
             kind,
             scheme,
         };
-        if tx.send(artifact).await.is_err() {
-            return Err(());
+        tokio::select! {
+            result = tx.send(artifact) => {
+                if result.is_err() { return Err(()); }
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            _ = shutdown.cancelled() => { return Err(()); }
         }
     }
 
@@ -495,8 +499,11 @@ async fn harvest_target(
                 kind: ArtifactKind::Manifest,
                 scheme,
             };
-            if tx.send(artifact).await.is_err() {
-                return Err(());
+            tokio::select! {
+                result = tx.send(artifact) => {
+                    if result.is_err() { return Err(()); }
+                }
+                _ = shutdown.cancelled() => { return Err(()); }
             }
         }
         if is_final {
@@ -572,7 +579,7 @@ impl Harvester {
 
                 // Single reconciliation pass — shared by all wake-up sources
                 for (dir, scheme) in &targets {
-                    if harvest_target(dir, *scheme, &tx, &mut state, false)
+                    if harvest_target(dir, *scheme, &tx, &mut state, false, &loop_shutdown)
                         .await
                         .is_err()
                     {
@@ -583,7 +590,7 @@ impl Harvester {
 
             // Final harvest pass to flush remaining segments and unlink all staging manifests
             for (dir, scheme) in &targets {
-                let _ = harvest_target(dir, *scheme, &tx, &mut state, true).await;
+                let _ = harvest_target(dir, *scheme, &tx, &mut state, true, &loop_shutdown).await;
             }
         });
 
@@ -602,7 +609,12 @@ impl Harvester {
     pub async fn finish_and_flush(mut self) {
         self.shutdown_token.cancel();
         if let Some(handle) = self.join_handle.take() {
-            let _ = handle.await;
+            match tokio::time::timeout(Duration::from_secs(5), handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    warn!("ArtifactHarvester: finish_and_flush timed out after 5s");
+                }
+            }
         }
     }
 }
@@ -793,7 +805,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let mut state = HarvesterState::default();
 
-        let res = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, false).await;
+        let res = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
         assert!(res.is_ok());
 
         // Drain channel to check if any media segment was emitted
@@ -849,7 +869,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let mut state = HarvesterState::default();
 
-        let res = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, false).await;
+        let res = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
         assert!(res.is_ok());
 
         let mut emitted_segments = Vec::new();
@@ -965,7 +993,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let mut state = HarvesterState::default();
 
-        let _ = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, false).await;
+        let _ = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
         while let Ok(art) = rx.try_recv() {
             assert_ne!(
                 art.kind,
@@ -984,7 +1020,15 @@ mod tests {
         complete_init.extend_from_slice(&make_box(b"moov", b"moov_data"));
         tokio::fs::write(&init_path, &complete_init).await.unwrap();
 
-        let _ = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, false).await;
+        let _ = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
         let mut emitted_init = None;
         while let Ok(art) = rx.try_recv() {
             if art.kind == ArtifactKind::InitSegment {
@@ -1076,7 +1120,15 @@ mod tests {
         let mut state = HarvesterState::default();
 
         // Non-final harvest: segment should NOT be emitted (no HLS readiness signal)
-        let res = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, false).await;
+        let res = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
         assert!(res.is_ok());
 
         let mut emitted = Vec::new();
@@ -1096,7 +1148,15 @@ mod tests {
         );
 
         // Final harvest: segment SHOULD be emitted (is_final overrides)
-        let res = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, true).await;
+        let res = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            true,
+            &CancellationToken::new(),
+        )
+        .await;
         assert!(res.is_ok());
 
         let mut final_emitted = Vec::new();
@@ -1153,7 +1213,15 @@ mod tests {
         let mut state = HarvesterState::default();
 
         let start = std::time::Instant::now();
-        let res = harvest_target(&temp_dir, EncryptionScheme::Cenc, &tx, &mut state, false).await;
+        let res = harvest_target(
+            &temp_dir,
+            EncryptionScheme::Cenc,
+            &tx,
+            &mut state,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
         let elapsed = start.elapsed();
 
         assert!(res.is_ok());
