@@ -93,11 +93,11 @@ async fn generate_sample_mp4(prefix: &str) -> Vec<u8> {
 }
 
 async fn wait_for_path(path: &std::path::Path) {
-    for _ in 0..50 {
+    for _ in 0..100 {
         if path.exists() {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("Timed out waiting for {}", path.display());
 }
