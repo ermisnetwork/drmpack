@@ -86,8 +86,12 @@ The built-in vendor adapter targeting Axinom's Key Service API via SPEKE v2 over
 _Avoid_: Axinom client, Axinom adapter
 
 **AxinomLicenseConfig**:
-The configuration container holding tenant-specific DRM license acquisition and certificate URLs (Widevine, FairPlay, PlayReady, and FairPlay Application Certificate). Requires explicit tenant endpoints without hardcoded defaults to guarantee isolation across Axinom Mosaic tenants and prevent misrouted licensing traffic (ADR-0018).
+The Axinom-specific configuration container holding tenant-specific DRM license acquisition URLs and optional FairPlay certificate URL. Converts into `LicenseProxyConfig` via `From` for use with `LicenseProxy`. The FairPlay Application Certificate URL is optional because Apple (not Axinom) issues the certificate (ADR-0018).
 _Avoid_: License URLs, DRM license settings
+
+**LicenseProxyConfig**:
+Vendor-agnostic configuration for `LicenseProxy` holding Widevine, FairPlay, and PlayReady license acquisition URLs, an optional FairPlay Application Certificate URL, timeout, and custom headers. Lives in `drmpack::license::config`, decoupled from any specific vendor. `AxinomLicenseConfig` implements `Into<LicenseProxyConfig>`.
+_Avoid_: License config, proxy settings
 
 **License proxy**:
 An async handler function that forwards a player's license request to the Provider and returns the response. Media-server mounts it on an HTTP route; auth is media-server's responsibility.

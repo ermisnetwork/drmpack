@@ -1,6 +1,6 @@
 use crate::error::{DrmpackError, Result};
+use crate::license::config::LicenseProxyConfig;
 use crate::license::response::LicenseResponse;
-use crate::vendor::axinom::config::AxinomLicenseConfig;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -49,7 +49,7 @@ impl<T: IntoCertUrl> IntoCertUrl for Option<T> {
 #[derive(Clone)]
 pub struct LicenseProxy {
     client: reqwest::Client,
-    config: AxinomLicenseConfig,
+    config: LicenseProxyConfig,
     fairplay_cert_cache: Arc<RwLock<HashMap<String, bytes::Bytes>>>,
 }
 
@@ -62,8 +62,9 @@ impl fmt::Debug for LicenseProxy {
 }
 
 impl LicenseProxy {
-    /// Create a new LicenseProxy with given AxinomLicenseConfig and default reqwest::Client.
-    pub fn new(config: AxinomLicenseConfig) -> Self {
+    /// Create a new LicenseProxy with given configuration and default reqwest::Client.
+    pub fn new(config: impl Into<LicenseProxyConfig>) -> Self {
+        let config = config.into();
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
@@ -72,7 +73,8 @@ impl LicenseProxy {
     }
 
     /// Try to create a new LicenseProxy, validating the configuration first.
-    pub fn try_new(config: AxinomLicenseConfig) -> Result<Self> {
+    pub fn try_new(config: impl Into<LicenseProxyConfig>) -> Result<Self> {
+        let config = config.into();
         config.validate()?;
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
@@ -83,11 +85,11 @@ impl LicenseProxy {
         Ok(Self::with_client(config, client))
     }
 
-    /// Create a new LicenseProxy with given AxinomLicenseConfig and custom reqwest::Client.
-    pub fn with_client(config: AxinomLicenseConfig, client: reqwest::Client) -> Self {
+    /// Create a new LicenseProxy with given configuration and custom reqwest::Client.
+    pub fn with_client(config: impl Into<LicenseProxyConfig>, client: reqwest::Client) -> Self {
         Self {
             client,
-            config,
+            config: config.into(),
             fairplay_cert_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -98,20 +100,26 @@ impl LicenseProxy {
     }
 
     /// Access the configuration.
-    pub fn config(&self) -> &AxinomLicenseConfig {
+    pub fn config(&self) -> &LicenseProxyConfig {
         &self.config
     }
 
     /// Return the currently cached FairPlay certificate for the configured endpoint, if any.
     pub async fn cached_fairplay_certificate(&self) -> Option<bytes::Bytes> {
+        let cert_url = self.config.fairplay_cert_url.as_ref()?;
         let lock = self.fairplay_cert_cache.read().await;
-        lock.get(&self.config.fairplay_cert_url).cloned()
+        lock.get(cert_url).cloned()
     }
 
     /// Manually populate the FairPlay certificate cache.
     pub async fn set_fairplay_certificate(&self, cert: bytes::Bytes) {
+        let key = self
+            .config
+            .fairplay_cert_url
+            .clone()
+            .unwrap_or_else(|| "manual".to_string());
         let mut lock = self.fairplay_cert_cache.write().await;
-        lock.insert(self.config.fairplay_cert_url.clone(), cert);
+        lock.insert(key, cert);
     }
 
     /// Clear the FairPlay certificate cache.
@@ -181,7 +189,14 @@ impl LicenseProxy {
         let url = cert_url
             .into_cert_url()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.config.fairplay_cert_url.clone());
+            .or_else(|| self.config.fairplay_cert_url.clone())
+            .ok_or_else(|| {
+                DrmpackError::InvalidConfig(
+                    "FairPlay certificate URL not specified or configured. \
+                     Set AXINOM_FAIRPLAY_CERT_URL in .env or pass the URL explicitly."
+                        .into(),
+                )
+            })?;
 
         let trimmed_url = url.trim();
         if trimmed_url.is_empty() {
@@ -437,11 +452,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_license_proxy_manual_cert_caching() {
-        let config = AxinomLicenseConfig::new(
+        let config = LicenseProxyConfig::new(
             "https://example.com/wv",
             "https://example.com/fp",
             "https://example.com/pr",
-            "https://example.com/cert",
+            Some("https://example.com/cert".to_string()),
         );
         let proxy = LicenseProxy::new(config);
         assert_eq!(proxy.cached_fairplay_certificate().await, None);
@@ -456,11 +471,11 @@ mod tests {
 
     #[test]
     fn test_license_proxy_try_new() {
-        let valid = AxinomLicenseConfig::new(
+        let valid = LicenseProxyConfig::new(
             "https://example.com/wv",
             "https://example.com/fp",
             "https://example.com/pr",
-            "https://example.com/cert",
+            Some("https://example.com/cert".to_string()),
         );
         let proxy = LicenseProxy::try_new(valid.clone());
         assert!(proxy.is_ok());
@@ -471,12 +486,25 @@ mod tests {
     }
 
     #[test]
-    fn test_license_proxy_debug_format() {
-        let config = AxinomLicenseConfig::new(
+    fn test_license_proxy_try_new_without_cert_url() {
+        let config = LicenseProxyConfig::new(
             "https://example.com/wv",
             "https://example.com/fp",
             "https://example.com/pr",
-            "https://example.com/cert",
+            None,
+        );
+        // Should succeed: cert_url is optional
+        let proxy = LicenseProxy::try_new(config);
+        assert!(proxy.is_ok());
+    }
+
+    #[test]
+    fn test_license_proxy_debug_format() {
+        let config = LicenseProxyConfig::new(
+            "https://example.com/wv",
+            "https://example.com/fp",
+            "https://example.com/pr",
+            Some("https://example.com/cert".to_string()),
         );
         let proxy = LicenseProxy::new(config);
         let debug_str = format!("{proxy:?}");

@@ -24,7 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Widevine URL: {}", proxy.config().widevine_license_url);
     println!("  FairPlay URL: {}", proxy.config().fairplay_license_url);
     println!("  PlayReady URL: {}", proxy.config().playready_license_url);
-    println!("  FairPlay Cert: {}", proxy.config().fairplay_cert_url);
+    println!(
+        "  FairPlay Cert: {}",
+        proxy
+            .config()
+            .fairplay_cert_url
+            .as_deref()
+            .unwrap_or("(not configured)")
+    );
 
     let sample_token = std::env::var("AXINOM_ENTITLEMENT_TOKEN")
         .unwrap_or_else(|_| "SAMPLE_OR_TEST_ENTITLEMENT_TOKEN".to_string());

@@ -51,14 +51,12 @@ pub use speke::{
 
 #[cfg(feature = "axinom")]
 pub use vendor::axinom::{
-    generate_axinom_jwt, AxinomConfig, AxinomKeyConfig, AxinomProvider, AxinomSigningConfig,
+    generate_axinom_jwt, AxinomConfig, AxinomKeyConfig, AxinomLicenseConfig, AxinomProvider,
+    AxinomSigningConfig,
 };
-
-#[cfg(any(feature = "axinom", feature = "license-proxy"))]
-pub use vendor::axinom::AxinomLicenseConfig;
 
 #[cfg(feature = "license-proxy")]
 pub use license::{
     handle_fairplay_certificate, handle_fairplay_license, handle_playready_license,
-    handle_widevine_license, IntoCertUrl, LicenseProxy, LicenseResponse,
+    handle_widevine_license, IntoCertUrl, LicenseProxy, LicenseProxyConfig, LicenseResponse,
 };

@@ -1,8 +1,8 @@
 mod common;
 
 use common::playback_server::PlaybackServer;
-use drmpack::axinom::{generate_axinom_jwt, AxinomKeyConfig};
-use drmpack::license::{AxinomLicenseConfig, LicenseProxy};
+use drmpack::axinom::{generate_axinom_jwt, AxinomKeyConfig, AxinomLicenseConfig};
+use drmpack::license::LicenseProxy;
 use std::collections::HashSet;
 use std::env;
 use std::error::Error;

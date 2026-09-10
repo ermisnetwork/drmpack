@@ -251,7 +251,7 @@ impl AxinomLicenseConfig {
     /// - `AXINOM_WIDEVINE_LICENSE_URL` (required)
     /// - `AXINOM_FAIRPLAY_LICENSE_URL` (required)
     /// - `AXINOM_PLAYREADY_LICENSE_URL` (required)
-    /// - `AXINOM_FAIRPLAY_CERT_URL` (required)
+    /// - `AXINOM_FAIRPLAY_CERT_URL` (optional — Apple-issued, not an Axinom tenant endpoint)
     pub fn from_env() -> Result<Self> {
         let wv = std::env::var("AXINOM_WIDEVINE_LICENSE_URL").map_err(|_| {
             DrmpackError::InvalidConfig(
@@ -289,21 +289,38 @@ impl AxinomLicenseConfig {
             ));
         }
 
-        let cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL").map_err(|_| {
-            DrmpackError::InvalidConfig(
-                "Missing required environment variable 'AXINOM_FAIRPLAY_CERT_URL'".into(),
-            )
-        })?;
-        let cert = cert.trim();
-        if cert.is_empty() {
-            return Err(DrmpackError::InvalidConfig(
-                "Environment variable 'AXINOM_FAIRPLAY_CERT_URL' cannot be empty".into(),
-            ));
-        }
+        let cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
-        let config = Self::new(wv, fp, pr, cert);
-        config.validate()?;
+        let config = Self::new(wv, fp, pr, cert.as_deref().unwrap_or(""));
+        if let Some(ref cert_url) = cert {
+            Self::validate_url("fairplay_cert_url", cert_url)?;
+        }
+        // Validate license URLs (always required) and timeout
+        Self::validate_url("widevine_license_url", &config.widevine_license_url)?;
+        Self::validate_url("fairplay_license_url", &config.fairplay_license_url)?;
+        Self::validate_url("playready_license_url", &config.playready_license_url)?;
         Ok(config)
+    }
+}
+
+impl From<AxinomLicenseConfig> for crate::license::config::LicenseProxyConfig {
+    fn from(c: AxinomLicenseConfig) -> Self {
+        let cert_url = if c.fairplay_cert_url.trim().is_empty() {
+            None
+        } else {
+            Some(c.fairplay_cert_url)
+        };
+        Self {
+            widevine_license_url: c.widevine_license_url,
+            fairplay_license_url: c.fairplay_license_url,
+            playready_license_url: c.playready_license_url,
+            fairplay_cert_url: cert_url,
+            timeout: c.timeout,
+            headers: c.headers,
+        }
     }
 }
 
@@ -770,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn test_axinom_license_config_from_env_missing_any_fails() {
+    fn test_axinom_license_config_from_env_cert_url_optional() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_wv = std::env::var("AXINOM_WIDEVINE_LICENSE_URL").ok();
         let prev_fp = std::env::var("AXINOM_FAIRPLAY_LICENSE_URL").ok();
@@ -782,12 +799,55 @@ mod tests {
         std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", "https://env.axprod.net/pr");
         std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
 
+        // Should succeed: cert_url is optional
+        let res = AxinomLicenseConfig::from_env();
+        assert!(res.is_ok());
+        let cfg = res.unwrap();
+        assert!(cfg.fairplay_cert_url.is_empty());
+
+        // Restore
+        if let Some(v) = prev_wv {
+            std::env::set_var("AXINOM_WIDEVINE_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
+        }
+        if let Some(v) = prev_fp {
+            std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_LICENSE_URL");
+        }
+        if let Some(v) = prev_pr {
+            std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_PLAYREADY_LICENSE_URL");
+        }
+        if let Some(v) = prev_cert {
+            std::env::set_var("AXINOM_FAIRPLAY_CERT_URL", v);
+        } else {
+            std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
+        }
+    }
+
+    #[test]
+    fn test_axinom_license_config_from_env_missing_license_url_fails() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let prev_wv = std::env::var("AXINOM_WIDEVINE_LICENSE_URL").ok();
+        let prev_fp = std::env::var("AXINOM_FAIRPLAY_LICENSE_URL").ok();
+        let prev_pr = std::env::var("AXINOM_PLAYREADY_LICENSE_URL").ok();
+        let prev_cert = std::env::var("AXINOM_FAIRPLAY_CERT_URL").ok();
+
+        // Missing WIDEVINE_LICENSE_URL should fail
+        std::env::remove_var("AXINOM_WIDEVINE_LICENSE_URL");
+        std::env::set_var("AXINOM_FAIRPLAY_LICENSE_URL", "https://env.axprod.net/fp");
+        std::env::set_var("AXINOM_PLAYREADY_LICENSE_URL", "https://env.axprod.net/pr");
+        std::env::remove_var("AXINOM_FAIRPLAY_CERT_URL");
+
         let res = AxinomLicenseConfig::from_env();
         assert!(res.is_err());
         assert!(res
             .unwrap_err()
             .to_string()
-            .contains("AXINOM_FAIRPLAY_CERT_URL"));
+            .contains("AXINOM_WIDEVINE_LICENSE_URL"));
 
         // Restore
         if let Some(v) = prev_wv {

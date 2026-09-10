@@ -3,8 +3,8 @@ mod common;
 use common::cdn_publisher::{clean_dir, CdnPublisher};
 use common::media_feeder::{resolve_or_create_input_media, MediaFeeder, MediaFeederConfig};
 use common::playback_server::PlaybackServer;
-use drmpack::axinom::{AxinomConfig, AxinomProvider, AxinomSigningConfig};
-use drmpack::license::{AxinomLicenseConfig, LicenseProxy};
+use drmpack::axinom::{AxinomConfig, AxinomLicenseConfig, AxinomProvider, AxinomSigningConfig};
+use drmpack::license::LicenseProxy;
 use drmpack::session::{PackagingSession, PackagingSessionConfig};
 use drmpack::types::{LatencyMode, Rendition};
 use std::env;
@@ -153,10 +153,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             license_proxy
                 .set_fairplay_certificate(bytes::Bytes::from(cert_bytes))
                 .await;
-        } else {
+        } else if let Some(ref cert_url) = license_proxy.config().fairplay_cert_url {
             println!(
                 "Preloading FairPlay Application Certificate via LicenseProxy: {}",
-                license_proxy.config().fairplay_cert_url
+                cert_url
             );
             match license_proxy.preload_fairplay_certificate().await {
                 Ok(cert) => println!(
