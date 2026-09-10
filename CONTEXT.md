@@ -44,7 +44,7 @@ An orchestrated packaging configuration combining multiple video Renditions (qua
 _Avoid_: Adaptive stream, variant ladder
 
 **QualityTier**:
-A named group of Renditions that share a single ContentKey (e.g. SD, HD, 4K). Enables per-tier access policies.
+A named group of Renditions that share a single ContentKey (e.g. SD, HD, 4K, AUDIO). Enables per-tier access policies.
 _Avoid_: Key group, tier, quality level
 
 **EncryptionScheme**:

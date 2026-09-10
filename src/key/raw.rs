@@ -56,6 +56,12 @@ impl StaticKeySource {
             .with_key(ContentKey::new(
                 kid,
                 key_bytes,
+                QualityTier::audio(),
+                TrackType::Audio,
+            ))
+            .with_key(ContentKey::new(
+                kid,
+                key_bytes,
                 QualityTier::sd(),
                 TrackType::Audio,
             ))
@@ -102,6 +108,18 @@ impl KeyProvider for StaticKeySource {
                     .or_else(|| self.keys.get(&(None, *track_type, tier.clone())))
                     .cloned()
                     .or_else(|| {
+                        if *track_type == TrackType::Audio {
+                            tier.audio_compat_fallback().and_then(|alt| {
+                                self.keys
+                                    .get(&(*scheme_opt, *track_type, alt.clone()))
+                                    .or_else(|| self.keys.get(&(None, *track_type, alt)))
+                                    .cloned()
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
                         if scheme_opt.is_none() {
                             self.keys
                                 .iter()
@@ -120,6 +138,7 @@ impl KeyProvider for StaticKeySource {
                     if k.encryption_scheme.is_none() && scheme_opt.is_some() {
                         k.encryption_scheme = *scheme_opt;
                     }
+                    k.quality_tier = tier.clone();
                     set.insert_key(k);
                 } else {
                     let scheme_desc = scheme_opt

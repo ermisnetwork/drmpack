@@ -136,7 +136,15 @@ impl CpixRequestBuilder {
         for spec in &specs {
             let intended_track_type = match spec.track_type {
                 TrackType::Video => spec.quality_tier.0.clone(),
-                TrackType::Audio => format!("AUDIO_{}", spec.quality_tier),
+                TrackType::Audio => {
+                    if spec.quality_tier == QualityTier::audio()
+                        || spec.quality_tier == QualityTier::sd()
+                    {
+                        "AUDIO".to_string()
+                    } else {
+                        format!("AUDIO_{}", spec.quality_tier)
+                    }
+                }
                 TrackType::Subtitle => "SUBTITLE".to_string(),
             };
 
@@ -269,5 +277,32 @@ mod tests {
 
         let (_, specs) = CpixRequestBuilder::build_with_specs(&req).unwrap();
         assert_eq!(specs.len(), 1, "Duplicate tiers must be deduplicated");
+    }
+
+    #[test]
+    fn test_cpix_request_builder_audio_produces_standard_track_type() {
+        let req = KeyRequest::new("audio-test")
+            .with_tier(TrackType::Audio, QualityTier::audio())
+            .with_drm_system(DrmSystem::Widevine)
+            .with_encryption_scheme(EncryptionScheme::Cbcs);
+
+        let (xml, specs) = CpixRequestBuilder::build_with_specs(&req).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].track_type, TrackType::Audio);
+        assert_eq!(specs[0].quality_tier, QualityTier::audio());
+
+        assert!(xml.contains(r#"intendedTrackType="AUDIO""#));
+        assert!(xml.contains("<cpix:AudioFilter/>"));
+        assert!(!xml.contains("AUDIO_SD"));
+        assert!(!xml.contains("AUDIO_AUDIO"));
+
+        // Also verify legacy QualityTier::sd() for audio emits standard intendedTrackType="AUDIO"
+        let legacy_req = KeyRequest::new("audio-legacy-test")
+            .with_tier(TrackType::Audio, QualityTier::sd())
+            .with_drm_system(DrmSystem::Widevine)
+            .with_encryption_scheme(EncryptionScheme::Cbcs);
+
+        let (legacy_xml, _) = CpixRequestBuilder::build_with_specs(&legacy_req).unwrap();
+        assert!(legacy_xml.contains(r#"intendedTrackType="AUDIO""#));
     }
 }

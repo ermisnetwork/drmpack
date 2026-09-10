@@ -173,10 +173,57 @@ mod tests {
         };
 
         let json = meta.to_json().expect("serialization should succeed");
+        assert!(json.contains(r#""scheme":"dual""#));
+        assert!(json.contains(r#""scheme":"cenc""#));
+        assert!(json.contains(r#""scheme":"cbcs""#));
+        assert!(json.contains(r#""track_type":"video""#));
+
         let decoded = DrmStreamMetadata::from_json(&json).expect("deserialization should succeed");
 
         assert_eq!(meta, decoded);
         assert_eq!(decoded.kids().len(), 1);
         assert_eq!(decoded.kid_strings(), vec![kid.0.hyphenated().to_string()]);
+    }
+
+    #[test]
+    fn test_drm_stream_metadata_legacy_casing_compatibility() {
+        // Simulates legacy JSON stored in PostgreSQL / Redis with PascalCase or uppercase tokens
+        let legacy_json = r#"{
+            "content_id": "legacy-stream-456",
+            "scheme": "Dual",
+            "keys": [
+                {
+                    "kid": "00000000-0000-0000-0000-000000000001",
+                    "scheme": "Cenc",
+                    "track_type": "Video",
+                    "quality_tier": "HD"
+                },
+                {
+                    "kid": "00000000-0000-0000-0000-000000000002",
+                    "scheme": "CBCS",
+                    "track_type": "AUDIO",
+                    "quality_tier": "SD",
+                    "iv": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+                }
+            ]
+        }"#;
+
+        let meta = DrmStreamMetadata::from_json(legacy_json)
+            .expect("Legacy PascalCase and uppercase JSON must deserialize successfully");
+
+        assert_eq!(meta.content_id, "legacy-stream-456");
+        assert_eq!(meta.scheme, EncryptionScheme::Dual);
+        assert_eq!(meta.keys[0].scheme, EncryptionScheme::Cenc);
+        assert_eq!(meta.keys[0].track_type, TrackType::Video);
+        assert_eq!(meta.keys[1].scheme, EncryptionScheme::Cbcs);
+        assert_eq!(meta.keys[1].track_type, TrackType::Audio);
+
+        // When re-serialized, output is modernized to lowercase
+        let modern_json = meta.to_json().expect("Serialization must succeed");
+        assert!(modern_json.contains(r#""scheme":"dual""#));
+        assert!(modern_json.contains(r#""scheme":"cenc""#));
+        assert!(modern_json.contains(r#""scheme":"cbcs""#));
+        assert!(modern_json.contains(r#""track_type":"video""#));
+        assert!(modern_json.contains(r#""track_type":"audio""#));
     }
 }

@@ -557,6 +557,9 @@ fn infer_quality_tier(intended: &str) -> QualityTier {
         return QualityTier::hd();
     }
     let upper = trimmed.to_uppercase();
+    if upper == "AUDIO_SD" || upper == "AUDIO_AUDIO" {
+        return QualityTier::audio();
+    }
     if upper.starts_with("AUDIO_") {
         return infer_quality_tier(&trimmed["AUDIO_".len()..]);
     }
@@ -566,7 +569,8 @@ fn infer_quality_tier(intended: &str) -> QualityTier {
     match upper.as_str() {
         "4K" | "UHD" => QualityTier::uhd_4k(),
         "HD" => QualityTier::hd(),
-        "SD" | "AUDIO" => QualityTier::sd(),
+        "AUDIO" => QualityTier::audio(),
+        "SD" => QualityTier::sd(),
         _ => QualityTier::new(trimmed),
     }
 }
@@ -968,10 +972,11 @@ mod tests {
     #[test]
     fn test_infer_quality_tier_sd_and_audio() {
         assert_eq!(infer_quality_tier("SD"), QualityTier::sd());
-        assert_eq!(infer_quality_tier("AUDIO"), QualityTier::sd());
-        assert_eq!(infer_quality_tier("audio"), QualityTier::sd());
+        assert_eq!(infer_quality_tier("AUDIO"), QualityTier::audio());
+        assert_eq!(infer_quality_tier("audio"), QualityTier::audio());
+        assert_eq!(infer_quality_tier("AUDIO_AUDIO"), QualityTier::audio());
         assert_eq!(infer_quality_tier("video_sd"), QualityTier::sd());
-        assert_eq!(infer_quality_tier("AUDIO_SD"), QualityTier::sd());
+        assert_eq!(infer_quality_tier("AUDIO_SD"), QualityTier::audio());
     }
 
     #[test]

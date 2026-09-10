@@ -80,6 +80,7 @@ sequenceDiagram
     participant GP as GPAC Subprocess
     participant SHM as Ephemeral Staging (/tmp)
     participant AH as drmpack (ArtifactHarvester)
+    participant DB as State Store (PostgreSQL / Redis)
     participant CDN as CDN / Edge Origin
 
     Note over MS,DP: Phase 1: Session Initialization & DRM Key Acquisition
@@ -91,9 +92,11 @@ sequenceDiagram
     DP->>DP: Synthesize GPAC cecrypt drm.xml in private control directory
     DP->>GP: Spawn gpac filter graph (cecrypt -> dasher) with stdin pipe
     opt Output Channel Claimed (session.take_output_receiver())
-        DP->>AH: Spawn Harvester background task watching staging
+        DP->>AH: Spawn Harvester background subsystem watching staging
     end
     DP-->>MS: PackagingSession handle ready
+    MS->>MS: Extract DrmStreamMetadata (session.playback_metadata())
+    MS->>DB: Persist metadata.to_json() (ADR-0017 decoupled state)
 
     Note over MS,CDN: Phase 2: Ingress Data Plane & Real-time Packaging
     loop Streaming Media Ingestion
@@ -123,8 +126,9 @@ sequenceDiagram
 | **2 - 3** | `drmpack` & Axinom Key Service | `drmpack` constructs a DASH-IF CPIX 2.3 XML request (`<cpix:CPIX>`) specifying `contentId`, quality tiers, and target DRM systems, dispatched over HTTP POST with Basic Auth to Axinom's SPEKE v2 tenant endpoint. Axinom returns an XML response containing AES-128 ContentKeys, KIDs, IVs, and PSSH boxes. |
 | **4** | `drmpack` Control Plane | Generates a private `drm.xml` mapping 1-based ISO-BMFF track IDs to ContentKeys and PSSH metadata for GPAC's `cecrypt` filter. |
 | **5 - 6** | GPAC & Harvester Spawning | Spawns the `gpac` child process with stdin filter (`-i stdin:ext=mp4:alltk:...`) connected to `stdin` pipe. The artifact harvester task is spawned lazily if the caller claims `session.take_output_receiver()`. |
-| **7 - 11** | Media Ingress & Encryption | `media-server` streams muxed fMP4 chunks via `session.push()` or `SessionWriter`. Bytes flow into GPAC's stdin pipe without disk I/O. The `cecrypt` filter encrypts media samples, and `dasher` writes packaged `.m4s` segments and playlists into staging. |
-| **12 - 17** | Manifest-Driven Harvesting & CDN Delivery | `ArtifactHarvester` detects writes via `inotify`/`FSEvents`. It guarantees **Manifest-Driven Readiness**: a media segment is only read after GPAC has updated the `.m3u8` manifest referencing it. Staging files are ingested into memory and immediately unlinked. `media-server` receives `PackagedArtifact` items over the async channel and forwards them to the CDN or HTTP edge cache. |
+| **7 - 8** | Metadata Persistence | `media-server` retrieves `session.playback_metadata()` (`DrmStreamMetadata`) and persists the JSON string into PostgreSQL or Redis ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)), decoupling packaging from playback authorization. |
+| **9 - 13** | Media Ingress & Encryption | `media-server` streams muxed fMP4 chunks via `session.push()` or `SessionWriter`. Bytes flow into GPAC's stdin pipe without disk I/O. The `cecrypt` filter encrypts media samples, and `dasher` writes packaged `.m4s` segments and playlists into staging. |
+| **14 - 19** | Manifest-Driven Harvesting & CDN Delivery | `ArtifactHarvester` detects writes via `inotify`/`FSEvents`. It guarantees **Manifest-Driven Readiness**: a media segment is only read after GPAC has updated the `.m3u8` manifest referencing it. Staging files are ingested into memory and immediately unlinked. `media-server` receives `PackagedArtifact` items over the async channel and forwards them to the CDN or HTTP edge cache. |
 
 ### Playback and DRM License Acquisition Flow
 
@@ -136,6 +140,7 @@ sequenceDiagram
     participant User as Client Player (EME / App)
     participant CDM as Hardware CDM (TEE / Secure Enclave)
     participant MS as media-server
+    participant DB as State Store (PostgreSQL / Redis)
     participant LP as drmpack (LicenseProxy)
     participant AX as Axinom License Service
     participant CDN as CDN / Edge Cache
@@ -144,7 +149,9 @@ sequenceDiagram
     Note over User,MS: Step 1: Authentication & Entitlement Token Minting
     User->>MS: POST /api/auth/login (User credentials)
     MS-->>User: Auth successful (Session Token)
-    MS->>MS: Generate Axinom Entitlement JWT via drmpack (AxinomSigningConfig)
+    MS->>DB: Query stream DRM metadata (db.get_stream_drm(stream_id))
+    DB-->>MS: DrmStreamMetadata JSON (KIDs, IVs - no secret keys)
+    MS->>MS: Generate Axinom Entitlement JWT via drmpack (metadata.generate_axinom_jwt(&signing_config))
     Note right of MS: JWT signed with Communication Key, containing authorized KeyIDs and derived IVs
     MS-->>User: Return playback URL and Entitlement JWT
 
@@ -191,7 +198,7 @@ sequenceDiagram
 
 | Step | Entity | Description |
 | :--- | :--- | :--- |
-| **1 - 4** | Authentication & Token Minting | The client authenticates with `media-server`. Using `drmpack::vendor::axinom::AxinomSigningConfig`, `media-server` mints an Axinom DRM entitlement JWT signed with HMAC-SHA256 containing authorized KeyIDs and derived IVs. The token is delivered to the client player. |
+| **1 - 4** | Authentication & Token Minting | The client authenticates with `media-server`. `media-server` queries PostgreSQL or Redis for `DrmStreamMetadata` persisted during packaging ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)). Using `drmpack::vendor::axinom::AxinomSigningConfig` and `metadata.generate_axinom_jwt(&signing_config)`, `media-server` mints an Axinom DRM entitlement JWT containing authorized KeyIDs and derived IVs. The token is delivered to the client player. |
 | **5 - 8** | Manifest & Certificate Retrieval | The player fetches the streaming manifest (`live.m3u8` or `live.mpd`) from CDN edge cache. For Apple FairPlay on iOS/Safari, the player requests the Apple Application Certificate (`.cer` / `.der`), served by `media-server` via `drmpack::license::handle_fairplay_certificate` with in-memory caching. |
 | **9 - 11** | Hardware CDM Challenge Generation | The player invokes the browser Encrypted Media Extensions (EME) or iOS `AVContentKeySession`, passing the initialization data (PSSH box or `skd://` URI). Inside the isolated hardware Content Decryption Module (Google Widevine L1/L3, Apple FairPlay Core, Microsoft PlayReady SL3000), an ephemeral session keypair is generated, producing a cryptographic DRM challenge payload (SPC for FairPlay, protobuf for Widevine). |
 | **12 - 17** | License Proxying via `drmpack` | The player submits the challenge along with the entitlement JWT to `media-server`. `media-server` invokes `drmpack::license::handle_widevine_license()` or `handle_fairplay_license()`. The `LicenseProxy` forwards the request with header `X-AxDRM-Message: <JWT>` to the tenant's Axinom License Service. Axinom verifies the JWT, unwraps the ContentKey, encrypts it with the client's ephemeral session key, and returns the encrypted license payload. Upstream diagnostic headers (`X-AxDRM-ErrorMessage`) are surfaced upon rejection. |
@@ -472,12 +479,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut session = PackagingSession::create(session_config, &provider).await?;
 
-    // Retrieve public playback metadata for DRM entitlement token generation
+    // Retrieve public playback metadata (DrmStreamMetadata)
     let metadata = session.playback_metadata();
     println!("Stream Content Keys initialized: {}", metadata.keys.len());
 
+    // =========================================================================
+    // PRODUCTION PERSISTENCE (ADR-0017):
+    // In production (e.g. Ermis Stream), serialize metadata to PostgreSQL/Redis
+    // so decoupled playback token services can mint entitlement JWTs on demand:
+    // =========================================================================
+    let meta_json = metadata.to_json()?;
+    // db.save_stream_drm(&content_id, &meta_json).await?;
+
     session.close().await?;
     Ok(())
+}
+```
+
+> [!IMPORTANT]
+> **Production State Persistence ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)):**
+> In a production deployment (e.g. Ermis Stream), the packaging service serializes `session.playback_metadata()` into PostgreSQL or Redis:
+> ```rust
+> let meta = session.playback_metadata();
+> db.save_stream_drm(&content_id, &meta.to_json()?).await?;
+> ```
+> The playback authorization backend retrieves this metadata (`DrmStreamMetadata::from_json(&meta_json)?`) to mint DRM entitlement tokens (Axinom JWTs) containing authorized KeyIDs and derived IVs.
+> 
+> `DrmStreamMetadata` intentionally excludes raw AES secret keys (`key: [u8; 16]`) to eliminate the risk of credential leakage across service boundaries.
+
+#### `DrmStreamMetadata` Schema & Serialization
+
+[`DrmStreamMetadata`](src/session/metadata.rs) carries the public key configuration needed by playback services, strictly omitting private cryptographic key material:
+
+```rust
+pub struct DrmStreamMetadata {
+    /// Content or stream identifier string (e.g. "stream_channel_01")
+    pub content_id: String,
+    /// Packaging encryption mode (Cbcs, Cenc, or Dual)
+    pub scheme: EncryptionScheme,
+    /// Public key entries for tracks and quality tiers
+    pub keys: Vec<DrmKeyEntry>,
+}
+
+pub struct DrmKeyEntry {
+    /// Associated KeyID (UUID)
+    pub kid: KeyID,
+    /// Concrete encryption scheme for this key (Cbcs or Cenc)
+    pub scheme: EncryptionScheme,
+    /// Elementary track type (Video or Audio)
+    pub track_type: TrackType,
+    /// Associated quality tier (e.g. SD, HD, UHD, AUDIO)
+    pub quality_tier: QualityTier,
+    /// Optional 128-bit initialization vector (omitted when None)
+    pub iv: Option<[u8; 16]>,
+}
+```
+
+**Example Serialized JSON (`metadata.to_json_pretty()`):**
+
+```json
+{
+  "content_id": "stream_channel_01",
+  "scheme": "cbcs",
+  "keys": [
+    {
+      "kid": "00000000-0000-0000-0000-000000000001",
+      "scheme": "cbcs",
+      "track_type": "video",
+      "quality_tier": "HD",
+      "iv": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    },
+    {
+      "kid": "00000000-0000-0000-0000-000000000002",
+      "scheme": "cbcs",
+      "track_type": "audio",
+      "quality_tier": "AUDIO",
+      "iv": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]
+    }
+  ]
 }
 ```
 
@@ -592,6 +671,33 @@ pub fn make_license_router(config: LicenseProxyConfig) -> Router {
 }
 ```
 
+### 6. Minting Playback Entitlement Tokens (Axinom JWT)
+
+When a client player authenticates, the playback authorization service fetches the stream's `DrmStreamMetadata` from state storage (PostgreSQL/Redis) and mints an entitlement JWT with authorized KIDs and derived IVs:
+
+```rust,no_run
+use drmpack::axinom::AxinomSigningConfig;
+use drmpack::session::DrmStreamMetadata;
+
+async fn mint_playback_token(
+    stream_id: &str,
+    signing_config: &AxinomSigningConfig,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // 1. Fetch metadata JSON stored during packaging session initialization (ADR-0017)
+    // let meta_json = db.get_stream_drm(stream_id).await?;
+    let meta_json = r#"{"content_id":"...","scheme":"cbcs","keys":[...]}"#;
+
+    // 2. Deserialize into DrmStreamMetadata
+    let metadata = DrmStreamMetadata::from_json(meta_json)?;
+
+    // 3. Mint signed Axinom entitlement JWT (contains authorized KIDs & derived IVs)
+    let token = metadata.generate_axinom_jwt(signing_config)?;
+
+    Ok(token)
+}
+```
+
+
 ## Domain Glossary
 
 Key terminology used throughout `drmpack` (aligned with `CONTEXT.md`):
@@ -599,13 +705,14 @@ Key terminology used throughout `drmpack` (aligned with `CONTEXT.md`):
 - **PackagingSession**: The core controller managing key acquisition, GPAC subprocess lifecycle, and manifest delivery.
 - **SessionWriter**: An owned write handle implementing `tokio::io::AsyncWrite`, created via `PackagingSession::writer()`.
 - **Rendition**: A declared track configuration bound to a `QualityTier` for DRM key association.
-- **QualityTier**: A named group of Renditions sharing a single `ContentKey` (e.g., SD, HD, 4K).
-- **EncryptionScheme**: Concrete cipher mode — `Cbcs` (AES-CBC 1:9, production default), `Cenc` (AES-CTR), or `Dual` (both simultaneously).
+- **QualityTier**: A named group of Renditions sharing a single `ContentKey` (e.g., SD, HD, 4K, AUDIO).
+- **EncryptionScheme**: Concrete cipher mode — `cbcs` (AES-CBC 1:9, production default), `cenc` (AES-CTR), or `dual` (both simultaneously).
 - **LatencyMode**: Streaming delivery latency profile — `Standard` (canonical default, 2-6s segments) or `LowLatency` (CMAF chunking 200-500ms, LL-HLS, LL-DASH).
 - **PackagedArtifact**: Structured container carrying an encrypted media segment or updated manifest emitted directly through the output channel.
 - **ArtifactHarvester**: Background subsystem monitoring the staging directory for completed segments and playlists using kernel filesystem events.
 - **Manifest-Driven Readiness**: Synchronization guarantee ensuring a media segment is emitted to callers only after GPAC has fully written the segment and updated the manifest.
-- **DrmStreamMetadata**: Public transfer object emitted by `PackagingSession::playback_metadata()` carrying public KIDs and IVs for DRM authorization and playback token minting.
+- **DrmStreamMetadata**: Public, serializable data transfer object emitted by `PackagingSession::playback_metadata()` for application-level state persistence (PostgreSQL/Redis). Encapsulates public KIDs, IVs, track bindings, and encryption schemes needed by playback authorization backends to issue DRM entitlement tokens, while strictly excluding raw AES keys to prevent leakage across service boundaries ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)).
+- **AxinomSigningConfig**: Secure credential container managing Axinom Communication Key ID and secret for minting entitlement JWTs, with redacted debug logs and direct JWT signing over `DrmStreamMetadata` ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)).
 
 ## License
 

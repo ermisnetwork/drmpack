@@ -40,7 +40,7 @@ fn audio_tier_rank(rendition: &Rendition) -> u32 {
     let name = rendition.quality_tier.0.to_uppercase();
     if name.contains("HD") || name.contains("HIGH") {
         256
-    } else if name.contains("SD") || name.contains("STANDARD") {
+    } else if name.contains("AUDIO") || name.contains("SD") || name.contains("STANDARD") {
         128
     } else {
         64
@@ -159,6 +159,11 @@ impl KeyPolicyEngine {
 
                 if !audio_renditions.is_empty() {
                     let a_tier = if audio_renditions
+                        .iter()
+                        .any(|r| r.quality_tier == QualityTier::audio())
+                    {
+                        QualityTier::audio()
+                    } else if audio_renditions
                         .iter()
                         .any(|r| r.quality_tier == QualityTier::sd())
                     {
@@ -303,7 +308,7 @@ impl KeyPolicyEngine {
                             fetched_keys.get_key_for_scheme(
                                 scheme,
                                 TrackType::Audio,
-                                &QualityTier::sd(),
+                                &QualityTier::audio(),
                             )
                         })
                         .or_else(|| {
@@ -688,7 +693,7 @@ mod tests {
             req.requested_quality_tiers,
             vec![
                 (TrackType::Video, QualityTier::hd()),
-                (TrackType::Audio, QualityTier::sd())
+                (TrackType::Audio, QualityTier::audio())
             ]
         );
 
@@ -704,7 +709,7 @@ mod tests {
         fetched.insert_key(ContentKey::new(
             kid_a,
             [0x22; 16],
-            QualityTier::sd(),
+            QualityTier::audio(),
             TrackType::Audio,
         ));
 
@@ -725,6 +730,13 @@ mod tests {
                 .unwrap()
                 .kid,
             kid_v
+        );
+        assert_eq!(
+            resolved
+                .get_key(TrackType::Audio, &QualityTier::audio())
+                .unwrap()
+                .kid,
+            kid_a
         );
         assert_eq!(
             resolved

@@ -1704,14 +1704,14 @@ mod tests {
     async fn key_mapping_policy_shared_video_single_audio() {
         let video_hd = rendition();
         let video_sd = Rendition::video(QualityTier::sd());
-        let audio_sd = Rendition::audio();
+        let audio_default = Rendition::audio();
         let audio_hd = Rendition::audio_tier(QualityTier::hd());
 
         let config = PackagingSessionConfig::new("test")
             .with_key_mapping_policy(KeyMappingPolicy::SharedVideoSingleAudio)
             .with_rendition(video_hd)
             .with_rendition(video_sd)
-            .with_rendition(audio_sd)
+            .with_rendition(audio_default)
             .with_rendition(audio_hd);
 
         let kid_video = KeyID::new(Uuid::from_bytes([0x01; 16]));
@@ -1739,6 +1739,9 @@ mod tests {
         let v_sd = key_set
             .get_key(TrackType::Video, &QualityTier::sd())
             .unwrap();
+        let a_audio = key_set
+            .get_key(TrackType::Audio, &QualityTier::audio())
+            .unwrap();
         let a_sd = key_set
             .get_key(TrackType::Audio, &QualityTier::sd())
             .unwrap();
@@ -1748,6 +1751,7 @@ mod tests {
 
         assert_eq!(v_hd.kid, kid_video);
         assert_eq!(v_sd.kid, kid_video);
+        assert_eq!(a_audio.kid, kid_audio);
         assert_eq!(a_sd.kid, kid_audio);
         assert_eq!(a_hd.kid, kid_audio);
     }

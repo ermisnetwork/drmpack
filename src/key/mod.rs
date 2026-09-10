@@ -284,6 +284,7 @@ impl KeySet {
                     .find(|((_, t, q), _)| *t == track_type && q == quality_tier)
                     .map(|(_, k)| k)
             })
+            .or_else(|| self.lookup_audio_compat_fallback(None, track_type, quality_tier))
     }
 
     /// Retrieve a key matching an explicit encryption scheme, track type, and quality tier.
@@ -296,6 +297,32 @@ impl KeySet {
         self.keys
             .get(&(Some(scheme), track_type, quality_tier.clone()))
             .or_else(|| self.keys.get(&(None, track_type, quality_tier.clone())))
+            .or_else(|| self.lookup_audio_compat_fallback(Some(scheme), track_type, quality_tier))
+    }
+
+    /// Audio backwards-compatibility fallback: try `AUDIO↔SD` alternate tier when an audio key
+    /// isn't found under the requested tier. Returns `None` for non-audio track types.
+    fn lookup_audio_compat_fallback(
+        &self,
+        scheme: Option<EncryptionScheme>,
+        track_type: TrackType,
+        quality_tier: &QualityTier,
+    ) -> Option<&ContentKey> {
+        if track_type != TrackType::Audio {
+            return None;
+        }
+        quality_tier.audio_compat_fallback().and_then(|alt| {
+            self.keys
+                .get(&(scheme, track_type, alt.clone()))
+                .or_else(|| self.keys.get(&(None, track_type, alt.clone())))
+                .or_else(|| {
+                    // Linear scan: the key may be stored under a different scheme variant.
+                    self.keys
+                        .iter()
+                        .find(|((_, t, q), _)| *t == track_type && q == &alt)
+                        .map(|(_, k)| k)
+                })
+        })
     }
 
     /// Add a PSSH box to the set if not already present.

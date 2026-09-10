@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_audio = ContentKey::new(
         KeyID::new(Uuid::new_v4()),
         [0x44; 16],
-        QualityTier::sd(),
+        QualityTier::audio(),
         TrackType::Audio,
     );
 

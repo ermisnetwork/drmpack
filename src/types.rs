@@ -8,12 +8,16 @@ use std::fmt;
 
 /// The encryption scheme used for protecting media segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EncryptionScheme {
     /// Common Encryption using AES-128 in CTR mode (Widevine / PlayReady).
+    #[serde(alias = "Cenc", alias = "CENC")]
     Cenc,
     /// Common Encryption using AES-128 in CBC mode with 10% pattern encryption (FairPlay / modern Widevine).
+    #[serde(alias = "Cbcs", alias = "CBCS")]
     Cbcs,
     /// Dual encryption producing both CENC and CBCS representations simultaneously.
+    #[serde(alias = "Dual", alias = "DUAL")]
     Dual,
 }
 
@@ -143,12 +147,16 @@ impl DrmSystem {
 
 /// Media track type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TrackType {
     /// Video elementary stream.
+    #[serde(alias = "Video", alias = "VIDEO")]
     Video,
     /// Audio elementary stream.
+    #[serde(alias = "Audio", alias = "AUDIO")]
     Audio,
     /// Timed text or subtitle elementary stream.
+    #[serde(alias = "Subtitle", alias = "SUBTITLE")]
     Subtitle,
 }
 
@@ -185,6 +193,22 @@ impl QualityTier {
     /// Predefined Ultra High Definition 4K quality tier.
     pub fn uhd_4k() -> Self {
         Self("4K".into())
+    }
+
+    /// Predefined Audio quality tier ("AUDIO") per AWS SPEKE v2 / CPIX standards.
+    pub fn audio() -> Self {
+        Self("AUDIO".into())
+    }
+
+    /// Returns the alternative audio quality tier for backwards-compatibility fallbacks (`AUDIO` <-> `SD`).
+    pub fn audio_compat_fallback(&self) -> Option<Self> {
+        if self == &Self::audio() {
+            Some(Self::sd())
+        } else if self == &Self::sd() {
+            Some(Self::audio())
+        } else {
+            None
+        }
     }
 }
 
@@ -247,9 +271,9 @@ impl Rendition {
         Self::video(QualityTier::uhd_4k())
     }
 
-    /// Construct an encrypted audio rendition with the default SD quality tier.
+    /// Construct an encrypted audio rendition with the standard AUDIO quality tier.
     pub fn audio() -> Self {
-        Self::audio_tier(QualityTier::sd())
+        Self::audio_tier(QualityTier::audio())
     }
 
     /// Construct an encrypted audio rendition with the specified quality tier.
@@ -362,7 +386,8 @@ mod tests {
         let r = Rendition::audio();
         assert!(r.track_id.starts_with("track_audio_"));
         assert_eq!(r.track_type, TrackType::Audio);
-        assert_eq!(r.quality_tier, QualityTier::sd());
+        assert_eq!(r.quality_tier, QualityTier::audio());
+        assert_eq!(QualityTier::audio().to_string(), "AUDIO");
         assert_eq!(r.container_track_id, None);
         assert!(r.encrypted);
 
@@ -456,11 +481,17 @@ mod tests {
         let json = serde_json::to_string(&artifact).expect("Serialization failed");
         assert!(json.contains(r#""filename":"video_1080p_1.m4s""#));
         assert!(json.contains(r#""kind":"MediaSegment""#));
-        assert!(json.contains(r#""scheme":"Cbcs""#));
+        assert!(json.contains(r#""scheme":"cbcs""#));
 
         let deserialized: PackagedArtifact =
             serde_json::from_str(&json).expect("Deserialization failed");
         assert_eq!(deserialized, artifact);
+
+        // Verify legacy PascalCase deserialization
+        let legacy_json = r#"{"filename":"video_1080p_1.m4s","data":[116,101,115,116],"kind":"MediaSegment","scheme":"Cbcs"}"#;
+        let legacy_art: PackagedArtifact =
+            serde_json::from_str(legacy_json).expect("Legacy deserialization failed");
+        assert_eq!(legacy_art.scheme, EncryptionScheme::Cbcs);
 
         assert_eq!(ArtifactKind::InitSegment.to_string(), "init_segment");
         assert_eq!(ArtifactKind::MediaSegment.to_string(), "media_segment");
