@@ -1,12 +1,17 @@
 # drmpack
 
-Native Rust DRM packaging and manifest generation library orchestrating GPAC filters for CENC/CBCS fMP4 and HLS/DASH delivery with zero disk I/O.
+[![CI](https://github.com/ermisnetwork/drmpack/actions/workflows/ci.yml/badge.svg)](https://github.com/ermisnetwork/drmpack/actions/workflows/ci.yml)
+[![DRM E2E](https://github.com/ermisnetwork/drmpack/actions/workflows/drm-e2e.yml/badge.svg)](https://github.com/ermisnetwork/drmpack/actions/workflows/drm-e2e.yml)
+[![docs](https://img.shields.io/badge/docs-GitHub_Pages-brightgreen)](https://ermisnetwork.github.io/drmpack/)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
+Native Rust DRM packaging and manifest generation library orchestrating GPAC filters for CENC/CBCS fMP4 and HLS/DASH delivery.
 
 ## Overview
 
 `drmpack` is an in-process packaging orchestrator designed for high-throughput media servers (such as `media-server`). It accepts multiplexed fragmented MP4 (fMP4) streams in memory, pipes them directly into GPAC filter graphs over anonymous Unix pipes, and emits encrypted CMAF segments and playlists via an asynchronous in-memory channel.
 
-By bypassing physical disk writes entirely on both ingress and egress, `drmpack` eliminates disk wear, reduces segment-to-manifest latency to sub-second ranges, and guarantees synchronization between media segments and manifest updates.
+By piping media ingress directly into memory pipes and using ephemeral staging with immediate harvesting on egress ([ADR-0015](docs/adr/0015-direct-output-channel-and-safe-storage.md)), `drmpack` minimizes disk wear, reduces segment-to-manifest latency to sub-second ranges, and guarantees synchronization between media segments and manifest updates.
 
 ## Architecture
 
@@ -52,7 +57,7 @@ By bypassing physical disk writes entirely on both ingress and egress, `drmpack`
 |                            |                                                  |
 |                            v writes segments & manifests                      |
 |  +---------------------------------------------------+                        |
-|  | Ephemeral Storage Staging (/dev/shm or tmpfs)     |                        |
+|  | Ephemeral Storage Staging (/tmp or tmpfs)         |                        |
 |  +-------------------------+-------------------------+                        |
 |                            |                                                  |
 |                            v inotify / FSEvents                               |
@@ -73,7 +78,7 @@ sequenceDiagram
     participant DP as drmpack (PackagingSession)
     participant AX as Axinom Key Service
     participant GP as GPAC Subprocess
-    participant SHM as Ephemeral Staging (/dev/shm)
+    participant SHM as Ephemeral Staging (/tmp)
     participant AH as drmpack (ArtifactHarvester)
     participant CDN as CDN / Edge Origin
 
@@ -85,7 +90,9 @@ sequenceDiagram
     Note left of AX: Response: ContentKey elements (AES-128), KIDs, IVs, PSSH boxes
     DP->>DP: Synthesize GPAC cecrypt drm.xml in private control directory
     DP->>GP: Spawn gpac filter graph (cecrypt -> dasher) with stdin pipe
-    DP->>AH: Spawn ArtifactHarvester background task watching staging
+    opt Output Channel Claimed (session.take_output_receiver())
+        DP->>AH: Spawn Harvester background task watching staging
+    end
     DP-->>MS: PackagingSession handle ready
 
     Note over MS,CDN: Phase 2: Ingress Data Plane & Real-time Packaging
@@ -115,7 +122,7 @@ sequenceDiagram
 | **1** | `media-server` | Calls `PackagingSession::create(config, &provider)` declaring stream renditions, latency mode (`Standard` or `LowLatency`), and encryption scheme (`Cbcs`, `Cenc`, or `Dual`). |
 | **2 - 3** | `drmpack` & Axinom Key Service | `drmpack` constructs a DASH-IF CPIX 2.3 XML request (`<cpix:CPIX>`) specifying `contentId`, quality tiers, and target DRM systems, dispatched over HTTP POST with Basic Auth to Axinom's SPEKE v2 tenant endpoint. Axinom returns an XML response containing AES-128 ContentKeys, KIDs, IVs, and PSSH boxes. |
 | **4** | `drmpack` Control Plane | Generates a private `drm.xml` mapping 1-based ISO-BMFF track IDs to ContentKeys and PSSH metadata for GPAC's `cecrypt` filter. |
-| **5 - 6** | GPAC & Harvester Spawning | Spawns the `gpac` child process with an anonymous Unix pipe (`pipe://stdin:fmt=mp4`) connected to `stdin`, and spawns the `ArtifactHarvester` background task to watch ephemeral staging (`/dev/shm`). |
+| **5 - 6** | GPAC & Harvester Spawning | Spawns the `gpac` child process with stdin filter (`-i stdin:ext=mp4:alltk:...`) connected to `stdin` pipe. The artifact harvester task is spawned lazily if the caller claims `session.take_output_receiver()`. |
 | **7 - 11** | Media Ingress & Encryption | `media-server` streams muxed fMP4 chunks via `session.push()` or `SessionWriter`. Bytes flow into GPAC's stdin pipe without disk I/O. The `cecrypt` filter encrypts media samples, and `dasher` writes packaged `.m4s` segments and playlists into staging. |
 | **12 - 17** | Manifest-Driven Harvesting & CDN Delivery | `ArtifactHarvester` detects writes via `inotify`/`FSEvents`. It guarantees **Manifest-Driven Readiness**: a media segment is only read after GPAC has updated the `.m3u8` manifest referencing it. Staging files are ingested into memory and immediately unlinked. `media-server` receives `PackagedArtifact` items over the async channel and forwards them to the CDN or HTTP edge cache. |
 
@@ -138,7 +145,7 @@ sequenceDiagram
     User->>MS: POST /api/auth/login (User credentials)
     MS-->>User: Auth successful (Session Token)
     MS->>MS: Generate Axinom Entitlement JWT via drmpack (AxinomSigningConfig)
-    Note right of MS: JWT signed with Communication Key, containing KIDs, IVs, expiration
+    Note right of MS: JWT signed with Communication Key, containing authorized KeyIDs and derived IVs
     MS-->>User: Return playback URL and Entitlement JWT
 
     Note over User,CDN: Step 2: Manifest & Application Certificate Fetch
@@ -146,7 +153,7 @@ sequenceDiagram
     CDN-->>User: Return manifest with DRM signaling (PSSH boxes / #EXT-X-KEY)
     opt FairPlay DRM Only
         User->>MS: GET /drm/fairplay/cert
-        MS->>LP: handle_fairplay_certificate(&proxy)
+        MS->>LP: handle_fairplay_certificate(&proxy, cert_url)
         LP-->>MS: Cached Apple Application Certificate (.cer / .der)
         MS-->>User: Return Application Certificate
     end
@@ -184,7 +191,7 @@ sequenceDiagram
 
 | Step | Entity | Description |
 | :--- | :--- | :--- |
-| **1 - 4** | Authentication & Token Minting | The client authenticates with `media-server`. Using `drmpack::vendor::axinom::AxinomSigningConfig`, `media-server` mints an Axinom DRM entitlement JWT signed with HMAC-SHA256 containing authorized KeyIDs, derived IVs, and expiration timestamps. The token is delivered to the client player. |
+| **1 - 4** | Authentication & Token Minting | The client authenticates with `media-server`. Using `drmpack::vendor::axinom::AxinomSigningConfig`, `media-server` mints an Axinom DRM entitlement JWT signed with HMAC-SHA256 containing authorized KeyIDs and derived IVs. The token is delivered to the client player. |
 | **5 - 8** | Manifest & Certificate Retrieval | The player fetches the streaming manifest (`live.m3u8` or `live.mpd`) from CDN edge cache. For Apple FairPlay on iOS/Safari, the player requests the Apple Application Certificate (`.cer` / `.der`), served by `media-server` via `drmpack::license::handle_fairplay_certificate` with in-memory caching. |
 | **9 - 11** | Hardware CDM Challenge Generation | The player invokes the browser Encrypted Media Extensions (EME) or iOS `AVContentKeySession`, passing the initialization data (PSSH box or `skd://` URI). Inside the isolated hardware Content Decryption Module (Google Widevine L1/L3, Apple FairPlay Core, Microsoft PlayReady SL3000), an ephemeral session keypair is generated, producing a cryptographic DRM challenge payload (SPC for FairPlay, protobuf for Widevine). |
 | **12 - 17** | License Proxying via `drmpack` | The player submits the challenge along with the entitlement JWT to `media-server`. `media-server` invokes `drmpack::license::handle_widevine_license()` or `handle_fairplay_license()`. The `LicenseProxy` forwards the request with header `X-AxDRM-Message: <JWT>` to the tenant's Axinom License Service. Axinom verifies the JWT, unwraps the ContentKey, encrypts it with the client's ephemeral session key, and returns the encrypted license payload. Upstream diagnostic headers (`X-AxDRM-ErrorMessage`) are surfaced upon rejection. |
@@ -207,18 +214,108 @@ In addition to Axinom, `drmpack` provides:
 
 To use `drmpack`, the host environment must meet the following requirements:
 
-1. GPAC CLI (>= 2.2 recommended):
-   The `gpac` executable must be installed and accessible in the system `PATH`.
-   - Ubuntu / Debian: `apt-get install -y gpac` (or compile from source for latest filters).
-   - macOS (Homebrew): `brew install gpac`.
-   - Docker / Alpine: Install `gpac` from edge repositories or build multi-stage images.
+### 1. GPAC CLI (>= 2.2 required)
 
-2. Shared Memory / Staging Filesystem:
-   - Linux: Mount `/dev/shm` (tmpfs) with sufficient memory headroom for live segment windows.
-   - macOS: Staging defaults to the OS temporary directory (`/tmp` or `$TMPDIR`).
+`drmpack` orchestrates native GPAC filter graphs over anonymous Unix pipes. The `gpac` executable must be installed and accessible in the system `PATH` (or configured via `PackagingSessionConfig::with_gpac_bin()`).
 
-3. FFmpeg (Optional, for media generation during development):
-   Used to produce live test streams in local validation workflows.
+#### Installation by Platform
+
+- **Ubuntu 24.04 LTS (`noble`):**
+  ```bash
+  sudo apt-get update && sudo apt-get install -y gpac
+  ```
+  *(Requires `universe` component enabled. Provides GPAC 2.2+).*
+
+- **Official GPAC APT Repository (Ubuntu 22.04+, Debian 11/12):**
+  *Ubuntu 22.04 default repos only have GPAC 2.0 (too old), and Debian 12 has no GPAC package in official repos. Use the official GPAC repository:*
+  ```bash
+  sudo apt-get update && sudo apt-get install -y ca-certificates curl
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL https://dist.gpac.io/gpac/linux/gpg.asc -o /etc/apt/keyrings/gpac.asc
+  sudo chmod a+r /etc/apt/keyrings/gpac.asc
+
+  sudo tee /etc/apt/sources.list.d/gpac.sources <<EOF
+  Types: deb
+  URIs: https://dist.gpac.io/gpac/linux/$(. /etc/os-release && echo "$ID")
+  Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+  Components: main
+  Signed-By: /etc/apt/keyrings/gpac.asc
+  EOF
+
+  sudo apt-get update && sudo apt-get install -y gpac
+  ```
+
+- **macOS (Homebrew):**
+  ```bash
+  brew install gpac
+  ```
+
+- **Alpine Linux:**
+  GPAC is not packaged in Alpine's apk repositories. For Alpine-based containers, compile from source or copy pre-built binaries from a multi-stage builder.
+
+- **Building from Source (Universal Linux):**
+  ```bash
+  # 1. Install build dependencies
+  sudo apt-get update && sudo apt-get install -y \
+      build-essential git pkg-config zlib1g-dev libssl-dev
+
+  # 2. Clone and build GPAC (latest stable release, e.g. v26.07.0 or >= 2.2)
+  git clone https://github.com/gpac/gpac.git
+  cd gpac
+  git checkout v26.07.0
+  ./configure --prefix=/usr/local --use-ffmpeg=no
+  make -j$(nproc)
+  sudo make install
+  sudo ldconfig
+  ```
+
+- **Docker Production Image (Ubuntu 24.04 Example):**
+  ```dockerfile
+  FROM rust:1.80-bookworm AS builder
+  WORKDIR /build
+  COPY . .
+  RUN cargo build --release
+
+  FROM ubuntu:24.04
+  RUN apt-get update && apt-get install -y --no-install-recommends \
+      gpac \
+      ca-certificates \
+      && rm -rf /var/lib/apt/lists/*
+  COPY --from=builder /build/target/release/your_service /usr/local/bin/
+  ENTRYPOINT ["your_service"]
+  ```
+
+#### Verifying GPAC Installation
+
+Confirm the installed version and ensure that essential filter modules are enabled:
+
+```bash
+# 1. Verify executable and version (>= 2.2)
+gpac -version
+
+# 2. Verify required filter modules are available
+gpac -h cecrypt   # CENC/CBCS DRM encryption filter
+gpac -h dasher    # DASH & HLS segmentation engine
+gpac -h mp4dmx    # MP4 demultiplexer
+```
+
+#### Custom GPAC Binary Path
+
+If `gpac` is installed in a non-standard location or container mount point, specify the binary path programmatically in `PackagingSessionConfig`:
+
+```rust
+use drmpack::session::PackagingSessionConfig;
+
+let config = PackagingSessionConfig::new("live-session")
+    .with_gpac_bin("/usr/local/bin/gpac"); // Defaults to "gpac" in PATH
+```
+
+### 2. Ephemeral Storage Staging Filesystem
+
+`drmpack` writes low-latency CMAF media segments and manifests into an ephemeral staging directory (`std::env::temp_dir()`, typically `/tmp` on Linux or `$TMPDIR` on macOS) before `ArtifactHarvester` reads them into memory channels and purges them:
+- **Linux & Containers (Production):** Standard temporary directory `/tmp` backed by local disk or NVMe SSD. Linux automatically leverages the **kernel Page Cache** for sub-millisecond RAM write/read speeds without the risk of container crashes from Docker's default 64MB `/dev/shm` quota ([ADR-0015](docs/adr/0015-direct-output-channel-and-safe-storage.md)).
+- **Optional Ramdisk (Opt-in):** If you explicitly provision `/dev/shm` or tmpfs with verified memory headroom, you can configure `.with_output_dir("/dev/shm/...")`.
+
 
 ## Environment Configuration
 
@@ -252,19 +349,31 @@ AXINOM_FAIRPLAY_CERT_URL="https://your-cdn.example.com/fairplay.cer"
 
 ## Installation
 
-Add `drmpack` as a dependency in your `Cargo.toml`:
+Add `drmpack` as a dependency in your `Cargo.toml`.
+
+### 1. Git Release Tag (Recommended for Downstream Services)
+
+To ensure reproducible builds and avoid unexpected breaking changes from in-flight development commits, pin to a specific release tag:
 
 ```toml
 [dependencies]
-drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", branch = "main" }
+drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.0" }
 ```
 
-Or reference it locally as a path dependency:
+> [!NOTE]
+> Tracking the development branch directly (`branch = "main"`) is suitable only for exploratory work. In production, always pin `tag` or `rev`.
+
+### 2. Local Path Dependency (Development / Monorepo)
+
+When developing alongside `media-server` in a local workspace:
 
 ```toml
 [dependencies]
 drmpack = { path = "../drmpack" }
 ```
+
+> [!IMPORTANT]
+> **Runtime Prerequisite**: `drmpack` orchestrates native GPAC filter graphs. Any service or Docker container importing `drmpack` must have the `gpac` executable (>= 2.2 / 26.07) installed in its host environment or container image (see [System Prerequisites](#system-prerequisites)).
 
 ### Feature Flags
 
@@ -281,8 +390,24 @@ To disable default features and compile only core packaging orchestration with s
 
 ```toml
 [dependencies]
-drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", default-features = false }
+drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.0", default-features = false }
 ```
+
+## Documentation
+
+While `drmpack` is not yet published to crates.io, full API documentation can be accessed in two ways:
+
+1. **Online via GitHub Pages:**
+   Every push to `main` automatically builds and deploys continuous API documentation to GitHub Pages:
+   👉 **[https://ermisnetwork.github.io/drmpack/](https://ermisnetwork.github.io/drmpack/)**
+
+2. **Local Generation via rustdoc:**
+   Generate and browse the documentation locally in your browser:
+   ```bash
+   cargo doc --all-features --no-deps --open
+   ```
+   The generated HTML entrypoint is located at `target/doc/drmpack/index.html`.
+
 
 ## Quick Start Integration
 
@@ -390,7 +515,6 @@ Alternatively, when streaming directly between reader and writer interfaces via 
 
 ```rust,no_run
 use drmpack::session::PackagingSession;
-use tokio::io::AsyncWriteExt;
 
 async fn ingest_with_writer(
     session: &mut PackagingSession,
@@ -398,14 +522,14 @@ async fn ingest_with_writer(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = session.writer();
     tokio::io::copy(&mut source_socket, &mut writer).await?;
-    writer.shutdown().await?;
+    writer.close().await;
     Ok(())
 }
 ```
 
 ### 4. Consuming Packaged Artifacts
 
-Consume encrypted segments (`.m4s`), initialization files (`init.mp4`), and playlists (`.m3u8`, `.mpd`) directly from the bounded output receiver channel:
+Consume encrypted segments (`.m4s`), initialization files (`<tier>_init.mp4`), and playlists (`.m3u8`, `.mpd`) directly from the bounded output receiver channel:
 
 ```rust,no_run
 use drmpack::session::PackagingSession;
@@ -417,13 +541,13 @@ async fn consume_artifacts(mut session: PackagingSession) {
             while let Some(artifact) = rx.recv().await {
                 match artifact.kind {
                     ArtifactKind::Manifest => {
-                        println!("Updated playlist: {} ({} bytes)", artifact.relative_path, artifact.data.len());
+                        println!("Updated playlist: {} ({} bytes)", artifact.filename, artifact.data.len());
                     }
                     ArtifactKind::MediaSegment => {
-                        println!("New segment ready: {} (seq: {:?})", artifact.relative_path, artifact.sequence_number);
+                        println!("New segment ready: {} [scheme: {}]", artifact.filename, artifact.scheme);
                     }
                     ArtifactKind::InitSegment => {
-                        println!("Init segment ready: {}", artifact.relative_path);
+                        println!("Init segment ready: {}", artifact.filename);
                     }
                 }
             }
@@ -451,8 +575,8 @@ async fn widevine_handler(
     body: Bytes,
 ) -> impl IntoResponse {
     let auth_token = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
-    match handle_widevine_license(&state.proxy, auth_token, body).await {
-        Ok(res) => (res.status_code(), res.data).into_response(),
+    match handle_widevine_license(&state.proxy, body, auth_token).await {
+        Ok(res) => (axum::http::StatusCode::OK, res.data).into_response(),
         Err(err) => (axum::http::StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
