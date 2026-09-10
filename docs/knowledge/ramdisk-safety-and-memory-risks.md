@@ -1,97 +1,97 @@
-# Báo Cáo Nghiên Cứu Chuyên Sâu: Mức Độ An Toàn, Rủi Ro Bộ Nhớ và Kiến Trúc Bảo Vệ Khi Ghi Dữ Liệu Đóng Gói Video Vào Ramdisk / tmpfs Trong Môi Trường Production
+# Deep-Dive Research Report: Safety, Memory Risks, and Protective Architecture When Writing Video Packaging Output to Ramdisk / tmpfs in Production
 
-**Tài liệu đích:** `docs/knowledge/ramdisk-safety-and-memory-risks.md`  
-**Dự án:** `drmpack` (Ermis Stream Multi-DRM Packaging Engine)  
-**Trạng thái:** Hoàn thành nghiên cứu từ Primary Sources  
-**Ngày thực hiện:** 2026-09-08  
-
----
-
-## 1. Tóm Tắt Điều Hành (Executive Summary) & Bối Cảnh
-
-Trong kiến trúc ban đầu của `drmpack` ([ADR-0005](../adr/0005-ramdisk-tmpfs-manifest-distribution.md)), Ramdisk (`/dev/shm` trên Linux hoặc `tmpfs`) được lựa chọn làm nơi chứa đầu ra đóng gói (HLS `.m3u8`, DASH `.mpd` và các media segment CMAF `.m4s`). Quyết định này nhằm triệt tiêu độ trễ I/O đĩa và loại trừ hiện tượng bào mòn đĩa cứng (disk wear) do chu kỳ ghi đè manifest liên tục ở tần suất cao (200ms – 2s) trong các luồng phát Low-Latency Live.
-
-Tuy nhiên, việc triển khai giải pháp này vào **môi trường sản xuất quy mô lớn (Linux bare-metal, Docker containers, Kubernetes Pods)** bộc lộ **5 hiểm họa tiềm tàng nghiêm trọng** nếu không được kiểm soát chặt chẽ:
-
-1. **Bẫy sập 64MB mặc định của Container:** Docker và Kubernetes (CRI-O / containerd) mặc định chỉ cấp đúng **64 MiB** cho `/dev/shm`. Với một luồng phát đa bitrate 1080p-720p-360p, dung lượng 64MB bị lấp đầy chỉ sau **28 đến 56 giây**, khiến GPAC crash do lỗi ghi `ENOSPC` (No space left on device) và làm sập toàn bộ phiên live.
-2. **Cửa sổ lưu trữ 30 phút (`tsb=1800`) ngốn hàng Gigabyte RAM:** Hiện tại `src/gpac/process.rs:128` đang hardcode cờ `tsb=1800` (Time-Shift Buffer 30 phút). Dù GPAC có cơ chế tự xóa segment cũ khi ra khỏi window (`keep_segs=false`), trong 30 phút đầu tiên GPAC **hoàn toàn không xóa bất kỳ segment nào**. Một luồng đa bitrate CENC + CBCS (Dual Scheme) sẽ tích lũy tới **4.1 GB** dữ liệu trong RAM. Chỉ cần 5 luồng chạy đồng thời trên một node, dung lượng RAM bị chiếm dụng sẽ vượt quá 20 GB!
-3. **Cgroup Double-Accounting & OOM Killer (Exit Code 137):** Trong Linux cgroup v2 và Kubernetes, bộ nhớ `tmpfs` được tính trực tiếp vào hạn mức bộ nhớ của container (`memory.current` / `resources.limits.memory`). Nếu kỹ sư cấu hình `emptyDir.medium: Memory` có dung lượng 4GB nhưng đặt container limit là 2GB, Kernel OOM Killer sẽ gửi tín hiệu `SIGKILL` tiêu diệt tiến trình ngay lập tức.
-4. **Rò rỉ vĩnh viễn khi tiến trình chết đột ngột (Zombie / Orphan Leakage):** Khác với bộ nhớ ẩn danh (anonymous memory) được giải phóng tự động khi process terminate, `tmpfs` là một VFS mount point do kernel quản lý. Khi tiến trình bị `SIGKILL`, crash, segfault hoặc OOM, cơ chế RAII (`Drop` trong Rust) **hoàn toàn không được kích hoạt**. Hàng Gigabyte media segments bị kẹt vĩnh viễn trong RAM host. Trong kịch bản Kubernetes `CrashLoopBackOff`, RAM của node máy chủ sẽ bị vắt kiệt chỉ sau vài lần khởi động lại.
-5. **Hiểu lầm về tốc độ SSD NVMe và Linux Page Cache:** Các phân tích phần cứng hiện đại chỉ ra rằng lệnh `write(2)` ra SSD thực chất ghi vào **Linux Page Cache trên RAM** với độ trễ nano-giây ngang ngửa `tmpfs`. SSD không hề gây nghẽn I/O cho media segments (200KB – 2MB) và quan trọng nhất: **Page Cache trên SSD có thể tự động evict/flush ra đĩa khi bộ nhớ cạn kiệt**, đóng vai trò như một van xả an toàn triệt tiêu nguy cơ OOM Killer, điều mà `tmpfs` không có Swap hoàn toàn bất lực.
+**Target Document:** `docs/knowledge/ramdisk-safety-and-memory-risks.md`  
+**Project:** `drmpack` (Ermis Stream Multi-DRM Packaging Engine)  
+**Status:** Completed research from Primary Sources  
+**Date:** 2026-09-08  
 
 ---
 
-## 2. Điều Tra Chuyên Sâu 5 Rủi Ro Cốt Lõi Từ Tài Liệu Gốc (Primary Sources)
+## 1. Executive Summary & Context
 
-### 2.1 Cơ chế tmpfs và /dev/shm trên Linux Kernel & Hành vi OOM Killer
+In the initial architecture of `drmpack` ([ADR-0005](../adr/0005-ramdisk-tmpfs-manifest-distribution.md)), Ramdisk (`/dev/shm` on Linux or `tmpfs`) was chosen as the storage destination for packaging output (HLS `.m3u8`, DASH `.mpd`, and CMAF `.m4s` media segments). This decision aimed to eliminate disk I/O latency and prevent physical disk wear caused by high-frequency manifest overwrite cycles (200ms – 2s) in Low-Latency Live streams.
 
-#### Tài liệu tham chiếu gốc (Primary Sources)
+However, deploying this solution in **large-scale production environments (Linux bare-metal, Docker containers, Kubernetes Pods)** exposes **5 critical potential hazards** if not carefully managed:
+
+1. **The 64MB Default Container Trap:** Docker and Kubernetes (CRI-O / containerd) default to allocating exactly **64 MiB** for `/dev/shm`. With a multi-bitrate 1080p-720p-360p stream, 64MB fills up in just **28 to 56 seconds**, causing GPAC to crash with an `ENOSPC` (No space left on device) write error and bringing down the entire live session.
+2. **The 30-Minute Time-Shift Buffer (`tsb=1800`) Consumes Gigabytes of RAM:** Currently `src/gpac/process.rs:128` hardcodes the flag `tsb=1800` (30-minute Time-Shift Buffer). Although GPAC has a mechanism to auto-delete old segments once outside the window (`keep_segs=false`), for the first 30 minutes GPAC **does not delete any segments at all**. A multi-bitrate CENC + CBCS (Dual Scheme) stream accumulates up to **4.1 GB** of data in RAM. Running just 5 concurrent streams on a single node exceeds 20 GB of RAM consumption!
+3. **Cgroup Double-Accounting & OOM Killer (Exit Code 137):** In Linux cgroup v2 and Kubernetes, `tmpfs` memory is counted directly toward the container's memory limit (`memory.current` / `resources.limits.memory`). If an engineer configures `emptyDir.medium: Memory` with a 4GB size limit but sets the container limit to 2GB, the Kernel OOM Killer sends a `SIGKILL` to terminate the process immediately.
+4. **Permanent Leakage on Abrupt Process Termination (Zombie / Orphaned Files):** Unlike anonymous process memory which is automatically reclaimed upon process exit, `tmpfs` is a kernel-managed Virtual Filesystem (VFS) mount point. When a process suffers a `SIGKILL`, crash, segfault, or OOM, RAII cleanup mechanisms (`Drop` in Rust) **do not run at all**. Gigabytes of media segments remain trapped in host RAM. Under a Kubernetes `CrashLoopBackOff` scenario, host node RAM is exhausted after just a few restart cycles.
+5. **Misconceptions Regarding NVMe SSD Speed and the Linux Page Cache:** Modern systems performance analysis demonstrates that a `write(2)` call to an SSD actually writes into the kernel's **Linux Page Cache in RAM** with nanosecond latency on par with `tmpfs`. SSDs introduce no I/O bottleneck for media segments (200KB – 2MB). Crucially: **Page Cache on SSD can be evicted and flushed to disk automatically under memory pressure**, acting as a safety valve that eliminates OOM Killer crashes, an advantage that unswapped `tmpfs` completely lacks.
+
+---
+
+## 2. Deep-Dive Investigation of the 5 Core Risks from Primary Sources
+
+### 2.1 tmpfs and /dev/shm Mechanics in Linux Kernel & OOM Killer Behavior
+
+#### Primary Sources
 * Linux Kernel Documentation: `Documentation/filesystems/tmpfs.rst`
 * Linux Kernel Source: `mm/shmem.c`, `mm/oom_kill.c`, `mm/memcontrol.c`
 * Linux Programmer's Manual: `tmpfs(5)`, `shm_overview(7)`, `cgroups(7)`
 
-#### Cơ chế phân bổ và quản lý trang nhớ
-Theo Linux Kernel Documentation (`tmpfs.rst`), `tmpfs` là một hệ thống tệp lưu trữ toàn bộ dữ liệu trực tiếp trong bộ nhớ ảo (Virtual Memory) của kernel, cụ thể là **Page Cache** và **dentry cache**:
-* **Không cấp phát trước (Dynamic Allocation):** `tmpfs` không chiếm dụng ngay dung lượng tối đa. Dung lượng thực tế tiêu hao đúng bằng kích thước các tệp đang lưu trữ cộng với metadata (inode).
-* **Kích thước mặc định:** Nếu mount mà không truyền tham số `size`, kernel mặc định giới hạn dung lượng `tmpfs` bằng **50% lượng RAM vật lý của host** (`size=50%`).
-* **Tương tác với Swap:** Các trang nhớ của `tmpfs` được quản lý dưới dạng bộ nhớ ẩn danh được ánh xạ tệp (`shmem`). Khi hệ thống gặp áp lực bộ nhớ (memory pressure), tiến trình dọn dẹp trang (`kswapd`) **CÓ THỂ hoán chuyển (swap out) các trang `tmpfs` ra phân vùng Swap vật lý**. Tuy nhiên, trong hạ tầng container hiện đại (đặc biệt là Kubernetes), Swap thường bị vô hiệu hóa hoàn toàn (`swapoff -a`) theo khuyến cáo chuẩn của Kubernetes. Khi không có Swap, toàn bộ các trang nhớ của `tmpfs` bị **ghim cứng (pinned) vào RAM vật lý**.
+#### Page Allocation and Management Mechanics
+According to Linux Kernel Documentation (`tmpfs.rst`), `tmpfs` is a filesystem that stores all files directly in kernel Virtual Memory, specifically the **Page Cache** and **dentry cache**:
+* **Dynamic Allocation:** `tmpfs` does not preallocate its maximum capacity. Actual space consumed equals the size of currently stored files plus metadata (inodes).
+* **Default Size:** When mounted without an explicit `size` parameter, the kernel defaults `tmpfs` capacity to **50% of the host's physical RAM** (`size=50%`).
+* **Interaction with Swap:** `tmpfs` pages are managed as file-backed anonymous shared memory (`shmem`). Under memory pressure, the page-reclaim subsystem (`kswapd`) **CAN swap out `tmpfs` pages to physical Swap partitions**. However, in modern containerized infrastructure (especially Kubernetes), Swap is typically disabled (`swapoff -a`) per standard Kubernetes recommendations. Without Swap, all `tmpfs` pages are **pinned directly in physical RAM**.
 
-#### Phân biệt: Tràn đĩa (`ENOSPC`) vs Tràn bộ nhớ (`OOM Killer`)
-Kernel xử lý hai trường hợp cạn kiệt bộ nhớ theo hai cơ chế hoàn toàn khác nhau:
+#### Distinction: Disk Full (`ENOSPC`) vs. Memory Exhaustion (`OOM Killer`)
+The kernel handles memory depletion across two distinct mechanisms:
 
 ```
                           ┌──────────────────────────┐
-                          │ Lệnh ghi file: write(2)  │
+                          │ File write call: write(2)│
                           └─────────────┬────────────┘
                                         │
                  ┌──────────────────────┴──────────────────────┐
                  ▼                                             ▼
-       [tmpfs chạm size limit]                   [RAM / cgroup memory chạm limit]
+       [tmpfs hits size limit]                   [RAM / cgroup memory hits limit]
                  │                                             │
-      VFS trả lỗi: -ENOSPC                               Kernel không cấp được trang nhớ
+      VFS returns: -ENOSPC                           Kernel cannot allocate page
     "No space left on device"                                  │
                  │                               ┌─────────────┴─────────────┐
-        Process nhận lỗi I/O                     ▼                           ▼
-        (OOM Killer KHÔNG chạy)             [Có Swap]                   [Không Swap]
+        Process receives I/O error               ▼                           ▼
+        (OOM Killer DOES NOT run)           [With Swap]                 [No Swap]
                  │                               │                           │
-   GPAC exit với mã lỗi I/O              Swap out tmpfs             Kernel cgroup kích hoạt
+    GPAC exits with I/O error code          Swap out tmpfs             Kernel cgroup triggers
                                                                      mem_cgroup_out_of_memory()
                                                                              │
-                                                                    OOM Killer chọn victim
+                                                                    OOM Killer selects victim
                                                                              │
-                                                                   Gửi SIGKILL (Exit 137)
+                                                                    Sends SIGKILL (Exit 137)
 ```
 
-1. **Trường hợp A - Vượt quá hạn mức `size` của tmpfs (`ENOSPC`):**
-   * Nếu `/dev/shm` được gán hạn mức (ví dụ 64MB trên Docker) và dữ liệu ghi vượt quá 64MB, VFS subsystem từ chối lệnh `write(2)` và trả về mã lỗi **`-ENOSPC` (No space left on device)**.
-   * **Hành vi Kernel:** Kernel **KHÔNG** kích hoạt OOM Killer. Lỗi được trả về cho tiến trình gọi. Nếu ứng dụng (GPAC) không bắt lỗi ghi đĩa, nó sẽ ngắt luồng và thoát với lỗi I/O.
-2. **Trường hợp B - Cạn kiệt RAM hệ thống hoặc vượt `memory.max` của cgroup (OOM Killer):**
-   * Nếu `tmpfs` có hạn mức lớn (hoặc không giới hạn), và dữ liệu ghi vào `tmpfs` làm cạn kiệt RAM vật lý của node hoặc vượt quá ngưỡng `memory.max` (cgroup v2) / `memory.limit_in_bytes` (cgroup v1) của Container:
-   * Trong cgroup v2, các trang nhớ `tmpfs` do tiến trình bên trong container tạo ra được tính trực tiếp vào trường `shmem` và `file` của `memory.current`.
-   * Khi `memory.current` chạm trần `memory.max`, bộ điều khiển bộ nhớ (`mem_cgroup`) bắt đầu chu kỳ dọn dẹp (reclaim). Vì các trang `tmpfs` là trang file bẩn (dirty file pages) nhưng **không có ổ đĩa vật lý để flush xuống**, và Swap bị tắt, kernel hoàn toàn bất lực trong việc thu hồi bộ nhớ!
-   * Hàm `mem_cgroup_out_of_memory()` trong `mm/memcontrol.c` được kích hoạt. Thuật toán `oom_badness()` tính điểm tiến trình chiếm nhiều bộ nhớ nhất (thường chính là GPAC hoặc media server) và gửi tín hiệu **`SIGKILL` (signal 9)** không thể đánh chặn. Container dừng đột ngột với **Exit Code 137 (`128 + 9`)**.
+1. **Case A — Exceeding tmpfs `size` limit (`ENOSPC`):**
+   * If `/dev/shm` is assigned a limit (e.g. 64MB on Docker) and written data exceeds 64MB, the VFS subsystem rejects the `write(2)` call and returns **`-ENOSPC` (No space left on device)**.
+   * **Kernel Behavior:** The kernel **DOES NOT** invoke the OOM Killer. The error is returned to the calling process. If the application (GPAC) does not handle the write error, it terminates with an I/O error.
+2. **Case B — Exhausting System RAM or Exceeding Container `memory.max` (OOM Killer):**
+   * If `tmpfs` has a large limit (or no limit), and data written to `tmpfs` exhausts the host's physical RAM or exceeds the container's `memory.max` (cgroup v2) / `memory.limit_in_bytes` (cgroup v1):
+   * In cgroup v2, `tmpfs` memory pages created by container processes are charged directly to `shmem` and `file` accounting under `memory.current`.
+   * When `memory.current` hits the `memory.max` ceiling, the memory controller (`mem_cgroup`) begins reclaim cycles. Because `tmpfs` pages are dirty file pages with **no physical backing block device to flush to**, and Swap is disabled, the kernel is completely unable to reclaim memory!
+   * The `mem_cgroup_out_of_memory()` function in `mm/memcontrol.c` is triggered. The `oom_badness()` heuristic scores the process consuming the most memory (typically GPAC or the media server) and dispatches an uncatchable **`SIGKILL` (signal 9)**. The container stops abruptly with **Exit Code 137 (`128 + 9`)**.
 
 ---
 
-### 2.2 Rủi Ro Trong Môi Trường Container (Docker & Kubernetes)
+### 2.2 Risks in Container Environments (Docker & Kubernetes)
 
-#### Tài liệu tham chiếu gốc (Primary Sources)
+#### Primary Sources
 * Docker Run Reference: Command-line reference (`--shm-size`, `/etc/docker/daemon.json`)
 * Kubernetes Documentation: *Volumes: emptyDir*, *Assign Memory Resources to Containers and Pods*
 * OCI Runtime Specification / runc implementation
 
-#### Bẫy 64MB của Docker Engine
-* Mặc định, khi khởi tạo bất kỳ container nào bằng `docker run`, Docker Engine gắn kết một mount point `tmpfs` vào `/dev/shm` với kích thước cố định là **67,108,864 bytes (đúng 64 MiB)**.
-* Thiết lập 64MB này bắt nguồn từ lý do bảo mật lịch sử (tránh việc một tiến trình unprivileged làm cạn kiệt POSIX shared memory của host).
-* **Hậu quả với video streaming:** Một luồng phát 1080p đa bitrate đạt tốc độ trung bình ~1.15 MB/s. Chỉ sau **56 giây** (với 1 scheme) hoặc **28 giây** (với Dual scheme CENC + CBCS), dung lượng 64MB bị lấp đầy 100%. GPAC lập tức dính lỗi:
+#### The 64MB Docker Engine Trap
+* By default, when creating any container using `docker run`, Docker Engine mounts a `tmpfs` filesystem at `/dev/shm` with a fixed size of **67,108,864 bytes (exactly 64 MiB)**.
+* This 64MB default originates from historical security considerations (preventing an unprivileged process from exhausting host POSIX shared memory).
+* **Impact on video streaming:** A multi-bitrate 1080p stream averages ~1.15 MB/s. After just **56 seconds** (single scheme) or **28 seconds** (Dual scheme CENC + CBCS), the 64MB space is 100% exhausted. GPAC immediately encounters an error:
   ```text
   [dasher] Error writing segment to /dev/shm/drmpack_live_123/cenc/video_1080p_15.m4s: No space left on device
   ```
-  Tiến trình GPAC chết, đường ống Unix pipe bị đóng gãy (`BrokenPipe`), và `PackagingSession` sập hoàn toàn.
-* **Cách khắc phục thủ công:** Bắt buộc phải truyền cờ `--shm-size=2gb` trong `docker run` hoặc cấu hình `shm_size: 2gb` trong `docker-compose.yml`.
+  The GPAC process dies, the Unix pipe breaks (`BrokenPipe`), and `PackagingSession` crashes completely.
+* **Manual Remediation:** Operators must explicitly pass `--shm-size=2gb` in `docker run` or configure `shm_size: 2gb` in `docker-compose.yml`.
 
-#### Cạm Bẫy Cấu Hình Trên Kubernetes (K8s Pods)
-Mặc định, các Pod chạy trên Kubernetes kế thừa cấu hình runtime từ containerd/CRI-O và cũng chỉ có **64 MiB** trong `/dev/shm`. Để mở rộng, kỹ sư bắt buộc phải dùng `emptyDir` với `medium: Memory`:
+#### Configuration Pitfalls on Kubernetes (K8s Pods)
+By default, Pods running on Kubernetes inherit runtime defaults from containerd/CRI-O and also receive only **64 MiB** in `/dev/shm`. To expand it, engineers must mount an `emptyDir` volume with `medium: Memory`:
 
 ```yaml
 apiVersion: v1
@@ -104,7 +104,7 @@ spec:
     image: ermis/drmpack-service:latest
     resources:
       limits:
-        memory: "2Gi" # CẠM BẪY 1: Giới hạn cgroup container
+        memory: "2Gi" # PITFALL 1: Container cgroup limit
     volumeMounts:
     - mountPath: /dev/shm
       name: shm-volume
@@ -112,146 +112,146 @@ spec:
   - name: shm-volume
     emptyDir:
       medium: Memory
-      sizeLimit: "4Gi" # CẠM BẪY 2: sizeLimit của volume
+      sizeLimit: "4Gi" # PITFALL 2: Volume sizeLimit
 ```
 
-Có 3 cạm bẫy sống còn trong mô hình này:
-1. **Bẫy Cgroup Double-Accounting:**
-   * Dữ liệu ghi vào `emptyDir.medium: Memory` được tính trực tiếp vào mức tiêu thụ bộ nhớ của Pod/Container.
-   * Ở ví dụ trên, kỹ sư cấp `sizeLimit: 4Gi` cho `/dev/shm`, nhưng `resources.limits.memory` của container lại chỉ đặt `2Gi`. Khi video buffer tích lũy đến ~1.8GB (cộng thêm 200MB RSS của tiến trình), **Pod bị Kernel OOMKilled ngay lập tức**, dù dung lượng `/dev/shm` mới dùng chưa đến 50% `sizeLimit`!
-2. **Bẫy Kubelet Eviction:**
-   * Kubelet định kỳ chạy tiến trình giám sát dung lượng các volume `emptyDir`. Nếu thư mục `/dev/shm` vượt quá `sizeLimit`, Kubelet sẽ đánh dấu Pod vi phạm và tiến hành **Evict Pod** khỏi Node (`PodTheNodeWasLowOnResource`).
-3. **Bẫy Bỏ Trống `sizeLimit` (Host Starvation):**
-   * Nếu khai báo `emptyDir: { medium: Memory }` mà không đặt `sizeLimit`, dung lượng của volume này bị giới hạn bởi dung lượng bộ nhớ của toàn bộ Node vật lý. Khi gặp sự cố rò rỉ hoặc phiên live kéo dài, Pod có thể nuốt chửng hàng chục GB RAM của Node, kích hoạt `NodeMemoryPressure` và làm sập các dịch vụ đồng cấp (co-located pods).
+Three critical pitfalls exist in this model:
+1. **Cgroup Double-Accounting Trap:**
+   * Data written to `emptyDir.medium: Memory` is billed directly to the Pod/Container memory usage.
+   * In the example above, the engineer configured `sizeLimit: 4Gi` for `/dev/shm`, but set `resources.limits.memory` to `2Gi`. When video buffering accumulates to ~1.8GB (plus 200MB process RSS), the **Pod is immediately OOMKilled by the kernel**, even though `/dev/shm` has used less than 50% of its volume `sizeLimit`!
+2. **Kubelet Eviction Trap:**
+   * Kubelet runs periodic volume usage monitors. If `/dev/shm` exceeds `sizeLimit`, Kubelet flags the Pod as violating resource limits and proceeds to **Evict the Pod** (`PodTheNodeWasLowOnResource`).
+3. **Missing `sizeLimit` Trap (Host Starvation):**
+   * Declaring `emptyDir: { medium: Memory }` without setting `sizeLimit` allows the volume to expand up to the memory limit of the physical node. Under a memory leak or extended live session, the Pod can consume tens of gigabytes of node RAM, triggering `NodeMemoryPressure` and destabilizing co-located pods.
 
 ---
 
-### 2.3 Hành Vi Xóa Segment Của GPAC dasher & Phân Tích Định Lượng Dung Lượng
+### 2.3 GPAC dasher Segment Deletion Behavior & Quantitative Capacity Analysis
 
-#### Tài liệu tham chiếu gốc (Primary Sources)
+#### Primary Sources
 * GPAC Documentation: Filter `dasher` parameters (`gpac -h dasher`)
-* GPAC Source Code: `src/filters/dasher.c` (Logic `dasher_del_segment`, `keep_segs`, `tsb`)
+* GPAC Source Code: `src/filters/dasher.c` (`dasher_del_segment`, `keep_segs`, `tsb` logic)
 
-#### Cơ chế của cờ `tsb` và `keep_segs`
-Trong GPAC dasher, vòng đời của các segment file được điều khiển bởi hai tham số:
-1. **`tsb` (Time-Shift Buffer - kiểu số thực, mặc định của GPAC là 30 giây):** Quy định độ sâu thời gian tối đa của cửa sổ trượt DVR trong manifest DASH/HLS.
-2. **`keep_segs` (boolean, mặc định: `false`):**
-   * Khi `keep_segs=false` (mặc định trong GPAC và trong `drmpack`): GPAC **TỰ ĐỘNG XÓA** các segment vật lý trên đĩa/RAM khi thời điểm phát sóng của segment đó nằm ngoài cửa sổ:  
+#### Mechanics of `tsb` and `keep_segs` Flags
+In GPAC dasher, segment file lifecycles are governed by two parameters:
+1. **`tsb` (Time-Shift Buffer - floating point, GPAC default: 30 seconds):** Specifies the maximum temporal depth of the DVR sliding window in the DASH/HLS manifest.
+2. **`keep_segs` (boolean, default: `false`):**
+   * When `keep_segs=false` (default in GPAC and in `drmpack`): GPAC **AUTOMATICALLY DELETES** physical segment files on disk/RAM when a segment's presentation timestamp falls outside the window:  
      $$\text{segment\_start\_time} < \text{current\_playback\_time} - \text{tsb}$$
-   * Khi `keep_segs=true`: GPAC giữ lại toàn bộ các segment từ đầu buổi phát sóng đến khi kết thúc (dùng cho VOD archiving).
+   * When `keep_segs=true`: GPAC preserves all segments from stream onset until termination (used for VOD archiving).
 
-#### "Quả Bom Nổ Chậm" 30 Phút Của `tsb=1800`
-Trong mã nguồn hiện tại của `drmpack` ([`src/gpac/process.rs:128`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L128)):
+#### The 30-Minute Time Bomb of `tsb=1800`
+In the current codebase of `drmpack` ([`src/gpac/process.rs:128`](../../src/gpac/process.rs#L128)):
 ```rust
 "{}:dual:profile=live:dmode=dynauto:segdur={}:spd={}:tsb=1800:utcs=inband:pssh=mv:template=$RepresentationID$_$Init=init$$Number$"
 ```
-Tham số `tsb=1800` (1800 giây = 30 phút) dẫn đến hệ quả:
-* **Giai đoạn tích lũy tuyến tính (0 đến 30 phút):** Trong suốt 1800 giây đầu tiên kể từ khi bắt đầu stream, **GPAC KHÔNG XÓA BẤT KỲ 1 BYTE NÀO**! Toàn bộ video segments của tất cả các rendition và scheme liên tục dồn ứ vào `/dev/shm`.
-* **Giai đoạn bão hòa (Sau phút thứ 30):** Chỉ từ giây thứ 1801 trở đi, GPAC mới bắt đầu xóa segment số 1 khi segment mới được tạo ra, đưa mức tiêu hao RAM vào trạng thái cân bằng động (steady state).
+The parameter `tsb=1800` (1800 seconds = 30 minutes) leads to:
+* **Linear accumulation phase (0 to 30 minutes):** For the first 1800 seconds of a stream, **GPAC DOES NOT DELETE A SINGLE BYTE**! Media segments from all renditions and schemes continuously pile up in `/dev/shm`.
+* **Saturation phase (After minute 30):** Only from second 1801 onward does GPAC begin deleting segment 1 as new segments arrive, stabilizing RAM consumption into a steady state.
 
-#### Bảng Tính Toán Định Lượng Dung Lượng Ramdisk
+#### Quantitative Ramdisk Capacity Analysis Table
 
-Giả định một cấu hình phát sóng thực tế chuẩn công nghiệp (Multi-bitrate ABR Ladder):
+Assuming a standard industrial multi-bitrate ABR ladder:
 * **Rendition 1080p60:** 5,000 kbps (~625 KB/s)
 * **Rendition 720p30:** 2,500 kbps (~312.5 KB/s)
 * **Rendition 360p30:** 800 kbps (~100 KB/s)
 * **Stereo AAC Audio:** 128 kbps (~16 KB/s)
 * **Subtitles & Metadata:** 32 kbps (~4 KB/s)
-* **Hệ số đóng gói CMAF & Filesystem Inode Overhead:** 8% (chứa box `moof`, `traf`, `tfhd`, `trun`, `sidx`, `pssh`, metadata `senc`/`saiz`/`saio` và block allocation overhead).
+* **CMAF Packaging & Filesystem Inode Overhead:** 8% (encompassing `moof`, `traf`, `tfhd`, `trun`, `sidx`, `pssh` boxes, `senc`/`saiz`/`saio` metadata, and filesystem block allocation overhead).
 
-*Tổng băng thông thực tế (Single Scheme):* $8,460\text{ kbps} \times 1.08 \approx 9,136\text{ kbps} \approx 1.142\text{ MB/s}$  
-*Tổng băng thông thực tế (Dual Scheme CENC + CBCS):* $1.142\text{ MB/s} \times 2 \approx 2.284\text{ MB/s}$
+*Total actual bandwidth (Single Scheme):* $8,460\text{ kbps} \times 1.08 \approx 9,136\text{ kbps} \approx 1.142\text{ MB/s}$  
+*Total actual bandwidth (Dual Scheme CENC + CBCS):* $1.142\text{ MB/s} \times 2 \approx 2.284\text{ MB/s}$
 
-| Cửa sổ Buffer (`tsb`) | Single Scheme (`MB` / `GiB`) | Dual Scheme CENC+CBCS (`MB` / `GiB`) | 5 Luồng Đồng Thời (Dual) | 10 Luồng Đồng Thời (Dual) | Đánh giá an toàn |
+| Buffer Window (`tsb`) | Single Scheme (`MB` / `GiB`) | Dual Scheme CENC+CBCS (`MB` / `GiB`) | 5 Concurrent Streams (Dual) | 10 Concurrent Streams (Dual) | Safety Assessment |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **30 giây** (`tsb=30`) | 34.3 MB (0.03 GiB) | **68.5 MB (0.07 GiB)** | 342.5 MB | 685 MB | **Rất an toàn**, vừa vặn cho RAM nhỏ |
-| **60 giây** (`tsb=60`) | 68.5 MB (0.07 GiB) | **137.0 MB (0.13 GiB)** | 685 MB | 1.37 GiB | **Tối ưu cho Live Edge / Low Latency** |
-| **120 giây** (2 phút) | 137.0 MB (0.13 GiB) | **274.1 MB (0.26 GiB)** | 1.37 GiB | 2.74 GiB | An toàn cho DVR ngắn |
-| **300 giây** (5 phút) | 342.6 MB (0.32 GiB) | **685.2 MB (0.64 GiB)** | 3.43 GiB | 6.85 GiB | Cần cấp phép tối thiểu 1GB/stream |
-| **1800 giây** (30 phút - Mặc định hiện tại) | **2.05 GB (1.91 GiB)** | **4.11 GB (3.83 GiB)** | **20.55 GB (19.1 GiB)** | **41.1 GB (38.3 GiB)** | **CỰC KỲ NGUY HIỂM: Dễ OOM Crash** |
-| **Hạn mức 64MB Docker** | **Tràn đĩa sau 56 giây!** | **Tràn đĩa sau 28 giây!** | Crash lập tức | Crash lập tức | **Chắc chắn sập 100%** |
+| **30 seconds** (`tsb=30`) | 34.3 MB (0.03 GiB) | **68.5 MB (0.07 GiB)** | 342.5 MB | 685 MB | **Very safe**, fits small RAM budgets |
+| **60 seconds** (`tsb=60`) | 68.5 MB (0.07 GiB) | **137.0 MB (0.13 GiB)** | 685 MB | 1.37 GiB | **Optimal for Live Edge / Low Latency** |
+| **120 seconds** (2 min) | 137.0 MB (0.13 GiB) | **274.1 MB (0.26 GiB)** | 1.37 GiB | 2.74 GiB | Safe for short DVR |
+| **300 seconds** (5 min) | 342.6 MB (0.32 GiB) | **685.2 MB (0.64 GiB)** | 3.43 GiB | 6.85 GiB | Requires minimum 1GB/stream |
+| **1800 seconds** (30 min - Current default) | **2.05 GB (1.91 GiB)** | **4.11 GB (3.83 GiB)** | **20.55 GB (19.1 GiB)** | **41.1 GB (38.3 GiB)** | **CRITICALLY DANGEROUS: High OOM Risk** |
+| **64MB Docker Limit** | **Disk full in 56s!** | **Disk full in 28s!** | Immediate crash | Immediate crash | **100% Guaranteed failure** |
 
 ---
 
-### 2.4 Rò Rỉ Tài Nguyên (Resource Leakage) & Zombie/Orphan Files
+### 2.4 Resource Leakage & Zombie/Orphaned Files
 
-#### Tài liệu tham chiếu gốc (Primary Sources)
+#### Primary Sources
 * Linux Programmer's Manual: `shm_overview(7)`
 * POSIX Standard IEEE Std 1003.1 (Shared Memory Objects Lifecycle)
 * Rust Standard Library Documentation: `std::ops::Drop` guarantees and caveats
 
-#### Bản chất vòng đời của tmpfs vs Anonymous Memory
-* Khi một tiến trình cấp phát bộ nhớ RAM thông thường thông qua `malloc` hoặc `mmap(MAP_ANONYMOUS)`, kernel theo dõi trang nhớ đó thông qua cấu trúc bảng trang `mm_struct` của tiến trình. Khi tiến trình chết (dù chết êm đẹp hay bị giết bởi `SIGKILL`), kernel **luôn luôn thu hồi 100% bộ nhớ ẩn danh** trong hàm giải phóng `exit_mmap()`.
-* **Tuy nhiên, `tmpfs` và `/dev/shm` KHÔNG PHẢI là bộ nhớ của tiến trình!** `tmpfs` là một cấu trúc hệ thống tệp gắn kết (Virtual Filesystem Mount). Mỗi file tạo ra trong `/dev/shm` tồn tại độc lập với tiến trình đã ghi ra nó.
-* **Quy tắc POSIX & Linux VFS:** Các tệp trong `tmpfs` chỉ bị giải phóng khi:
-  1. Một tiến trình chủ động gọi `unlink(2)` / `remove(3)` để xóa file.
-  2. Toàn bộ filesystem `tmpfs` bị `umount`.
-  3. Máy chủ khởi động lại (Reboot).
+#### Lifecycle Nature of tmpfs vs Anonymous Memory
+* When a process allocates normal RAM memory via `malloc` or `mmap(MAP_ANONYMOUS)`, the kernel tracks that memory page via the process's page table structure `mm_struct`. When the process terminates (whether cleanly or killed by `SIGKILL`), the kernel **always reclaims 100% of anonymous memory** in `exit_mmap()`.
+* **However, `tmpfs` and `/dev/shm` ARE NOT process memory!** `tmpfs` is a kernel Virtual Filesystem (VFS) mount point. Every file created in `/dev/shm` exists independently of the process that wrote it.
+* **POSIX & Linux VFS Rules:** Files in `tmpfs` are only freed when:
+  1. A process explicitly calls `unlink(2)` / `remove(3)` to delete the file.
+  2. The entire `tmpfs` filesystem is unmounted (`umount`).
+  3. The host reboots.
 
-#### Giới Hạn Nghiêm Trọng Của Cơ Chế RAII (`Drop` Trong Rust)
-Trong `drmpack`, ta có hàm hủy dọn dẹp thư mục:
+#### Severe Limitations of RAII (`Drop` in Rust)
+In `drmpack`, we have a directory cleanup destructor:
 ```rust
 // src/session/mod.rs:778
 impl Drop for PackagingSession {
     fn drop(&mut self) {
-        // Xóa output_dir và control_dir
+        // Deletes output_dir and control_dir
     }
 }
 ```
-**Hạn chế chết người của Rust `Drop`:**
-* Rust runtime chỉ thực thi `Drop::drop` khi một struct ra khỏi scope bình thường hoặc khi đang thực hiện **stack unwinding do `panic!`**.
-* `Drop` **HOÀN TOÀN KHÔNG ĐƯỢC CHẠY** trong các trường hợp:
-  * Tiến trình nhận tín hiệu `SIGKILL` (signal 9) từ Kernel OOM Killer, Docker daemon (`docker stop` sau timeout), hoặc lệnh `kill -9`.
-  * Lỗi phân đoạn bộ nhớ (Segmentation Fault - `SIGSEGV`), Bus Error (`SIGBUS`).
-  * Gọi trực tiếp `std::process::exit()` hoặc `libc::_exit()`.
-  * Tiến trình GPAC con bị crash làm treo hoặc crash supervisor.
+**Fatal limitations of Rust `Drop`:**
+* The Rust runtime only executes `Drop::drop` when a struct exits scope normally or during **stack unwinding due to `panic!`**.
+* `Drop` **DOES NOT RUN AT ALL** under:
+  * Process receiving `SIGKILL` (signal 9) from the Kernel OOM Killer, Docker daemon (`docker stop` after timeout), or `kill -9`.
+  * Segmentation Fault (`SIGSEGV`), Bus Error (`SIGBUS`).
+  * Direct invocation of `std::process::exit()` or `libc::_exit()`.
+  * Child GPAC process crash causing supervisor hang or crash.
 
-#### Kịch Bản Khủng Hoảng CrashLoopBackOff
-Khi một container chạy `drmpack` bị OOMKilled hoặc panic:
-1. Thư mục `/dev/shm/drmpack_{content_id}_{uuid}` chứa **~4GB** video segments bị **bỏ rơi hoàn toàn (orphaned/zombie)** trong RAM.
-2. Container runtime khởi động lại Pod mới.
-3. Pod mới sinh ra một UUID ngẫu nhiên mới: `/dev/shm/drmpack_{content_id}_{uuid_moi}` và tiếp tục ghi thêm 4GB nữa vào RAM.
-4. Sau vài chu kỳ khởi động lại trong vòng vài phút, toàn bộ RAM vật lý của server bị ngập rác, biến máy chủ thành "cục gạch" không thể tiếp nhận thêm bất kỳ kết nối nào!
+#### The CrashLoopBackOff Crisis Scenario
+When a container running `drmpack` is OOMKilled or panics:
+1. The directory `/dev/shm/drmpack_{content_id}_{uuid}` holding **~4GB** of video segments is **completely orphaned** in RAM.
+2. The container runtime restarts a new Pod.
+3. The new Pod generates a new random UUID: `/dev/shm/drmpack_{content_id}_{new_uuid}` and continues writing another 4GB into RAM.
+4. After several restart cycles within a few minutes, host physical RAM is exhausted, turning the node into a zombie that cannot accept new connections!
 
 ---
 
-### 2.5 So Sánh Thực Chiến: NVMe SSD + Linux Page Cache vs RAM (/dev/shm)
+### 2.5 Practical Comparison: NVMe SSD + Linux Page Cache vs RAM (/dev/shm)
 
-#### Tài liệu tham chiếu gốc (Primary Sources)
+#### Primary Sources
 * Linux Kernel Documentation: `Documentation/admin-guide/sysctl/vm.rst` (`dirty_background_ratio`, `dirty_ratio`, `dirty_expire_centisecs`)
 * Brendan Gregg: *Systems Performance: Enterprise and the Cloud* (2nd Edition, Chapter 8: File Systems)
 * Enterprise NVMe SSD Datasheets (Samsung PM9A3, Solidigm D7-P5520, Intel Optane)
 
-#### 1. Cơ Chế Linux Page Cache (Độ trễ ghi là tương đương)
-Khi một ứng dụng gọi `write(2)` vào một file nằm trên ổ đĩa SSD thông thường (ext4, xfs):
-* Lệnh ghi **KHÔNG HỀ chờ dữ liệu nạp vào chip flash của SSD**! Lệnh ghi chỉ đơn thuần là một thao tác copy bộ nhớ từ user-space buffer vào **Page Cache (RAM)** của kernel.
-* Hệ điều hành trả về thành công cho ứng dụng ngay lập tức trong vòng **vài trăm nano-giây**, hoàn toàn ngang ngửa tốc độ ghi vào `/dev/shm`.
-* Việc đẩy dữ liệu từ Page Cache xuống đĩa cứng vật lý do các luồng ngầm của kernel (`wb_workfn` / `kworker`) thực hiện bất đồng bộ.
-* Khi HTTP server (Origin / CDN Edge) đọc file segment vừa ghi để phân phối cho người xem, lệnh `read(2)` sẽ chạm ngay vào **Page Cache đang nằm sẵn trong RAM** (Page Cache Hit Rate $\approx 100\%$). Đĩa SSD vật lý hầu như không phải thực hiện thao tác đọc nào!
+#### 1. Linux Page Cache Mechanics (Write Latency is Equivalent)
+When an application calls `write(2)` on a file located on a standard SSD filesystem (ext4, xfs):
+* The write call **DOES NOT wait for data to commit to SSD flash chips**! The write call is simply a memory copy operation from user-space buffer into the kernel's **Page Cache (RAM)**.
+* The operating system returns success to the application immediately within **several hundred nanoseconds**, matching the speed of writing to `/dev/shm`.
+* Flushing data from Page Cache down to physical disk is handled asynchronously by background kernel threads (`wb_workfn` / `kworker`).
+* When the HTTP server (Origin / CDN Edge) reads the newly written segment file to serve viewers, `read(2)` hits the **Page Cache already hot in RAM** (Page Cache Hit Rate $\approx 100\%$). The physical SSD performs almost no read operations!
 
-#### 2. Bài Toán Hao Mòn Đĩa (SSD Flash Endurance)
-* Mối lo ngại lớn nhất khi dùng SSD là hiện tượng hao mòn flash (Write Amplification) do chu kỳ ghi liên tục.
-* **Đối với Media Segments (`.m4s` dung lượng 200KB – 2MB):** Đây là các khối dữ liệu tuần tự (sequential writes) kích thước lớn, hoàn toàn trùng khớp với kích thước block của chip flash NAND. Hệ số Write Amplification Factor (WAF) xấp xỉ 1.0.
-  * Một luồng 10 Mbps sinh ra: $1.25\text{ MB/s} = 108\text{ GB/ngày}$.
-  * Một ổ SSD NVMe Enterprise 1.92TB (chuẩn 1 DWPD - Drive Writes Per Day) cho phép ghi tối đa **1,920 GB/ngày liên tục trong 5 năm**.
-  * Một luồng live chỉ chiếm **5.6%** độ bền cho phép hàng ngày của ổ đĩa. Ngay cả khi chạy 10 luồng liên tục 24/7, ổ đĩa vẫn hoạt động bền bỉ nhiều năm.
-* **Đối với Manifest (`.m3u8`, `.mpd` dung lượng vài KB):** Đây là các file nhỏ bị ghi đè (overwrite) 5 đến 10 lần mỗi giây trong Low Latency mode. Các lệnh ghi ngẫu nhiên nhỏ này gây hiện tượng phân mảnh và ép SSD phải chạy Garbage Collection liên tục, làm tăng độ trễ I/O spike.
+#### 2. Flash Endurance & Wear (SSD Flash Endurance)
+* The primary concern with SSDs is flash wear (Write Amplification) caused by continuous write cycles.
+* **For Media Segments (`.m4s` sizing 200KB – 2MB):** These are large sequential writes aligned with NAND flash block sizes. The Write Amplification Factor (WAF) approximates 1.0.
+  * A 10 Mbps stream generates: $1.25\text{ MB/s} = 108\text{ GB/day}$.
+  * An Enterprise NVMe SSD (e.g., 1.92TB @ 1 DWPD) allows **1,920 GB/day continuously for 5 years**.
+  * One live stream consumes only **5.6%** of daily drive endurance. Even 10 concurrent streams running 24/7 remain durable for years.
+* **For Manifests (`.m3u8`, `.mpd` sizing a few KB):** These small files are overwritten 5 to 10 times per second in Low Latency mode. Small random overwrites cause fragmentation and force SSD garbage collection cycles, increasing latency spikes.
 
-#### 3. NVMe SSD Là "Van Xả An Toàn" Triệt Tiêu Nguy Cơ OOM
-* Khi hệ thống bị nghẽn bộ nhớ, các trang nhớ bẩn của SSD **có thể flush xuống đĩa cứng và giải phóng khỏi RAM ngay lập tức**!
-* Bộ nhớ Page Cache của SSD là bộ nhớ có thể thu hồi (Reclaimable Memory). Ngược lại, bộ nhớ của `tmpfs` (khi không có swap) là bộ nhớ bất khả thu hồi (Unreclaimable Memory).
-* **Kết luận:** Dùng SSD làm bộ đệm segment biến nguy cơ **OOM Crash (sập hệ thống hoàn toàn)** thành **I/O Latency Tạm Thời (vẫn duy trì hoạt động)**.
+#### 3. NVMe SSD Acts as a "Safety Valve" Eliminating OOM Risks
+* Under system memory pressure, dirty SSD pages **can be flushed to physical disk and freed from RAM immediately**!
+* SSD Page Cache is reclaimable memory. Conversely, `tmpfs` pages (without swap) are completely unreclaimable.
+* **Conclusion:** Using SSDs for segment buffering converts an **OOM Crash (total system outage)** into **Transient I/O Latency (system stays alive)**.
 
 ---
 
-## 3. Đề Xuất Kiến Trúc An Toàn Cho `drmpack`
+## 3. Recommended Defensive Architecture for `drmpack`
 
-1. **Giảm mặc định `tsb` từ 1800s xuống 60s (hoặc 30s):**
-   * Giảm tức thì 97% lượng RAM tiêu thụ (từ 4.1 GB xuống ~137 MB cho luồng Dual scheme).
-   * Thêm hàm cấu hình `.with_time_shift_buffer(Duration)`.
-2. **Cơ chế Pre-flight Check:**
-   * Phát hiện nếu thư mục đầu ra là `tmpfs` có dung lượng $\le 64\text{MB}$ (Docker trap) và cảnh báo/từ chối ngay từ đầu trước khi GPAC crash.
-3. **Chủ động Reaper dọn dẹp thư mục Zombie:**
-   * Cung cấp hàm `PackagingSession::reap_orphaned_sessions()` để dọn sạch rác RAM khi process/container khởi động lại.
-4. **Hỗ trợ Storage linh hoạt:**
-   * Cho phép trỏ `output_dir` ra SSD NVMe cho các hệ thống cần buffer dài mà không lo OOM.
+1. **Reduce default `tsb` from 1800s to 60s (or 30s):**
+   * Immediately slashes 97% of RAM consumption (from 4.1 GB down to ~137 MB for Dual scheme).
+   * Add `.with_time_shift_buffer(Duration)` builder method.
+2. **Pre-flight Check Mechanism:**
+   * Detect if output directory resides on a `tmpfs` mount with $\le 64\text{MB}$ capacity (Docker trap) and warn or reject early before GPAC crashes.
+3. **Active Orphan Session Reaper:**
+   * Provide a `PackagingSession::reap_orphaned_sessions()` function to clean up zombie RAM directories on process/container restart.
+4. **Flexible Storage Configuration:**
+   * Allow configuring `output_dir` to an NVMe SSD path for workloads requiring long buffer windows without OOM vulnerability.

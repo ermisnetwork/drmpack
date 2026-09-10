@@ -8,13 +8,13 @@
 
 ## 1. Executive Summary & Direct Answers
 
-### Question 1: "Có cần thêm định danh gì đó cho segment thêm vào không?" (Do we need to add an identifier / ID / metadata attached to the incoming segment?)
+### Question 1: Do we need to add an identifier / ID / metadata attached to the incoming segment?
 **Answer:** **NO.**
 1. **Container Specification (ISO/IEC 14496-12):** The incoming fragmented MP4 (fMP4) stream is already strictly deterministic and self-identifying. Every movie fragment header (`mfhd`) contains a monotonically increasing `sequence_number` ($1, 2, 3 \dots$), and every track fragment decode time box (`tfdt`) contains `baseMediaDecodeTime` in media timescale units.
 2. **GPAC Demuxing Reality:** GPAC's demuxer (`mp4dmx`) extracts elementary stream samples from `moof`/`mdat` and reconstructs output container boxes from scratch in `mux_isom`. Any custom box (e.g. UUID, custom metadata box) injected at the container level is discarded by GPAC unless declared as a timed metadata track. Injecting in-band SEI messages into elementary streams requires NALU parsing or re-encoding, adding massive computational waste.
 3. **Deterministic Timeline Mapping:** Outgoing segments are named deterministically by GPAC's dasher filter: `video_720p_1.m4s`, `video_720p_2.m4s`, `audio_1.m4s`, etc. Segment number $N$ corresponds directly to media timeline window $[(N-1) \times \text{segdur},\, N \times \text{segdur})$. An in-memory timestamp lookup keyed by `segment_number` (a simple array or hash map) correlates ingress and egress with 100% precision and zero payload alteration.
 
-### Question 2: "Ngoài ra example đổi sang 1 cái writer gì đó push segment vào chẳng hạn" (Changing the example to use a writer or chunk feeder to push segments)
+### Question 2: Should the example switch to a writer or chunk feeder to push segments?
 **Answer:**
 1. Currently, `examples/08_in_memory_live_stream.rs` uses `tokio::io::copy(&mut stdout, &mut writer)`. While simple, `tokio::io::copy` uses an internal 8 KB buffer and treats the stream as anonymous bytes, with no visibility into when a fragment or segment boundary crosses into the packager.
 2. Replacing blind `tokio::io::copy` with a **lightweight Box Reader / Fragment Feeder** (~25 lines of async Rust) or a **Timestamping Writer** allows us to:
@@ -168,7 +168,7 @@ if let Some(n) = seg_num {
 
 ### Pattern 2: Lightweight ISOBMFF Box Framer (The Recommended Ponytail Solution)
 
-The user asked: *"ngoài ra example đổi sang 1 cái writer gì đó push segment vào chẳng hạn"* (change the example to use a writer or chunk feeder to push segments).
+The user asked whether the example could be changed to use a writer or chunk feeder to push segments.
 
 Instead of blind `tokio::io::copy`, we implement a concise, self-contained box reader function (~15 lines) that reads discrete ISOBMFF boxes from `stdout` and forwards them to `writer`.
 

@@ -23,7 +23,7 @@ An exhaustive audit of the core modules reveals that while foundational logging 
 ## 2. File-by-File Audit & Architectural Blind Spots
 
 ### 2.1. `src/error.rs`
-- **Stringly-Typed Error Variants ([`src/error.rs:8-22`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/error.rs#L8-L22)):**
+- **Stringly-Typed Error Variants ([`src/error.rs:8-22`](../../src/error.rs#L8-L22)):**
   ```rust
   #[error("Key provider error: {0}")]
   KeyProvider(String),
@@ -38,27 +38,27 @@ An exhaustive audit of the core modules reveals that while foundational logging 
   ```
   **Flaw:** Discards source error types (`#[from]`, `#[source]`). If `reqwest::Error` or `quick_xml::Error` caused a failure, the original error chain is collapsed into a formatted string, making programmatic downcasting (`error.downcast_ref::<reqwest::Error>()`) impossible.
 - **Lack of Error Codes & Diagnostic Hints:** Errors lack machine-readable discriminants (e.g., `DRM_SPEKE_AUTH_FAILED`, `DRM_GPAC_PIPE_BROKEN`, `DRM_KEY_NOT_FOUND`). An operator receiving `KeyProvider error` cannot automate alerts or implement retry policies without fragile string matching.
-- **Unstructured GPAC Crash Error ([`src/error.rs:23-27`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/error.rs#L23-L27)):**
+- **Unstructured GPAC Crash Error ([`src/error.rs:23-27`](../../src/error.rs#L23-L27)):**
   `ProcessCrashed { exit_code: Option<i32>, stderr: String }` does not distinguish between process hang/timeout, OOM killer (`SIGKILL` / exit code 137), pipe closure (`SIGPIPE` / exit code 141), filter configuration error, or segmentation fault (`SIGSEGV` / exit code 139).
-- **Session Failure String Concatenation ([`src/error.rs:149-160`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/error.rs#L149-L160)):**
+- **Session Failure String Concatenation ([`src/error.rs:149-160`](../../src/error.rs#L149-L160)):**
   `PackagingSessionFailure::fmt` joins representation errors using semicolons: `messages.join("; ")`. When ingested by log indexers (Datadog, Elastic, CloudWatch), this creates multi-megabyte unstructured string blobs that resist structured query parsing.
 
 ---
 
 ### 2.2. `src/gpac/process.rs`
-- **Missing Tracing Span Context in Spawn ([`src/gpac/process.rs:240-244`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L240-L244)):**
+- **Missing Tracing Span Context in Spawn ([`src/gpac/process.rs:240-244`](../../src/gpac/process.rs#L240-L244)):**
   ```rust
   #[instrument(skip_all, fields(output_dir = %config.output_dir.display()))]
   pub async fn spawn(config: GpacProcessConfig) -> Result<Self>
   ```
   **Flaw:** The span records ONLY `output_dir`. It is missing `session_id`, `content_id`, `scheme` (`cenc` vs `cbcs`), and PID.
-- **Detached Stderr & Supervisor Tasks ([`src/gpac/process.rs:274-306`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L274-L306), [`317-351`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L317-L351)):**
+- **Detached Stderr & Supervisor Tasks ([`src/gpac/process.rs:274-306`](../../src/gpac/process.rs#L274-L306), [`317-351`](../../src/gpac/process.rs#L317-L351)):**
   ```rust
   let stderr_handle = tokio::spawn(async move { ... });
   let supervisor_handle = tokio::spawn(async move { ... });
   ```
   **Flaw:** Neither task attaches the caller's span. Because `tokio::spawn` defaults to the root span context, every `error!(target: "gpac", "{}", trimmed)`, `warn!(target: "gpac", ...)` and `supervisor` log message is emitted completely detached from the packaging session!
-- **Stderr Ring Buffer Root-Cause Eviction ([`src/gpac/process.rs:16, 293-298`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L16)):**
+- **Stderr Ring Buffer Root-Cause Eviction ([`src/gpac/process.rs:16, 293-298`](../../src/gpac/process.rs#L16)):**
   `DEFAULT_STDERR_RING_BUFFER_CAPACITY = 64`.
   ```rust
   let mut buf = buffer_clone.lock().unwrap();
@@ -68,28 +68,28 @@ An exhaustive audit of the core modules reveals that while foundational logging 
   buf.push_back(trimmed.to_string());
   ```
   **Flaw:** In GPAC, initialization errors (e.g. `[cecrypt] Filter setup failed: Invalid key length` or `[iso file] Box moov missing`) occur at the start of execution. Subsequent filter teardown emits dozens of cascading warnings (`[dasher] Pipeline flush failed`). Purging from the front (`pop_front`) **destroys the actual root cause**, leaving only useless teardown noise in `get_recent_stderr()`.
-- **Crude Log Severity Classification ([`src/gpac/process.rs:40-51`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L40-L51)):**
+- **Crude Log Severity Classification ([`src/gpac/process.rs:40-51`](../../src/gpac/process.rs#L40-L51)):**
   Substrings `"error"`, `"failed to"`, `"fatal"` are matched case-insensitively.
   - *False Positives:* Paths containing "error" (e.g., `/tmp/drmpack_error_test/`) or normal logs containing "failed to trigger optional feature" are treated as `LogSeverity::Error`.
   - *False Negatives:* Real fatal errors such as `[cecrypt] Key not found`, `[iso file] Corrupted box`, `Cannot open file`, `Segment truncated` do not contain those keywords and default to `LogSeverity::Debug`, rendering them invisible at default log levels.
-- **Premature Stderr Drain Timeout ([`src/gpac/process.rs:346`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L346)):**
+- **Premature Stderr Drain Timeout ([`src/gpac/process.rs:346`](../../src/gpac/process.rs#L346)):**
   `tokio::time::timeout(Duration::from_millis(200), stderr_handle).await;`
   When a process crashes or is killed, 200ms is frequently insufficient under heavy I/O or CPU load to flush OS pipe buffers. Critical panic messages or sanitizers (ASan/Valgrind) are truncated.
-- **Broken Pipe Status Race Condition ([`src/gpac/process.rs:386-397`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L386-L397)):**
+- **Broken Pipe Status Race Condition ([`src/gpac/process.rs:386-397`](../../src/gpac/process.rs#L386-L397)):**
   `map_stdin_io_error` waits only 50ms for `status_rx.changed()`. If GPAC takes 60ms to terminate after closing stdin, `exit_code` is returned as `None`, masking the true exit code.
-- **Conflation of Timeout with Crash ([`src/gpac/process.rs:442-456`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/gpac/process.rs#L442-L456)):**
+- **Conflation of Timeout with Crash ([`src/gpac/process.rs:442-456`](../../src/gpac/process.rs#L442-L456)):**
   When GPAC hangs during `close_and_wait`, it is killed and mapped to `DrmpackError::ProcessCrashed`. This obscures deadlocks and pipeline freezes as simple crashes.
 
 ---
 
 ### 2.3. `src/session/mod.rs`
-- **Missing `session_id` Identity Field ([`src/session/mod.rs:47-69, 350-365`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L47-L69)):**
-  `PackagingSessionConfig` and `PackagingSession` only track `content_id: String`. An ephemeral UUID is generated inside `default_output_dir` ([line 42](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L42)), but is discarded and never stored or emitted in spans. When multiple packaging sessions run in parallel for the same stream asset or across reconnects, **log correlation between sessions is impossible**.
+- **Missing `session_id` Identity Field ([`src/session/mod.rs:47-69, 350-365`](../../src/session/mod.rs#L47-L69)):**
+  `PackagingSessionConfig` and `PackagingSession` only track `content_id: String`. An ephemeral UUID is generated inside `default_output_dir` ([line 42](../../src/session/mod.rs#L42)), but is discarded and never stored or emitted in spans. When multiple packaging sessions run in parallel for the same stream asset or across reconnects, **log correlation between sessions is impossible**.
 - **Under-Instrumented Core Lifecycle Methods:**
-  - `PackagingSession::push` ([`line 525`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L525)): `#[instrument(skip(self, bytes), fields(len = bytes.as_ref().len()))]`. Does NOT record `session_id`, `content_id`, or `scheme`.
-  - `PackagingSession::close` ([`line 621`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L621)): `#[instrument(skip(self))]`. Lacks any field context.
-  - `PackagingSession::check_status` ([`line 604`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L604)), `take_output_receiver` ([`line 449`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L449)), `writer` ([`line 487`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L487)): Totally devoid of tracing instrumentation.
-- **Silent Forwarding Task Failure in `SessionWriter` ([`src/session/mod.rs:495-510`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L495-L510)):**
+  - `PackagingSession::push` ([`line 525`](../../src/session/mod.rs#L525)): `#[instrument(skip(self, bytes), fields(len = bytes.as_ref().len()))]`. Does NOT record `session_id`, `content_id`, or `scheme`.
+  - `PackagingSession::close` ([`line 621`](../../src/session/mod.rs#L621)): `#[instrument(skip(self))]`. Lacks any field context.
+  - `PackagingSession::check_status` ([`line 604`](../../src/session/mod.rs#L604)), `take_output_receiver` ([`line 449`](../../src/session/mod.rs#L449)), `writer` ([`line 487`](../../src/session/mod.rs#L487)): Totally devoid of tracing instrumentation.
+- **Silent Forwarding Task Failure in `SessionWriter` ([`src/session/mod.rs:495-510`](../../src/session/mod.rs#L495-L510)):**
   ```rust
   let forward_task = tokio::spawn(async move {
       while let Some(bytes) = rx.recv().await {
@@ -101,7 +101,7 @@ An exhaustive audit of the core modules reveals that while foundational logging 
   });
   ```
   **Flaw:** If GPAC fails during ingest, `cluster.write_data` returns a failure, and the forward task executes `break` without logging an error! The upstream writer receives no error until much later when `BrokenPipe` is returned on a subsequent write.
-- **Un-Instrumented Watchdog Task ([`src/session/mod.rs:1252-1320`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/mod.rs#L1252-L1320)):**
+- **Un-Instrumented Watchdog Task ([`src/session/mod.rs:1252-1320`](../../src/session/mod.rs#L1252-L1320)):**
   `build_watchdog` spawns a background timer task without attaching a span. When an inactivity timeout occurs, `warn!(?timeout, "PackagingSession inactivity watchdog elapsed")` logs without `content_id` or `session_id`.
 
 ---
@@ -109,20 +109,20 @@ An exhaustive audit of the core modules reveals that while foundational logging 
 ### 2.4. `src/session/cluster.rs`
 - **Zero Tracing Across Entire Module:**
   `src/session/cluster.rs` has **0 tracing imports and 0 log statements** across all 515 lines of code!
-- **Silent Rollback in Cluster Spawn ([`src/session/cluster.rs:96-196`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/cluster.rs#L96-L196)):**
+- **Silent Rollback in Cluster Spawn ([`src/session/cluster.rs:96-196`](../../src/session/cluster.rs#L96-L196)):**
   When spawning CENC and CBCS representations, if XML generation or GPAC spawn fails on the second representation, `shutdown_representations` and `rollback_creation` execute with zero debug or info logging. An operator cannot tell from logs whether the first or second process failed.
-- **Un-Instrumented Parallel I/O Fan-Out ([`src/session/cluster.rs:199-224`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/cluster.rs#L199-L224)):**
+- **Un-Instrumented Parallel I/O Fan-Out ([`src/session/cluster.rs:199-224`](../../src/session/cluster.rs#L199-L224)):**
   `RepresentationCluster::write_data` fans out writes across CENC and CBCS using `tokio::join!`. No trace span records the write latency or byte count per scheme.
-- **Silent Peer Teardown in `abort_peers` ([`src/session/cluster.rs:334-350`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/cluster.rs#L334-L350)):**
+- **Silent Peer Teardown in `abort_peers` ([`src/session/cluster.rs:334-350`](../../src/session/cluster.rs#L334-L350)):**
   When one representation crashes (e.g. CENC), `abort_peers` kills the surviving representation (CBCS) via `SIGKILL`. There is no log emitted stating that CBCS was intentionally terminated due to peer failure, confusing operators into believing both representations crashed independently.
 
 ---
 
 ### 2.5. `src/session/harvester.rs`
-- **Import Limitation ([`src/session/harvester.rs:10`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/harvester.rs#L10)):**
+- **Import Limitation ([`src/session/harvester.rs:10`](../../src/session/harvester.rs#L10)):**
   Only `use tracing::warn;` is imported. No `info`, `debug`, `error`, or `instrument`.
 - **Epidemic of Silent Failures in `harvest_target`:**
-  - *Directory Traversal Failure ([`line 302-305`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/harvester.rs#L302-L305)):*
+  - *Directory Traversal Failure ([`line 302-305`](../../src/session/harvester.rs#L302-L305)):*
     ```rust
     let mut read_dir = match tokio::fs::read_dir(dir).await {
         Ok(d) => d,
@@ -130,15 +130,15 @@ An exhaustive audit of the core modules reveals that while foundational logging 
     };
     ```
     If permissions change or Ramdisk fails, the harvester silently ignores it.
-  - *File Metadata Failure ([`line 312-315, 341`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/harvester.rs#L312-L315)):*
+  - *File Metadata Failure ([`line 312-315, 341`](../../src/session/harvester.rs#L312-L315)):*
     Silently skips files with `Err(_) => continue`.
-  - *Manifest & Segment Read Failure ([`line 356, 409`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/harvester.rs#L356)):*
+  - *Manifest & Segment Read Failure ([`line 356, 409`](../../src/session/harvester.rs#L356)):*
     `if let Ok(bytes) = tokio::fs::read(&path).await` silently drops read failures.
-  - *Corrupted/Truncated ISOBMFF Segments ([`line 414-419`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/harvester.rs#L414-L419)):*
+  - *Corrupted/Truncated ISOBMFF Segments ([`line 414-419`](../../src/session/harvester.rs#L414-L419)):*
     If GPAC emits a malformed segment missing `moof` or `mdat`, `is_complete_isobmff_media_segment` returns `false`. **The file is silently left in the directory, never emitted, never logged, and never retried.** This causes an invisible live-edge freeze.
-  - *Unlinking Failures ([`line 459, 510`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/harvester.rs#L459)):*
+  - *Unlinking Failures ([`line 459, 510`](../../src/session/harvester.rs#L459)):*
     `let _ = tokio::fs::remove_file(&path).await;` completely swallows filesystem deletion errors, leading to undetected Ramdisk exhaustion.
-  - *Receiver Disconnect Silence ([`line 592`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/session/harvester.rs#L592)):*
+  - *Receiver Disconnect Silence ([`line 592`](../../src/session/harvester.rs#L592)):*
     When the channel receiver is dropped, the harvester exits immediately with `return;`, leaving no trace why harvesting halted.
 - **Zero Artifact Telemetry:**
   When segments (`PackagedArtifact`, lines 456, 503) are harvested and sent, no tracing event is emitted. Operators have zero visibility into segment emission rate, segment sequence numbers, chunk sizes, or egress latency.
@@ -147,9 +147,9 @@ An exhaustive audit of the core modules reveals that while foundational logging 
 
 ### 2.6. `src/speke/client.rs`
 - **Zero Tracing Instrumentation:**
-  `src/speke/client.rs` imports `std::fmt`, but **zero tracing macros**. Neither `raw_exchange` ([line 154](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/speke/client.rs#L154)) nor `fetch_keys` ([line 214](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/speke/client.rs#L214)) creates a trace span or logs HTTP exchange metrics (duration, status code, response length).
+  `src/speke/client.rs` imports `std::fmt`, but **zero tracing macros**. Neither `raw_exchange` ([line 154](../../src/speke/client.rs#L154)) nor `fetch_keys` ([line 214](../../src/speke/client.rs#L214)) creates a trace span or logs HTTP exchange metrics (duration, status code, response length).
 - **Missing Diagnostic Headers & Correlation IDs:**
-  In `format_error_detail` ([lines 46-79](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/speke/client.rs#L46-L79)), the client checks `x-amzn-errortype`, `x-speke-error-message`, and `x-axdrm-errormessage`. However, it completely ignores:
+  In `format_error_detail` ([lines 46-79](../../src/speke/client.rs#L46-L79)), the client checks `x-amzn-errortype`, `x-speke-error-message`, and `x-axdrm-errormessage`. However, it completely ignores:
   - `x-amzn-requestid` / `x-request-id`: Required for filing AWS support tickets.
   - `x-amzn-trace-id`: Required for AWS X-Ray distributed trace propagation.
   - `retry-after`: Critical for handling 429 / 503 rate limits gracefully.
@@ -160,16 +160,16 @@ An exhaustive audit of the core modules reveals that while foundational logging 
 
 ### 2.7. `src/vendor/axinom/provider.rs`
 - **Zero Tracing Instrumentation:**
-  `src/vendor/axinom/provider.rs` contains **0 tracing calls**. Multi-scheme key fetching ([line 72](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/vendor/axinom/provider.rs#L72)) makes sequential network requests without logging the scheme or response duration.
-- **Collapsing Axinom Error Details ([`line 115`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/vendor/axinom/provider.rs#L115)):**
+  `src/vendor/axinom/provider.rs` contains **0 tracing calls**. Multi-scheme key fetching ([line 72](../../src/vendor/axinom/provider.rs#L72)) makes sequential network requests without logging the scheme or response duration.
+- **Collapsing Axinom Error Details ([`line 115`](../../src/vendor/axinom/provider.rs#L115)):**
   Axinom key exchange failures discard structured diagnostic information and format strings into `DrmpackError::KeyProvider`. Axinom-specific response headers such as `X-AxDRM-Version` are unrecorded.
 
 ---
 
 ### 2.8. `src/license/proxy.rs`
 - **Zero Tracing Instrumentation:**
-  `proxy_license_post` ([line 272](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/license/proxy.rs#L272)) and `handle_fairplay_certificate` ([line 186](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/license/proxy.rs#L186)) contain **0 tracing statements**. In live production, license proxy round-trip latency directly dictates playback start time (Time-to-First-Frame) and license acquisition success rate. Operating without tracing spans here is a major observability blind spot.
-- **Single-Vendor Header Limitation in Error Parser ([`src/license/proxy.rs:377-380`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/license/proxy.rs#L377-L380)):**
+  `proxy_license_post` ([line 272](../../src/license/proxy.rs#L272)) and `handle_fairplay_certificate` ([line 186](../../src/license/proxy.rs#L186)) contain **0 tracing statements**. In live production, license proxy round-trip latency directly dictates playback start time (Time-to-First-Frame) and license acquisition success rate. Operating without tracing spans here is a major observability blind spot.
+- **Single-Vendor Header Limitation in Error Parser ([`src/license/proxy.rs:377-380`](../../src/license/proxy.rs#L377-L380)):**
   ```rust
   let diagnostic = headers
       .get("x-axdrm-errormessage")
@@ -177,7 +177,7 @@ An exhaustive audit of the core modules reveals that while foundational logging 
       .filter(|s| !s.is_empty());
   ```
   **Flaw:** `parse_license_error_response` ONLY inspects `x-axdrm-errormessage`. If the proxy is used with AWS SPEKE, BuyDRM, EZDRM, or PallyCon, error headers such as `x-speke-error-message` and `x-amzn-errortype` are ignored, causing diagnostic messages to degrade into generic status codes.
-- **Hardcoded Vendor Header on Request ([`src/license/proxy.rs:333`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/license/proxy.rs#L333)):**
+- **Hardcoded Vendor Header on Request ([`src/license/proxy.rs:333`](../../src/license/proxy.rs#L333)):**
   `req = req.header("X-AxDRM-Message", trimmed_token);` hardcodes the Axinom token header regardless of upstream DRM provider.
 - **Lack of Request Redaction Wrapper:**
   `auth_token` is passed as a raw string slice without a dedicated wrapper preventing accidental formatting in loggers.
@@ -185,7 +185,7 @@ An exhaustive audit of the core modules reveals that while foundational logging 
 ---
 
 ### 2.9. `src/key/mod.rs` & `src/key/raw.rs`
-- **Critical Secret Leak Vulnerability in `StaticKeySource` ([`src/key/raw.rs:8-13`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/key/raw.rs#L8-L13)):**
+- **Critical Secret Leak Vulnerability in `StaticKeySource` ([`src/key/raw.rs:8-13`](../../src/key/raw.rs#L8-L13)):**
   ```rust
   #[derive(Debug, Clone, Default)]
   pub struct StaticKeySource {
@@ -195,7 +195,7 @@ An exhaustive audit of the core modules reveals that while foundational logging 
   }
   ```
   **Vulnerability:** `StaticKeySource` derives standard `Debug`. While `ContentKey` custom-implements `Debug` to redact keys, `shared_fallback: Option<(KeyID, [u8; 16])>` uses the standard library's `Debug` for `[u8; 16]`. Any call to `format!("{:?}", static_key_source)` **leaks raw 128-bit key bytes in plaintext to logs**!
-- **Serde Secret Leak Risk on `ContentKey` ([`src/key/mod.rs:51-59`](file:///Users/trungdt/Workspace/work/ermis/ermis-stream/drmpack/src/key/mod.rs#L51-L59)):**
+- **Serde Secret Leak Risk on `ContentKey` ([`src/key/mod.rs:51-59`](../../src/key/mod.rs#L51-L59)):**
   ```rust
   #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
   pub struct ContentKey {

@@ -39,8 +39,8 @@ gpac -i tcp://localhost:5020/:gpac:tsprobe=true:listen=false reframer:rt=on \
 ### Verdict: ADR misattributed both bugs
 
 `docs/knowledge/gpac-direct-output-and-streaming-sinks.md` also contains an inaccurate description:
-> "Trong các phiên live kéo dài nhiều ngày, việc duy trì HTTP client push liên tục
-> có hiện tượng tích lũy bộ nhớ nếu máy chủ nhận phản hồi chậm..."
+> "During multi-day live sessions, maintaining continuous HTTP client push
+> exhibits memory accumulation if the receiving server responds slowly..."
 
 This sentence was **hallucinated/conflated** — Issue #2923 makes no mention of HTTP push or HTTP responses.
 

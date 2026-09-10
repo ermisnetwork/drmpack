@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Lesson 3 — Luồng Data End-to-End trong drmpack</title>
+  <title>Lesson 3 — End-to-End Data Flow in drmpack</title>
   <link rel="stylesheet" href="../assets/style.css">
   <style>
     .flow-step {
@@ -81,67 +81,67 @@
 <body>
 <div class="container">
 
-<h1>Lesson 3 — Luồng Data End-to-End</h1>
-<p><em>Mục tiêu:</em> Hiểu toàn bộ hành trình của media bytes từ khi đi vào <code>drmpack</code> cho đến khi ra ngoài dưới dạng encrypted segments — sẵn sàng để phát trên player.</p>
+<h1>Lesson 3 — End-to-End Data Flow</h1>
+<p><em>Objective:</em> Understand the complete lifecycle of media bytes from ingestion into <code>drmpack</code> until emission as encrypted segments — ready for playback on player clients.</p>
 
 <div class="analogy">
-  <strong>🍕 Ví von nhà bếp:</strong> Hãy tưởng tượng <code>drmpack</code> là một nhà bếp pizza tự động:
+  <strong>🍕 The Pizza Kitchen Analogy:</strong> Think of <code>drmpack</code> as an automated pizza kitchen:
   <ul>
-    <li>Bạn đưa <strong>bột pizza</strong> (media bytes) vào băng chuyền</li>
-    <li>Nhà bếp gọi điện lấy <strong>công thức mật</strong> (DRM keys) từ nhà cung cấp</li>
-    <li>Lò nướng (<strong>GPAC</strong>) cắt nhỏ thành miếng và niêm phong mỗi miếng bằng ổ khóa riêng</li>
-    <li>Nhân viên giao hàng (<strong>Harvester</strong>) đợi pizza ra lò, kiểm tra chất lượng, rồi đặt lên xe giao hàng (<strong>output channel</strong>)</li>
+    <li>You feed <strong>pizza dough</strong> (media bytes) onto the conveyor belt</li>
+    <li>The kitchen calls to fetch the <strong>secret recipe</strong> (DRM keys) from the vendor</li>
+    <li>The oven (<strong>GPAC</strong>) slices it into pieces and seals each slice with its own lock</li>
+    <li>The delivery courier (<strong>Harvester</strong>) waits for pizza to emerge, checks quality, and loads it onto the delivery truck (<strong>output channel</strong>)</li>
   </ul>
 </div>
 
-<h2>Tổng quan: 6 bước</h2>
+<h2>Overview: 5 Steps</h2>
 
 <div class="box-diagram">Media bytes (fMP4)
        │
        ▼
   ┌─────────────────────────────┐
-  │  ① PackagingSession::push() │  ← Nhận media bytes
+  │  ① PackagingSession::push() │  ← Ingest media bytes
   └──────────────┬──────────────┘
                  │
        ▼ fan-out (CENC / CBCS)
   ┌─────────────────────────────┐
-  │  ② KeyProvider::fetch_keys()│  ← Lấy encryption keys từ DRM vendor
+  │  ② KeyProvider::fetch_keys()│  ← Fetch encryption keys from DRM vendor
   └──────────────┬──────────────┘
                  │
        ▼ keys → XML config
   ┌─────────────────────────────┐
-  │  ③ GPAC cecrypt + dasher    │  ← Mã hóa + cắt segment + tạo manifest
+  │  ③ GPAC cecrypt + dasher    │  ← Encrypt + slice segments + generate manifests
   └──────────────┬──────────────┘
                  │
        ▼ .m4s + .m3u8 + .mpd → disk
   ┌─────────────────────────────┐
-  │  ④ Harvester::harvest()     │  ← Đọc segments từ disk khi HLS manifest xác nhận
+  │  ④ Harvester::harvest()     │  ← Read segments from disk when verified by HLS manifest
   └──────────────┬──────────────┘
                  │
        ▼ Bytes → mpsc channel
   ┌─────────────────────────────┐
-  │  ⑤ PackagedArtifact → rx    │  ← Consumer nhận qua async channel
+  │  ⑤ PackagedArtifact → rx    │  ← Consumer receives via async channel
   └─────────────────────────────┘</div>
 
-<h2>Chi tiết từng bước</h2>
+<h2>Step-by-Step Breakdown</h2>
 
 <!-- STEP 1 -->
 <div class="flow-step">
   <span class="step-num">1</span>
-  <h3>Input — Nhận media bytes</h3>
+  <h3>Input — Media Bytes Ingestion</h3>
   <span class="file-ref">src/session/mod.rs → push() → push_data()</span>
 
-  <p>Consumer (media-server) gọi <code>session.push(bytes)</code> truyền vào raw <strong>fragmented MP4</strong> (fMP4) — đã được encode bằng ffmpeg hoặc encoder khác. Bytes chứa các ISO-BMFF box: <code>ftyp</code>, <code>moov</code>, <code>moof</code>, <code>mdat</code>.</p>
+  <p>The consumer (such as a media server) calls <code>session.push(bytes)</code>, passing in raw <strong>fragmented MP4</strong> (fMP4) data — previously encoded using FFmpeg or another video encoder. The bytes contain ISO-BMFF boxes: <code>ftyp</code>, <code>moov</code>, <code>moof</code>, <code>mdat</code>.</p>
 
-  <p><code>push()</code> làm 3 việc:</p>
+  <p><code>push()</code> performs three key actions:</p>
   <ol>
-    <li>Scan bytes tìm <code>b"moof"</code> → đánh dấu "đã có media thật"</li>
-    <li>Gọi <code>harvester.ping()</code> → đánh thức Harvester ngay (không đợi 200ms tick)</li>
-    <li>Gọi <code>cluster.write_data(bytes)</code> → fan-out tới mọi Representation</li>
+    <li>Scans bytes for <code>b"moof"</code> → marks that actual media data has arrived</li>
+    <li>Calls <code>harvester.ping()</code> → wakes the Harvester immediately (without waiting for the 200ms tick)</li>
+    <li>Calls <code>cluster.write_data(bytes)</code> → fans out the stream across every active Representation</li>
   </ol>
 
   <div class="callout">
-    <strong>Fan-out là gì?</strong> Nếu bạn dùng <code>EncryptionScheme::Dual</code>, cùng 1 luồng media sẽ được gửi đồng thời tới 2 GPAC process: một mã hóa bằng CENC (AES-CTR), một bằng CBCS (AES-CBC pattern). Mỗi process là một <strong>Representation</strong>.
+    <strong>What is Fan-out?</strong> If you configure <code>EncryptionScheme::Dual</code>, the exact same media stream is pushed simultaneously into two separate GPAC processes: one encrypting with CENC (AES-CTR), and the other with CBCS (AES-CBC 1:9 pattern). Each process represents a distinct <strong>Representation</strong>.
   </div>
 </div>
 
@@ -150,39 +150,39 @@
 <!-- STEP 2 -->
 <div class="flow-step">
   <span class="step-num">2</span>
-  <h3>Key Acquisition — Lấy khóa mã hóa</h3>
+  <h3>Key Acquisition — Fetching Encryption Keys</h3>
   <span class="file-ref">src/key/policy.rs → KeyPolicyEngine::plan() → fetch_keys() → resolve()</span>
 
-  <p>Bước này xảy ra <strong>trước khi push()</strong>, trong <code>PackagingSession::create()</code>. Gồm 3 pha:</p>
+  <p>This step occurs <strong>before push()</strong>, inside <code>PackagingSession::create()</code>. It consists of three phases:</p>
 
   <table>
-    <tr><th>Pha</th><th>Làm gì</th><th>Output</th></tr>
+    <tr><th>Phase</th><th>Action</th><th>Output</th></tr>
     <tr>
       <td><strong>Plan</strong></td>
-      <td><code>KeyPolicyEngine::plan()</code> nhìn vào danh sách Rendition + KeyMappingPolicy để quyết định cần bao nhiêu key</td>
-      <td><code>KeyPlan</code> — chứa <code>KeyRequest</code></td>
+      <td><code>KeyPolicyEngine::plan()</code> inspects the Renditions list + KeyMappingPolicy to determine how many keys are required</td>
+      <td><code>KeyPlan</code> — containing <code>KeyRequest</code></td>
     </tr>
     <tr>
       <td><strong>Fetch</strong></td>
-      <td>Gọi <code>provider.fetch_keys(request)</code>. Provider có thể là:
+      <td>Calls <code>provider.fetch_keys(request)</code>. The provider can be:
         <ul style="margin:0.3rem 0">
-          <li><code>RawKeyProvider</code> — key cứng, dùng cho test</li>
-          <li><code>CpixProvider</code> — gửi CPIX XML qua HTTP POST</li>
-          <li><code>SpekeV2Provider</code> — gửi SPEKE v2 qua HTTPS</li>
-          <li><code>AxinomProvider</code> — adapter cho Axinom Key Service</li>
+          <li><code>RawKeyProvider</code> — static hardcoded keys, ideal for tests</li>
+          <li><code>CpixProvider</code> — CPIX XML via HTTP POST</li>
+          <li><code>SpekeV2Provider</code> — SPEKE v2 via authenticated HTTPS</li>
+          <li><code>AxinomProvider</code> — adapter for Axinom Key Service</li>
         </ul>
       </td>
-      <td><code>KeySet</code> — chứa <code>ContentKey</code>(s) + <code>PsshData</code></td>
+      <td><code>KeySet</code> — containing <code>ContentKey</code>(s) + <code>PsshData</code></td>
     </tr>
     <tr>
       <td><strong>Resolve</strong></td>
-      <td><code>KeyPolicyEngine::resolve()</code> map mỗi key về đúng Rendition theo policy</td>
-      <td>Mỗi Rendition có key + KID riêng</td>
+      <td><code>KeyPolicyEngine::resolve()</code> maps each key to its corresponding Rendition according to policy</td>
+      <td>Each Rendition receives its dedicated key + KID</td>
     </tr>
   </table>
 
   <div class="callout">
-    <strong>ContentKey là gì?</strong> Một AES-128 key (16 bytes) + một KeyID (UUID). KeyID xuất hiện trong PSSH box và manifest DRM signaling để player biết cần xin license cho key nào.
+    <strong>What is a ContentKey?</strong> An AES-128 key (16 bytes) paired with a KeyID (UUID). The KeyID is included in PSSH boxes and manifest DRM signaling so video players know which license key to request from the license server.
   </div>
 </div>
 
@@ -191,12 +191,12 @@
 <!-- STEP 3 -->
 <div class="flow-step">
   <span class="step-num">3</span>
-  <h3>Encryption — GPAC mã hóa + đóng gói</h3>
+  <h3>Encryption — GPAC Encryption & Packaging</h3>
   <span class="file-ref">src/gpac/xml.rs → generate() | src/gpac/process.rs → spawn()</span>
 
-  <p>Đây là bước nặng nhất — nhưng <code>drmpack</code> không tự mã hóa! Nó giao cho <strong>GPAC</strong> (binary bên ngoài) chạy như subprocess.</p>
+  <p>This is the heaviest step — but <code>drmpack</code> does not encrypt media bytes itself! It delegates execution to an external <strong>GPAC</strong> binary running as an orchestrated subprocess.</p>
 
-  <p><strong>Trước khi GPAC chạy</strong>, drmpack tạo 1 file XML chứa thông tin mã hóa:</p>
+  <p><strong>Before GPAC spawns</strong>, drmpack generates an XML configuration file describing DRM and crypt tracks:</p>
 
 <pre>&lt;DRMInfo type="pssh" value="..."&gt;
   &lt;BS ID128="edef8ba9-..." /&gt;  &lt;!-- Widevine System ID --&gt;
@@ -206,19 +206,19 @@
   &lt;key KID="01020304-..." value="QUJDRA...==" /&gt;
 &lt;/CrypTrack&gt;</pre>
 
-  <p><strong>GPAC filter chain</strong> (3 filter nối tiếp):</p>
+  <p><strong>GPAC filter chain</strong> (3 chained filters):</p>
 
 <pre>stdin:ext=mp4    →    cecrypt:cfile=drm.xml    →    dasher:live.mpd
-  (đọc fMP4)           (mã hóa AES)                 (cắt segment + manifest)</pre>
+  (read fMP4)          (AES encryption)             (segmentation & manifests)</pre>
 
-  <p>Giải thích:</p>
+  <p>Filter breakdown:</p>
   <ol>
-    <li><strong>stdin filter</strong> — đọc fMP4 từ pipe (drmpack ghi vào qua <code>BufWriter&lt;ChildStdin&gt;</code>)</li>
-    <li><strong>cecrypt filter</strong> — mã hóa mỗi media sample bằng AES-128 theo mode CENC hoặc CBCS</li>
-    <li><strong>dasher filter</strong> — cắt thành segment <code>.m4s</code> (mỗi 2s), tạo <code>init.mp4</code>, viết manifest <code>.m3u8</code> (HLS) và <code>.mpd</code> (DASH)</li>
+    <li><strong>stdin filter</strong> — reads fMP4 from the stdin pipe (drmpack writes via <code>BufWriter&lt;ChildStdin&gt;</code>)</li>
+    <li><strong>cecrypt filter</strong> — encrypts each media sample using AES-128 in CENC or CBCS mode</li>
+    <li><strong>dasher filter</strong> — segments stream into <code>.m4s</code> chunks (e.g. 2s), generates <code>init.mp4</code>, and updates manifests: <code>.m3u8</code> (HLS) and <code>.mpd</code> (DASH)</li>
   </ol>
 
-  <p>Output ghi ra <strong>staging directory</strong> (thường là <code>/tmp</code> hoặc ramdisk).</p>
+  <p>Artifacts are written into the designated <strong>staging directory</strong> (typically a temporary path or ramdisk).</p>
 </div>
 
 <p class="arrow-down">⬇</p>
@@ -226,24 +226,24 @@
 <!-- STEP 4 -->
 <div class="flow-step">
   <span class="step-num">4</span>
-  <h3>Harvesting — Thu hoạch segment từ disk</h3>
+  <h3>Harvesting — Collecting Segments from Disk</h3>
   <span class="file-ref">src/session/harvester.rs → harvest_target()</span>
 
-  <p>Harvester chạy background, tick mỗi <strong>200ms</strong>. Mỗi tick nó:</p>
+  <p>The Harvester runs as an async background task, ticking every <strong>200ms</strong>. On each tick it:</p>
   <ol>
-    <li>Quét staging directory tìm file <code>.m3u8</code>, <code>.mpd</code>, <code>.m4s</code>, <code>init.mp4</code></li>
-    <li>Đọc HLS manifest, parse segment filenames vào <code>HashSet</code></li>
-    <li>Với mỗi <code>.m4s</code> file: kiểm tra tên có trong HLS manifest không? (<strong>Manifest-Driven Readiness</strong>)</li>
-    <li>Nếu có → đọc file, kiểm tra ISO-BMFF box (<code>moof</code> + <code>mdat</code>) đầy đủ → emit</li>
-    <li><strong>Xoá file khỏi disk</strong> ngay sau khi đọc vào memory (<strong>Ephemeral Staging</strong>)</li>
+    <li>Scans the staging directory for <code>.m3u8</code>, <code>.mpd</code>, <code>.m4s</code>, and <code>init.mp4</code> files</li>
+    <li>Reads the HLS manifest and parses ready segment filenames into a <code>HashSet</code></li>
+    <li>For each <code>.m4s</code> file: checks if the filename is listed in the HLS manifest (<strong>Manifest-Driven Readiness</strong>)</li>
+    <li>If verified → reads the file, verifies ISO-BMFF box integrity (<code>moof</code> + <code>mdat</code>) → emits the artifact</li>
+    <li><strong>Deletes the file from disk</strong> immediately after buffering into memory (<strong>Ephemeral Staging</strong>)</li>
   </ol>
 
   <div class="callout">
-    <strong>Tại sao cần Manifest-Driven Readiness?</strong> GPAC ghi segment ra disk <em>trong khi đang ghi</em>. Nếu Harvester đọc file trước khi GPAC ghi xong → nhận được segment bị cắt nửa chừng → player crash. Giải pháp: chỉ đọc khi HLS manifest xác nhận segment đã hoàn chỉnh.
+    <strong>Why Manifest-Driven Readiness?</strong> GPAC writes segment files incrementally to disk. If the Harvester reads a file while GPAC is still writing to it, the segment would be incomplete and corrupted, causing downstream video players to crash. Manifest-Driven Readiness ensures segments are only harvested once listed in the HLS playlist, confirming completion.
   </div>
 
   <div class="callout">
-    <strong>Init segment là ngoại lệ.</strong> Init segment (<code>video_720p_init.mp4</code>) nhỏ (~1KB), GPAC ghi atomic. Nó bypass manifest readiness và chỉ cần qua ISOBMFF completeness check (<code>ftyp</code> + <code>moov</code> box).
+    <strong>Init segment is an exception.</strong> The init segment (<code>video_720p_init.mp4</code>) is small (~1KB) and written atomically by GPAC. It bypasses manifest readiness checks and only requires ISO-BMFF completeness verification (<code>ftyp</code> + <code>moov</code> boxes).
   </div>
 </div>
 
@@ -252,10 +252,10 @@
 <!-- STEP 5 -->
 <div class="flow-step">
   <span class="step-num">5</span>
-  <h3>Output — Giao segment cho consumer</h3>
+  <h3>Output — Segment Delivery to Consumer</h3>
   <span class="file-ref">src/types.rs → PackagedArtifact | src/session/mod.rs → take_output_receiver()</span>
 
-  <p>Harvester wrap bytes vào <code>PackagedArtifact</code>:</p>
+  <p>The Harvester wraps buffer bytes into a <code>PackagedArtifact</code> struct:</p>
 
 <pre>PackagedArtifact {
     filename: "video_720p_1.m4s",
@@ -264,20 +264,20 @@
     scheme: EncryptionScheme::Cbcs,
 }</pre>
 
-  <p>Rồi gửi qua <code>mpsc::channel(1024)</code>. Consumer nhận bằng:</p>
+  <p>Then delivers it across an async bounded channel <code>mpsc::channel(1024)</code>. The consumer receives items via:</p>
 
 <pre>let mut rx = session.take_output_receiver().unwrap();
 while let Some(artifact) = rx.recv().await {
-    // Upload artifact.data lên S3, CDN, hoặc serve qua HTTP
+    // Upload artifact.data to S3, CDN, or serve via HTTP
 }</pre>
 
-  <p>Khi <code>session.close()</code> được gọi → stdin EOF → GPAC flush → Harvester chạy final pass → channel đóng → <code>rx.recv()</code> trả <code>None</code>.</p>
+  <p>When <code>session.close()</code> is called → stdin EOF is signaled → GPAC flushes remaining frames → Harvester performs its final harvest pass → the output channel is dropped → <code>rx.recv()</code> yields <code>None</code>.</p>
 </div>
 
-<h2>Tổng kết</h2>
+<h2>Summary</h2>
 
 <table>
-  <tr><th>Bước</th><th>Module</th><th>Ai làm việc nặng</th><th>I/O</th></tr>
+  <tr><th>Step</th><th>Module</th><th>Heavy Lifter</th><th>I/O</th></tr>
   <tr><td>① Input</td><td><code>session</code></td><td>drmpack</td><td>Pipe write</td></tr>
   <tr><td>② Keys</td><td><code>key + cpix/speke/vendor</code></td><td>DRM vendor HTTP API</td><td>Network</td></tr>
   <tr><td>③ Encrypt</td><td><code>gpac</code></td><td>GPAC subprocess</td><td>Pipe read + disk write</td></tr>
@@ -287,29 +287,29 @@ while let Some(artifact) = rx.recv().await {
 
 <!-- QUIZ -->
 <div class="quiz">
-  <h3>🧠 Kiểm tra hiểu biết</h3>
+  <h3>🧠 Knowledge Check</h3>
 
-  <p><strong>Q1: Tại sao Harvester không đọc segment ngay khi thấy file <code>.m4s</code> trên disk?</strong></p>
-  <label><input type="radio" name="q1" onclick="document.getElementById('a1w').style.display='none';document.getElementById('a1c').style.display='block'"> Vì GPAC có thể đang ghi dở — file chưa hoàn chỉnh</label>
-  <label><input type="radio" name="q1" onclick="document.getElementById('a1c').style.display='none';document.getElementById('a1w').style.display='block'"> Vì file cần được mã hóa trước</label>
-  <label><input type="radio" name="q1" onclick="document.getElementById('a1c').style.display='none';document.getElementById('a1w').style.display='block'"> Vì cần đợi key từ DRM vendor</label>
-  <div id="a1c" class="answer correct">✅ Đúng! GPAC ghi segment ra disk incrementally. Đọc trước khi ghi xong = nhận segment cắt nửa chừng. HLS manifest chỉ list segment SAU KHI GPAC ghi xong → đó là tín hiệu an toàn.</div>
-  <div id="a1w" class="answer wrong">❌ Sai. Keys đã được fetch trước khi GPAC chạy, và file đã được mã hóa rồi. Vấn đề là file có thể đang được ghi dở bởi GPAC.</div>
+  <p><strong>Q1: Why doesn't the Harvester read a segment the moment an <code>.m4s</code> file appears on disk?</strong></p>
+  <label><input type="radio" name="q1" onclick="document.getElementById('a1w').style.display='none';document.getElementById('a1c').style.display='block'"> Because GPAC may still be writing — the segment file is incomplete</label>
+  <label><input type="radio" name="q1" onclick="document.getElementById('a1c').style.display='none';document.getElementById('a1w').style.display='block'"> Because the file must be encrypted first</label>
+  <label><input type="radio" name="q1" onclick="document.getElementById('a1c').style.display='none';document.getElementById('a1w').style.display='block'"> Because it must wait for keys from the DRM vendor</label>
+  <div id="a1c" class="answer correct">✅ Correct! GPAC writes segments to disk incrementally. Reading before completion results in truncated, corrupted segments. The HLS manifest only lists segments AFTER GPAC finishes writing them → making it the reliable signal.</div>
+  <div id="a1w" class="answer wrong">❌ Incorrect. Keys are fetched before GPAC spawns, and encryption happens on the fly. The issue is that the file is still being written to disk by GPAC.</div>
 
-  <p><strong>Q2: drmpack tự mã hóa media bằng AES không?</strong></p>
-  <label><input type="radio" name="q2" onclick="document.getElementById('a2w').style.display='none';document.getElementById('a2c').style.display='block'"> Không — nó giao cho GPAC subprocess làm</label>
-  <label><input type="radio" name="q2" onclick="document.getElementById('a2c').style.display='none';document.getElementById('a2w').style.display='block'"> Có — dùng thư viện ring trong Rust</label>
-  <div id="a2c" class="answer correct">✅ Đúng! drmpack chỉ orchestrate: lấy key, tạo XML config, spawn GPAC, rồi thu hoạch output. GPAC cecrypt filter làm việc mã hóa thật sự.</div>
-  <div id="a2w" class="answer wrong">❌ Sai. <code>ring</code> chỉ là dev-dependency dùng cho test. drmpack không tự mã hóa — nó giao cho GPAC binary bên ngoài.</div>
+  <p><strong>Q2: Does drmpack perform AES encryption internally?</strong></p>
+  <label><input type="radio" name="q2" onclick="document.getElementById('a2w').style.display='none';document.getElementById('a2c').style.display='block'"> No — it delegates encryption to the GPAC subprocess</label>
+  <label><input type="radio" name="q2" onclick="document.getElementById('a2c').style.display='none';document.getElementById('a2w').style.display='block'"> Yes — using the Rust ring library</label>
+  <div id="a2c" class="answer correct">✅ Correct! drmpack acts as an orchestrator: fetching keys, generating XML configs, spawning GPAC, and harvesting outputs. GPAC's cecrypt filter performs the actual encryption.</div>
+  <div id="a2w" class="answer wrong">❌ Incorrect. <code>ring</code> is only a dev-dependency used in test mocks. drmpack delegates all media encryption to the external GPAC binary.</div>
 
-  <p><strong>Q3: Khi dùng <code>EncryptionScheme::Dual</code>, chuyện gì xảy ra?</strong></p>
-  <label><input type="radio" name="q3" onclick="document.getElementById('a3w').style.display='none';document.getElementById('a3c').style.display='block'"> Cùng 1 media được gửi tới 2 GPAC process, mỗi cái mã hóa bằng scheme khác nhau</label>
-  <label><input type="radio" name="q3" onclick="document.getElementById('a3c').style.display='none';document.getElementById('a3w').style.display='block'"> GPAC mã hóa 2 lần tuần tự trong cùng 1 process</label>
-  <div id="a3c" class="answer correct">✅ Đúng! RepresentationCluster fan-out media tới 2 GPAC process đồng thời: một CENC (AES-CTR), một CBCS (AES-CBC 1:9 pattern). Output riêng biệt.</div>
-  <div id="a3w" class="answer wrong">❌ Sai. Dual mode spawn 2 GPAC process song song, không phải tuần tự trong 1 process.</div>
+  <p><strong>Q3: When using <code>EncryptionScheme::Dual</code>, what occurs?</strong></p>
+  <label><input type="radio" name="q3" onclick="document.getElementById('a3w').style.display='none';document.getElementById('a3c').style.display='block'"> The same media stream is fanned out to two GPAC processes, each encrypting under a different scheme</label>
+  <label><input type="radio" name="q3" onclick="document.getElementById('a3c').style.display='none';document.getElementById('a3w').style.display='block'"> GPAC encrypts twice sequentially in the same process</label>
+  <div id="a3c" class="answer correct">✅ Correct! RepresentationCluster fans out the media stream to two GPAC processes in parallel: one for CENC (AES-CTR) and one for CBCS (AES-CBC 1:9 pattern), emitting separate outputs.</div>
+  <div id="a3w" class="answer wrong">❌ Incorrect. Dual mode spawns two independent GPAC processes concurrently, not sequentially in one process.</div>
 </div>
 
-<h2>Đọc thêm</h2>
+<h2>Further Reading</h2>
 <ul>
   <li><a href="./0001-tracer-cenc-hls-deep-dive.html">Lesson 1 — CENC + HLS Deep Dive</a></li>
   <li><a href="./0002-ll-cmaf-cbcs-multidrm-deep-dive.html">Lesson 2 — LL-CMAF + CBCS Multi-DRM</a></li>
@@ -318,7 +318,7 @@ while let Some(artifact) = rx.recv().await {
 </ul>
 
 <div class="footer">
-  <p>Có gì chưa hiểu? Hỏi agent — mình là giáo viên của bạn và có thể giải thích sâu hơn bất kỳ bước nào. 🎓</p>
+  <p>Questions or need clarification? Ask your AI agent — ready to dive deeper into any step of the pipeline. 🎓</p>
   <p><em>drmpack learning workspace · Lesson 3 · 2026-09-08</em></p>
 </div>
 

@@ -1,8 +1,8 @@
-## 1. Tổng quan
+## 1. Overview
 
-DRM bảo vệ media bằng cách **mã hóa video/audio bằng một Content Key**, sau đó chỉ cung cấp Content Key đó cho thiết bị được phép phát thông qua một **DRM License**.
+DRM protects media by **encrypting video/audio with a Content Key**, and subsequently providing that Content Key only to authorized playback devices through a **DRM License**.
 
-Toàn bộ hệ thống chia thành hai giai đoạn:
+The entire architecture is divided into two distinct phases:
 
 ```text
                     DRM END-TO-END FLOW
@@ -54,9 +54,9 @@ Toàn bộ hệ thống chia thành hai giai đoạn:
 
 ```
 
-Điểm quan trọng nhất:
+The most fundamental architectural invariant:
 
-> **Content Key dùng để decrypt trên thiết bị phải chính là Content Key đã dùng để encrypt media lúc packaging.**
+> **The Content Key used to decrypt on the device must be the exact same Content Key used to encrypt media during packaging.**
 
 ---
 
@@ -64,19 +64,19 @@ Toàn bộ hệ thống chia thành hai giai đoạn:
 
 ## 2.1 Content Key
 
-**Content Key** là khóa bí mật thực sự dùng để **mã hóa và giải mã media**.
+The **Content Key** is the actual secret cryptographic key used to **encrypt and decrypt media**.
 
-Trong Common Encryption, Content Key thường là **AES-128 key**:
+In Common Encryption, the Content Key is typically an **AES-128 key**:
 
 - AES = Advanced Encryption Standard.
 
-- AES là **symmetric encryption** — mã hóa đối xứng.
+- AES is a **symmetric encryption** cipher.
 
-- Cùng một key được dùng để encrypt và decrypt.
+- The exact same key is used for both encryption and decryption.
 
-- AES-128 sử dụng key dài **128 bit = 16 bytes**.
+- AES-128 uses a key length of **128 bits = 16 bytes**.
 
-- Content Key phải được giữ bí mật.
+- The Content Key must always be kept strictly confidential.
 
 
 ```text
@@ -93,7 +93,7 @@ Clear Media ---------> Ciphertext ---------> Clear Media
 
 ```
 
-Ví dụ:
+Example:
 
 ```text
 Content Key:
@@ -105,7 +105,7 @@ Content Key:
 
 ## 2.2 KID — Key ID
 
-Mỗi Content Key có một identifier gọi là **KID (Key ID)**.
+Each Content Key is identified by a unique public identifier called a **KID (Key ID)**.
 
 ```text
 KID ------- identifies -------> Content Key
@@ -113,7 +113,7 @@ KID ------- identifies -------> Content Key
 
 ```
 
-Ví dụ:
+Example:
 
 ```text
 KID:
@@ -124,32 +124,32 @@ Content Key:
 
 ```
 
-Khác biệt:
+Distinction:
 
 ```text
 KID          = public identifier
-Content Key  = secret
+Content Key  = secret key material
 
 ```
 
-KID có thể xuất hiện trong media hoặc signaling.
+The KID appears inside media containers and manifest signaling:
 
 ```text
 Encrypted Media
       |
       | KID = X
       v
-"Content này cần Content Key X"
+"This content requires Content Key X"
 
 ```
 
-KID **không tham gia trực tiếp vào phép AES encryption**. Nó dùng để xác định key cần sử dụng.
+The KID **does not participate directly in AES encryption arithmetic**. It serves exclusively to identify which key must be retrieved and applied.
 
 ---
 
 ## 2.3 AES
 
-**AES** là thuật toán mã hóa đối xứng.
+**AES** is a symmetric block cipher.
 
 ```text
              SAME SECRET KEY
@@ -160,26 +160,26 @@ Plaintext -- AES --> Ciphertext -- AES --> Plaintext
 
 ```
 
-DRM/Common Encryption thường sử dụng AES-128.
+DRM and Common Encryption standards primarily utilize AES-128.
 
-AES chỉ định cipher. Cách AES được áp dụng lên media phụ thuộc **encryption scheme**.
+AES defines the cipher algorithm itself. How AES is applied across media streams depends on the chosen **encryption scheme**.
 
 ---
 
-## 2.4 Encryption Scheme — `cenc` và `cbcs`
+## 2.4 Encryption Scheme — `cenc` and `cbcs`
 
-Hai scheme thường gặp:
+Two primary Common Encryption schemes are used in production:
 
 ```text
 cenc
-    +-- AES-CTR based
+    +-- AES-CTR mode
 
 cbcs
-    +-- AES-CBC pattern encryption
+    +-- AES-CBC pattern encryption mode
 
 ```
 
-Có thể hiểu:
+Architectural relationship:
 
 ```text
 Content Key
@@ -199,15 +199,15 @@ Encrypted Media Samples
 
 ```
 
-`cbcs` đặc biệt quan trọng trong các workflow CMAF Multi-DRM cần hỗ trợ FairPlay cùng Widevine/PlayReady.
+`cbcs` is essential in modern CMAF Multi-DRM workflows to support Apple FairPlay concurrently with Widevine and PlayReady on unified CMAF fragments.
 
 ---
 
 ## 2.5 IV — Initialization Vector
 
-AES encryption không chỉ sử dụng Content Key.
+AES encryption requires more than just the Content Key.
 
-Nó còn cần **IV (Initialization Vector)** hoặc counter-related state tùy encryption mode.
+It also requires an **IV (Initialization Vector)** or counter-related state depending on the cipher mode:
 
 ```text
 Plain Media
@@ -224,49 +224,49 @@ Ciphertext
 
 ```
 
-IV không cần được giữ bí mật như Content Key.
+Unlike the Content Key, the IV does not need to be kept secret.
 
-Thông tin cần thiết để sử dụng đúng IV được lưu trong encrypted media metadata.
+Metadata required to reconstruct the correct IV per sample is embedded directly within the encrypted ISO-BMFF container.
 
 ---
 
 ## 2.6 DRM System
 
-Các DRM system phổ biến:
+Major DRM systems across the industry:
 
 ```text
-Widevine     > Google
+Widevine     > Google (Android, Chrome, Smart TVs)
 
-PlayReady    > Microsoft
+PlayReady    > Microsoft (Windows, Edge, Xbox)
 
-FairPlay     > Apple
+FairPlay     > Apple (iOS, macOS, Safari, Apple TV)
 
 ```
 
-DRM system chịu trách nhiệm cho những thứ như:
+A DRM system governs:
 
-- license protocol;
+- License exchange protocols;
 
-- license format;
+- License container formats;
 
-- key protection;
+- Cryptographic key protection;
 
-- device security;
+- Device hardware root of trust;
 
-- usage policy;
+- Usage rules and playback rights;
 
-- output protection;
+- Output protection (e.g. HDCP);
 
-- secure playback.
+- Secure hardware decoding pipelines.
 
 
 ---
 
 ## 2.7 DRM Provider
 
-Một **DRM Service Provider** cung cấp infrastructure DRM.
+A **DRM Service Provider** manages cloud DRM infrastructure on behalf of content owners.
 
-Ví dụ:
+Example:
 
 ```text
 Axinom
@@ -279,21 +279,20 @@ Conceptually:
 DRM Service Provider
 |
 +-- Key Service
-|
-|    +-- phục vụ PACKAGING
+|    +-- serves PACKAGING phase
 |
 +-- License Service
-     +-- phục vụ PLAYBACK
+     +-- serves PLAYBACK phase
 
 ```
 
-Hai service này có vai trò khác nhau.
+These two services address distinct stages of the media lifecycle.
 
 ---
 
 ## 2.8 Key Service
 
-**Key Service** cung cấp Content Key cho Packager/Encryption Engine.
+The **Key Service** provisions Content Keys to the Packager / Encryption Engine.
 
 ```text
 Packager
@@ -310,13 +309,13 @@ Packager
 
 ```
 
-Ví dụ Axinom gọi API này là **Key Acquisition API**.
+For instance, Axinom designates this API as the **Key Acquisition API**.
 
 ---
 
 ## 2.9 CPIX
 
-**CPIX — Content Protection Information Exchange Format** là một XML format chuẩn hóa để trao đổi:
+**CPIX — Content Protection Information Exchange Format** is a standardized XML document specification used to exchange:
 
 ```text
 Content Keys
@@ -329,7 +328,7 @@ Key Periods
 
 ```
 
-CPIX thuộc **content preparation / packaging side**.
+CPIX operates strictly on the **content preparation / packaging side**:
 
 ```text
 Key Service
@@ -340,20 +339,20 @@ Packager
 
 ```
 
-Player không sử dụng CPIX để playback.
+Client video players never consume or process CPIX documents.
 
 ---
 
 ## 2.10 SPEKE
 
-**SPEKE — Secure Packager and Encoder Key Exchange** là protocol/API contract dùng để trao đổi protection information giữa Packager và Key Service.
+**SPEKE — Secure Packager and Encoder Key Exchange** is an API protocol specification (standardized by AWS) governing authentication and payload delivery between Packagers and Key Services.
 
-Có thể nhớ:
+Relationship hierarchy:
 
 ```text
 HTTPS
     v
-transport
+transport layer
 
 SPEKE
     v
@@ -361,23 +360,21 @@ protocol / API contract
 
 CPIX
     v
-data format
+payload data format
 
 Content Key + DRM information
 
 ```
 
-CPIX và SPEKE không phải cùng một thứ.
+CPIX and SPEKE are complementary: SPEKE defines the REST API protocol, while CPIX defines the XML data payload format.
 
 ---
 
 ## 2.11 DRM Signaling
 
-Content Key chưa đủ để player biết cách sử dụng DRM.
+A Content Key alone is insufficient for a media player to initiate DRM playback.
 
-Media/manifest còn cần **DRM signaling**.
-
-Ví dụ:
+Media containers and manifests must convey **DRM signaling**:
 
 ```text
                 Encrypted Content
@@ -390,93 +387,93 @@ Ví dụ:
 
 ```
 
-Signaling giúp player/CDM biết DRM system và information cần thiết để bắt đầu license acquisition.
+Signaling informs the player and CDM which DRM systems are supported, which KIDs are required, and supplies the initialization data necessary to initiate license acquisition.
 
 ---
 
 ## 2.12 PSSH
 
-**PSSH — Protection System Specific Header** là DRM-specific signaling được sử dụng trong ISO-BMFF/Common Encryption workflows.
+**PSSH — Protection System Specific Header** is DRM-specific signaling box (`pssh`) embedded in ISO-BMFF / Common Encryption containers.
 
 Conceptually:
 
 ```text
 PSSH
 |
-+-- DRM System ID
-+-- DRM-specific data
++-- DRM System ID (UUID)
++-- DRM-specific opaque payload
 
 ```
 
-Ví dụ:
+Example:
 
 ```text
 PSSH
 |
-+-- Widevine System ID
-+-- Widevine initialization data
++-- Widevine System ID (edef8ba9-79d6-4ace-a3c8-27dcd51d21ed)
++-- Widevine initialization payload
 
 ```
 
-PSSH:
+Important distinctions:
 
 ```text
-≠ Content Key
-≠ DRM License
+PSSH ≠ Content Key
+PSSH ≠ DRM License
 
 ```
 
-Nó là signaling / initialization information.
+PSSH is solely initialization and routing signaling.
 
 ---
 
 ## 2.13 DRM License
 
-**DRM License** là object DRM-specific được License Service cấp cho CDM.
+A **DRM License** is a DRM-specific, cryptographically wrapped data object issued by the License Service directly to the client's CDM.
 
-Conceptually nó có thể chứa:
+Conceptually it encapsulates:
 
 ```text
 DRM License
 |
 +-- Content Key(s)
-|     +-- được bảo vệ bởi DRM
+|     +-- cryptographically wrapped by DRM device keys
 |
 +-- KID(s)
 |
 +-- Policy
-      +-- expiration
+      +-- expiration timestamp
       +-- playback rights
-      +-- output restrictions
+      +-- output restrictions (HDCP levels)
       +-- ...
 
 ```
 
-License không đơn giản là HTTP response:
+A license is never a plain, unencrypted HTTP response like:
 
 ```text
 KEY = abc123
 
 ```
 
-Content Key được DRM bảo vệ và được xử lý bởi CDM.
+The Content Key is encrypted under device-specific keys and can only be unpacked inside the CDM's secure environment.
 
 ---
 
 ## 2.14 CDM
 
-**CDM — Content Decryption Module** là component DRM phía thiết bị.
+**CDM — Content Decryption Module** is the secure client-side DRM software or hardware engine.
 
-Ví dụ:
+Examples:
 
 ```text
-Chrome / Android
-       |
-       +-- Widevine CDM
+Chrome / Android  -> Widevine CDM
+Windows / Edge    -> PlayReady CDM
+Safari / iOS      -> FairPlay CDM
 
 ```
 
-CDM chịu trách nhiệm cho:
+The CDM is responsible for:
 
 ```text
 license processing
@@ -489,15 +486,15 @@ media decryption
 
 ```
 
-Application/player không nên trực tiếp nhận plaintext Content Key.
+Applications and video players never hold or inspect raw Content Keys in unmanaged memory.
 
 ---
 
 ## 2.15 Authentication
 
-**Authentication** trả lời câu hỏi: **user là ai?**
+**Authentication** answers the question: **who is the user?**
 
-Ví dụ application backend xác thực user bằng session, access token, OAuth hoặc cơ chế đăng nhập riêng của hệ thống.
+The application backend verifies user identity via user sessions, JWT access tokens, OAuth2, or proprietary authentication services.
 
 ```text
 User
@@ -510,56 +507,56 @@ Application Backend
 Authenticated User
 ```
 
-Authentication thành công **không có nghĩa** user được quyền xem mọi content.
+Successful authentication **does not imply** the user is entitled to watch every piece of content.
 
 ---
 
 ## 2.16 Authorization / Entitlement
 
-**Authorization** hoặc **Entitlement** trả lời câu hỏi: **user này có quyền nhận DRM License cho content/KID này hay không?**
+**Authorization** or **Entitlement** answers the question: **is this authenticated user entitled to receive a DRM License for this specific content / KID?**
 
-Business rules có thể gồm:
+Business entitlement rules include:
 
 ```text
-subscription
-purchase / rental
-geo restriction
-license expiration
-concurrent stream limit
-device / security-level policy
+subscription active status
+transactional purchase / rental window
+geo-location restrictions
+license expiration constraints
+concurrent playback stream limits
+device security level requirements
 ```
 
-Kết quả authorization thường được biểu diễn bằng một **signed entitlement token/message** để License Service có thể kiểm tra mà client không thể tự sửa quyền truy cập.
+The authorization decision is encapsulated into a **signed entitlement token/message** verified by the License Service, preventing client-side tampering.
 
 ---
 
 ## 2.17 Entitlement Service
 
-**Entitlement Service** là component áp dụng business rules và quyết định có cấp quyền xin DRM License hay không.
+The **Entitlement Service** evaluates business rules and decides whether to authorize a DRM License acquisition.
 
 ```text
 Player
   |
-  | user/session + content_id
+  | user session + content_id
   v
 Entitlement Service
   |
-  +-- authenticate / identify user
+  +-- authenticate user identity
   +-- check subscription / purchase
-  +-- check content permission
-  +-- decide DRM policy
+  +-- verify content rights
+  +-- determine DRM policy
   |
   v
 Signed Entitlement
 ```
 
-Với Axinom, Entitlement Service và License Service là hai trách nhiệm tách biệt: Entitlement Service authorize request; License Service phát DRM License dựa trên authorization đó.
+In Axinom architecture, Entitlement Service and License Service represent distinct responsibilities: the Entitlement Service authorizes the request; the License Service issues DRM Licenses based on that authorization.
 
 ---
 
 ## 2.18 Signed Entitlement / License Service Message
 
-Với Axinom, **Entitlement Message** được đặt trong một **License Service Message** rồi ký thành JWT bằng **HMAC-SHA256** với **Communication Key**.
+In Axinom, the **Entitlement Message** is embedded inside a **License Service Message** and signed as a JWT using **HMAC-SHA256** with a shared **Communication Key**.
 
 ```text
 Trusted Backend
@@ -576,7 +573,7 @@ License Service Message
     Player
 ```
 
-Communication Key phải chỉ tồn tại ở trusted backend/provider side, **không được ship xuống browser hoặc mobile client**. Chữ ký chứng minh entitlement do backend được tin cậy phát hành và giúp License Service phát hiện token bị sửa.
+The Communication Key must reside exclusively on the trusted backend and DRM provider infrastructure; **it must never be exposed to browser or mobile clients**. The cryptographic signature proves backend authorization and prevents unauthorized token modification.
 
 ---
 
@@ -584,7 +581,7 @@ Communication Key phải chỉ tồn tại ở trusted backend/provider side, **
 
 ## 3.1 Source Media
 
-Ban đầu:
+Input before packaging:
 
 ```text
 input.mp4
@@ -594,31 +591,29 @@ Audio > clear compressed samples
 
 ```
 
-Media chưa được DRM encrypt.
+Source media contains unencrypted elementary streams.
 
 ---
 
-## 3.2 Packager tạo hoặc chọn KID
+## 3.2 Packager Generates or Selects KID
 
-Ví dụ:
+Single-key scenario:
 
 ```text
 Video:
-
 KID = UUID-A
 
 ```
 
-Hoặc multi-key:
+Multi-key scenario:
 
 ```text
 Video -----> KID-A > KEY-A
-
 Audio -----> KID-B > KEY-B
 
 ```
 
-Có thể phức tạp hơn:
+Resolution-tier multi-key scenario:
 
 ```text
 SD    > KEY-A
@@ -632,7 +627,7 @@ Audio > KEY-D
 
 # 4. Acquire Content Key
 
-Packager cần:
+The Packager requires:
 
 ```text
 KID
@@ -641,7 +636,7 @@ DRM signaling
 
 ```
 
-Ví dụ yêu cầu:
+Example packaging specification:
 
 ```text
 KID:
@@ -657,13 +652,13 @@ DRMs:
 
 ```
 
-Packager gửi request tới Key Service.
+The Packager dispatches a key acquisition request to the Key Service.
 
 ---
 
 # 5. CPIX / SPEKE Flow
 
-Một workflow phổ biến:
+Standard production key exchange workflow:
 
 ```text
                  Packager
@@ -695,15 +690,15 @@ Một workflow phổ biến:
 
 ```
 
-Trong SPEKE, Packager có thể gửi CPIX document mô tả những protection information nó cần nhưng chưa có giá trị key.
+Under SPEKE, the Packager transmits a CPIX document specifying the protection metadata it requires.
 
-Key Service bổ sung key và trả CPIX lại.
+The Key Service populates the cryptographic key values and returns the completed CPIX document.
 
 ---
 
 # 6. CPIX Request
 
-Conceptually:
+Conceptual CPIX document:
 
 ```xml
 <CPIX>
@@ -736,14 +731,14 @@ Conceptually:
 
 ```
 
-Có thể hiểu request này là:
+This request communicates:
 
 ```text
-"Tôi cần Content Key cho KID UUID-A.
+"I require a Content Key for KID UUID-A.
 
-Key sẽ được dùng với cbcs.
+The key must be configured for cbcs encryption.
 
-Tôi cần signaling cho:
+I require signaling metadata for:
     Widevine
     PlayReady
     FairPlay."
@@ -754,7 +749,7 @@ Tôi cần signaling cho:
 
 # 7. Key Service
 
-Key Service nhận KID và tạo hoặc lấy Content Key:
+The Key Service ingests the requested KID and generates or retrieves the associated Content Key:
 
 ```text
 KID = UUID-A
@@ -769,27 +764,27 @@ KEY = SECRET-A
 
 ```
 
-Provider có thể:
+The provider may:
 
 ```text
-generate random Content Key
+generate a cryptographically secure random Content Key
 
-hoặc
+or
 
-derive Content Key từ
+derive the Content Key deterministically from:
 Key Seed + KID
 
 ```
 
-Đây là implementation detail của DRM provider.
+This is an internal implementation detail of the DRM provider.
 
-Điều bắt buộc về mặt hệ thống là **License Service sau này phải lấy được chính Content Key đó**.
+The critical architectural invariant is: **The License Service must be able to retrieve the exact same Content Key during playback**.
 
 ---
 
 # 8. CPIX Response
 
-Response conceptually:
+Conceptual CPIX response structure:
 
 ```text
 CPIX
@@ -801,13 +796,13 @@ CPIX
 |
 +-- DRMSystemList
       |
-      +-- Widevine signaling
-      +-- PlayReady signaling
-      +-- FairPlay signaling
+      +-- Widevine signaling (PSSH)
+      +-- PlayReady signaling (PSSH / PRO)
+      +-- FairPlay signaling (skd:// URI)
 
 ```
 
-Packager normalize thông tin này thành internal protection model:
+The Packager normalizes this data into its internal protection model:
 
 ```text
 ProtectionData
@@ -823,9 +818,9 @@ ProtectionData
 
 # 9. Media Encryption
 
-Đây mới là nơi actual encryption xảy ra.
+This is where media sample payload encryption takes place.
 
-Packager/Encryption Engine nhận:
+The Packager / Encryption Engine consumes:
 
 ```text
 Media Sample
@@ -838,14 +833,14 @@ Encryption Scheme
 
 ```
 
-và tạo:
+and produces:
 
 ```text
 Encrypted Media Sample
 
 ```
 
-Ví dụ:
+Workflow:
 
 ```text
 Clear H.264 / HEVC sample
@@ -859,17 +854,15 @@ Encrypted Sample
 
 ```
 
-DRM packaging không đơn giản là encrypt toàn bộ `.mp4` như encrypt một ZIP file.
+DRM packaging does not encrypt an entire `.mp4` file as an opaque container blob.
 
-Encryption xảy ra ở **media sample level**.
+Encryption is performed strictly at the **media sample level** within ISO-BMFF fragments.
 
 ---
 
 # 10. Common Encryption
 
-**Common Encryption (CENC)** chuẩn hóa cách encrypted media được biểu diễn để cùng encrypted content có thể được sử dụng bởi nhiều DRM systems.
-
-Conceptually:
+**Common Encryption (CENC)** standardizes sample-level encryption formatting so identical encrypted media payloads can be consumed across disparate DRM systems.
 
 ```text
                    Content Key
@@ -886,15 +879,13 @@ Conceptually:
 
 ```
 
-Điều này giúp tránh việc phải tạo một encrypted copy riêng cho mỗi DRM.
+This eliminates the need to encode, package, and store separate media copies for each DRM vendor.
 
 ---
 
 # 11. Sample Encryption
 
-Media sample có thể gồm phần clear và encrypted.
-
-Conceptually:
+Media samples may contain both unencrypted (clear) and encrypted portions.
 
 ```text
 Original Sample
@@ -912,28 +903,26 @@ Encrypted Sample
 
 ```
 
-Exact layout phụ thuộc codec và encryption scheme.
+The exact subsample layout depends on the video codec (e.g. NAL unit headers remain in the clear) and the encryption scheme.
 
 ---
 
-# 12. Encryption Metadata trong CMAF / ISO-BMFF
+# 12. Encryption Metadata in CMAF / ISO-BMFF
 
-Decryptor cần biết:
+The decryption engine requires metadata to answer:
 
 ```text
-Key nào?
+Which Key ID is required?
 
-Encryption scheme nào?
+Which encryption scheme is applied?
 
-IV nào?
+Which IV applies to this sample?
 
-Phần nào của sample được encrypt?
+Which bytes of the sample are encrypted vs. clear?
 
 ```
 
-Do đó encrypted ISO-BMFF/CMAF chứa encryption metadata.
-
-Các box thường gặp:
+Encrypted ISO-BMFF / CMAF containers carry this metadata inside standard boxes:
 
 ```text
 tenc
@@ -950,19 +939,17 @@ pssh
 
 `tenc` — Track Encryption Box.
 
-Conceptually:
-
 ```text
 Video Track
     |
     +-- tenc
          |
-         +-- encryption defaults
+         +-- default encryption parameters
          +-- default_KID = UUID-A
 
 ```
 
-Nó giúp xác định protection parameters mặc định của track.
+It defines default protection parameters for an entire track.
 
 ---
 
@@ -970,14 +957,16 @@ Nó giúp xác định protection parameters mặc định của track.
 
 `senc` — Sample Encryption Box.
 
-Nó có thể chứa per-sample encryption information như IV và subsample information.
+It contains per-sample encryption descriptors, including per-sample IVs and subsample byte ranges:
 
 ```text
 Sample 1
     +-- IV = ...
+    +-- subsample byte ranges
 
 Sample 2
     +-- IV = ...
+    +-- subsample byte ranges
 
 Sample 3
     +-- IV = ...
@@ -988,15 +977,13 @@ Sample 3
 
 ## 12.3 `saiz` / `saio`
 
-Các auxiliary information boxes giúp xác định vị trí/kích thước sample auxiliary encryption data.
-
-Chúng hỗ trợ parser tìm encryption metadata cần thiết cho từng sample.
+`saiz` (Sample Auxiliary Information Sizes) and `saio` (Sample Auxiliary Information Offsets) point parsers directly to sample encryption metadata locations within the fragment.
 
 ---
 
 ## 12.4 `pssh`
 
-PSSH mang DRM-specific initialization/signaling information.
+`pssh` carries DRM-specific initialization and signaling payloads:
 
 ```text
 init.mp4
@@ -1012,7 +999,7 @@ init.mp4
 
 # 13. Generate CMAF
 
-Sau encryption:
+Following sample encryption:
 
 ```text
 Encrypted Samples
@@ -1031,34 +1018,32 @@ segment_003.m4s
 
 ```
 
-Media payload đã encrypted.
+Media sample payloads are now encrypted; container structural boxes remain parseable by standard demuxers.
 
 ---
 
 # 14. Generate Manifest
 
-Packager cũng tạo manifest:
+The Packager generates streaming manifests:
 
 ```text
 DASH
-    +-- manifest.mpd
+    +-- live.mpd / manifest.mpd
 
 HLS
-    +-- master.m3u8
+    +-- live.m3u8 / master.m3u8
 
 ```
 
-Manifest chứa DRM signaling cần thiết để player biết content được bảo vệ như thế nào.
-
-Conceptually:
+Manifests convey DRM signaling so players can negotiate licenses:
 
 ```text
 Manifest
 |
-+-- Content Protection
-+-- DRM System
++-- Content Protection Descriptor
++-- DRM System UUID
 +-- KID
-+-- DRM initialization information
++-- Initialization data (PSSH / URI)
 
 ```
 
@@ -1066,7 +1051,7 @@ Manifest
 
 # 15. Distribution
 
-Sau packaging:
+Following packaging, artifacts are published to the CDN:
 
 ```text
                        CDN
@@ -1080,29 +1065,27 @@ Sau packaging:
 
 ```
 
-Những thứ này có thể được phân phối tới client.
+These assets are distributed publicly to client devices.
 
-Security không dựa vào việc giấu chúng.
-
-Attacker có thể có:
+Security does not rely on obscuring these files:
 
 ```text
-Manifest         ✓
-Encrypted Media  ✓
-KID              ✓
-PSSH             ✓
+Manifest         ✓ (Public)
+Encrypted Media  ✓ (Public)
+KID              ✓ (Public)
+PSSH             ✓ (Public)
 
-Content Key      ✗
+Content Key      ✗ (Secret)
 
 ```
 
-**Content Key mới là secret quan trọng.**
+**The Content Key is the sole secret that must be protected.**
 
 ---
 
 # 16. Playback / Decryption Flow
 
-Khi user nhấn Play, playback có thêm một bước quan trọng: **application authorization / entitlement** trước khi License Service cấp DRM License.
+When playback is requested, an essential gate executes: **application authentication & entitlement** prior to the License Service issuing a DRM License.
 
 ```text
                      CDN
@@ -1158,53 +1141,53 @@ Khi user nhấn Play, playback có thêm một bước quan trọng: **applicati
                   Playback
 ```
 
-License Server có thể là public-facing endpoint, nhưng **biết URL + KID không đủ để nhận license**. Request còn phải thỏa authorization/entitlement và DRM-specific validation.
+While the License Server is a network-accessible endpoint, **possessing the URL and KID is insufficient to obtain a license**. The request must supply a valid signed entitlement and pass DRM-specific challenge validation.
 
 ---
 
-# 17. Player phát hiện DRM
+# 17. Player Detects DRM
 
-Player tải:
+The player fetches:
 
 ```text
 manifest.mpd
 
-hoặc
+or
 
-master.m3u8
+live.m3u8 / master.m3u8
 
 ```
 
-và init segment.
+along with the initialization segment (`init.mp4`).
 
-Từ DRM signaling / initialization data, player xác định:
+From DRM signaling and initialization metadata, the player determines:
 
 ```text
-content encrypted?
+Is content encrypted?
 
-DRM system nào?
+Which DRM systems are supported?
 
-KID nào?
+Which KIDs are required?
 
-initialization data nào cần đưa cho DRM?
+What initialization data must be dispatched to the CDM?
 
 ```
 
-Ví dụ browser có thể gặp PSSH trong ISO-BMFF content.
+In web browsers, the player intercepts PSSH data within the ISO-BMFF stream.
 
 ---
 
 # 18. EME — Encrypted Media Extensions
 
-Trên Web, JavaScript application giao tiếp với CDM thông qua **EME — Encrypted Media Extensions**.
+On the web platform, JavaScript applications communicate with the CDM via the W3C **EME — Encrypted Media Extensions** standard.
 
 Architecture:
 
 ```text
-Web Player
+Web Player (Shaka, VideoJS, hls.js)
     |
     v
-Browser / EME
+Browser / EME API
     |
     v
 CDM
@@ -1213,30 +1196,28 @@ CDM
 
 ```
 
-Application không implement Widevine cryptography trực tiếp.
-
-Nó sử dụng EME để làm việc với CDM.
+Web applications never implement DRM decryption cryptography directly; they orchestrate workflows through EME.
 
 ---
 
 # 19. Initialization Data
 
-CDM cần **Initialization Data** để tạo license request.
+The CDM requires **Initialization Data** to construct a license request challenge.
 
-Với ISO-BMFF/Common Encryption, initialization data thường liên quan tới PSSH.
+In ISO-BMFF / Common Encryption, initialization data typically corresponds to the PSSH payload.
 
-Browser flow:
+Browser EME event lifecycle:
 
 ```text
 Encrypted Media
       |
       | contains initialization data
       v
-Browser
+Browser HTMLMediaElement
       |
       | "encrypted" event
       v
-Application
+Application / Player
       |
       | initData
       v
@@ -1244,7 +1225,7 @@ CDM
 
 ```
 
-Theo EME:
+Sequence:
 
 ```text
 encrypted event
@@ -1253,7 +1234,7 @@ encrypted event
 event.initData
       |
       v
-MediaKeySession.generateRequest(...)
+MediaKeySession.generateRequest(initDataType, event.initData)
       |
       v
 CDM
@@ -1264,9 +1245,7 @@ CDM
 
 # 20. MediaKeySession
 
-Browser tạo một **MediaKeySession**.
-
-Nó là context cho quá trình:
+The browser establishes a **MediaKeySession** representing the cryptographic context:
 
 ```text
 Initialization Data
@@ -1275,23 +1254,23 @@ Initialization Data
 MediaKeySession
        |
        v
-License Message
+License Challenge Message
        |
        v
-License
+License Response
        |
        v
 Keys available to CDM
 
 ```
 
-Một session có thể chứa nhiều keys, mỗi key gắn với một KID.
+A single session can manage multiple Content Keys associated with distinct KIDs (e.g. separate audio and video keys).
 
 ---
 
-# 21. CDM tạo License Challenge
+# 21. CDM Generates License Challenge
 
-CDM nhận initialization data:
+The CDM ingests the initialization data and outputs an opaque, cryptographically signed challenge:
 
 ```text
 PSSH / Init Data
@@ -1304,29 +1283,22 @@ License Challenge
 
 ```
 
-Challenge là DRM-specific.
-
-Ví dụ:
+The challenge payload is specific to the target DRM system:
 
 ```text
-Widevine
-    > Widevine License Request
-
-PlayReady
-    > PlayReady License Challenge
-
-FairPlay
-    > SPC
+Widevine  -> Widevine License Request
+PlayReady -> PlayReady License Challenge
+FairPlay  -> Server Playback Context (SPC)
 
 ```
 
-Application nhận message từ CDM và gửi nó tới License Service.
+The application intercepts this message via the `message` event and forwards it to the License Service.
 
 ---
 
 # 22. Authentication & Entitlement
 
-Trước khi xin DRM License, application phải xác định user có quyền xem content hay không. Đây là lớp **business authorization**, tách biệt với DRM challenge do CDM tạo.
+Before requesting a DRM License, the application must verify user viewing rights. This is the **business authorization** layer, separate from the CDM's device challenge.
 
 ```text
 User
@@ -1336,39 +1308,39 @@ User
 Application Backend
  |
  +-- Authentication
- |      "User là ai?"
+ |      "Who is the user?"
  |
  +-- Authorization / Entitlement
-        "User có quyền xem content này không?"
+        "Is this user authorized to watch this content?"
  |
  v
 Entitlement Service
  |
- +-- subscription / purchase / rental
- +-- content / KID permission
- +-- expiration
- +-- geo / concurrency rules
- +-- DRM usage policy
+ +-- subscription / purchase / rental validation
+ +-- content / KID permission check
+ +-- validity window check
+ +-- geo / concurrency policies
+ +-- DRM usage rules
  |
  v
 Signed Entitlement
 ```
 
-Với Axinom, License Acquisition API không dựa vào HTTP `Authorization` header. Thay vào đó, License Request phải mang một **License Service Message** chứa **Entitlement Message hợp lệ**.
+In Axinom, the License Acquisition API does not rely on HTTP `Authorization` headers. Instead, requests must deliver a **License Service Message** containing a **valid Entitlement Message**.
 
-Một entitlement conceptually ràng buộc quyền với Content Key/KID và policy:
+A signed entitlement binds access rights to Content Keys and policies:
 
 ```text
 Signed Entitlement
 |
 +-- authorized KID(s)
-+-- validity / expiration
++-- validity / expiration window
 +-- license lifetime
-+-- DRM usage policy
-+-- optional device/IP restrictions
++-- DRM usage policies
++-- optional device / IP restrictions
 ```
 
-Với Axinom, Entitlement Message được wrap vào License Service Message và ký JWT bằng **HMAC-SHA256 + Communication Key**:
+In Axinom, the Entitlement Message is packaged inside a License Service Message and signed as a JWT with **HMAC-SHA256 + Communication Key**:
 
 ```text
                  TRUSTED BACKEND
@@ -1386,28 +1358,27 @@ License Service Message
        v
                  UNTRUSTED CLIENT
 
-      Player receives token
+       Player receives token
 ```
 
-`Communication Key` là shared secret giữa trusted backend và Axinom License Service. Nó phải ở server side; nếu secret này bị ship xuống client, attacker có thể tự tạo entitlement hợp lệ.
+The `Communication Key` is a shared secret strictly confined to the trusted backend and Axinom License Service. If this secret leaks to clients, unauthorized actors could forge entitlements.
 
-Sau bước này Player có hai artifact độc lập:
+The Player now holds two independent artifacts:
 
 ```text
-① DRM License Challenge
-   +-- do CDM tạo
+1. DRM License Challenge
+   +-- generated by CDM
        +-- requested KID
-       +-- device / DRM-specific information
-       +-- cryptographically protected challenge
+       +-- device-specific cryptographic proof
 
-② Signed Entitlement
-   +-- do trusted backend tạo
+2. Signed Entitlement
+   +-- generated by trusted backend
        +-- authorized KID(s)
-       +-- validity
-       +-- DRM policy
+       +-- validity window
+       +-- DRM policy rules
 ```
 
-License Service chỉ cấp license khi hai phía khớp nhau. Ví dụ:
+The License Service issues a license only when both artifacts align:
 
 ```text
 CDM requests:       KID = A
@@ -1418,7 +1389,7 @@ Entitlement allows: KID = A
      GRANT
 ```
 
-nhưng:
+whereas:
 
 ```text
 CDM requests:       KID = B
@@ -1429,13 +1400,13 @@ Entitlement allows: KID = A
       DENY
 ```
 
-Do đó **URL License Server + KID không phải authorization credential**.
+Possessing the License Server URL and KID does not constitute authorization.
 
 ---
 
 # 23. License Acquisition
 
-Player/Application đóng vai trò nối hai dữ liệu: challenge do CDM tạo và entitlement do trusted backend cấp.
+The Player application aggregates both artifacts: the challenge from the CDM and the signed entitlement from the backend.
 
 ```text
                      Player / App
@@ -1455,9 +1426,9 @@ Player/Application đóng vai trò nối hai dữ liệu: challenge do CDM tạo
                  |   e.g. Axinom   |
                  +--------+--------+
                           |
-                 validate entitlement
+                 validate entitlement signature
                  validate requested KID
-                 validate DRM/device data
+                 validate DRM/device challenge
                  apply usage policy
                           |
                           v
@@ -1471,15 +1442,15 @@ Player/Application đóng vai trò nối hai dữ liệu: challenge do CDM tạo
                          CDM
 ```
 
-Với Axinom Standard Mode, signed License Service Message có thể được truyền qua `X-AxDRM-Message`, query parameter `AxDrmMessage`, hoặc PlayReady Custom Data tùy integration.
+Under Axinom Standard Mode, the signed License Service Message is transmitted via the `X-AxDRM-Message` HTTP header, the `AxDrmMessage` query parameter, or PlayReady Custom Data depending on platform capabilities.
 
-**CPIX không xuất hiện ở đây.** CPIX thuộc packaging side; entitlement + DRM challenge thuộc playback/license side.
+**CPIX is never involved in this exchange.** CPIX belongs exclusively to packaging; entitlement tokens and DRM challenges govern playback licensing.
 
 ---
 
 # 24. License Service
 
-License Service không đơn giản nhận KID rồi trả key. Nó phải validate **authorization artifact** và **DRM request** trước khi tạo license.
+The License Service verifies both the **authorization artifact** and the **DRM challenge** before synthesizing a license:
 
 ```text
 License Challenge
@@ -1502,7 +1473,7 @@ Is KID authorized by entitlement?
        |
        +-- no ------------------> DENY
        v
-Validate DRM/device/security policy
+Validate DRM / device / security policy
        |
        +-- fail ----------------> DENY
        v
@@ -1515,7 +1486,7 @@ Apply DRM Usage Policy
 Generate DRM License
 ```
 
-Ví dụ:
+Verification flow:
 
 ```text
 KID = UUID-A
@@ -1527,17 +1498,15 @@ License Service
 Content Key = SECRET-A
 ```
 
-`SECRET-A` phải là cùng key đã được Packager sử dụng. License Service đưa key vào DRM-specific license ở dạng được bảo vệ; application không nhận plaintext key.
+`SECRET-A` must be identical to the key used during packaging. The License Service wraps the key within the DRM-specific license format; applications never receive plaintext keys.
 
-License challenge cũng là DRM-specific và thường mang device identification / DRM-specific protected data. DRM License trả về được ràng buộc với client/CDM đã tạo request theo cơ chế của từng DRM system.
+The returned DRM License is cryptographically bound to the client CDM hardware.
 
 ---
 
-# 25. DRM License bảo vệ Content Key
+# 25. DRM License Protects Content Key
 
-License Service **không trả plaintext Content Key cho application**.
-
-Conceptually:
+The License Service **never transmits plaintext Content Keys to client applications**.
 
 ```text
                  Content Key
@@ -1553,41 +1522,37 @@ Conceptually:
 
 ```
 
-License có thể bao gồm:
+The license payload defines:
 
 ```text
-Content Key
-Rights
-Expiration
-Output Restrictions
-Other DRM Policy
+Content Key (encrypted under CDM public/device key)
+Rights & Permissions
+Expiration Window
+Output Restrictions (HDCP enforcement)
+DRM Policy Rules
 
 ```
 
-Exact cryptographic format phụ thuộc từng DRM system.
-
 ---
 
-# 26. CDM nhận License
+# 26. CDM Receives License
 
-Application đưa license response vào CDM.
+The application delivers the license response into the CDM.
 
-Trên EME:
+Under EME:
 
 ```text
 License Response
        |
        v
-MediaKeySession.update(...)
+MediaKeySession.update(license)
        |
        v
       CDM
 
 ```
 
-CDM xử lý license và làm key khả dụng cho session.
-
-Conceptually:
+The CDM unpacks the license within its isolated cryptographic context and activates the key:
 
 ```text
 CDM Key Store / Session
@@ -1598,13 +1563,13 @@ KID UUID-A
 
 ```
 
-Application không cần — và thông thường không được — nhìn thấy plaintext key.
+The application layer remains completely blind to the plaintext key material.
 
 ---
 
 # 27. Decrypt Media Sample
 
-Player tiếp tục tải encrypted CMAF fragments:
+The player continues downloading encrypted CMAF media fragments:
 
 ```text
 segment_001.m4s
@@ -1613,33 +1578,33 @@ segment_002.m4s
 
 ```
 
-Một encrypted sample có:
+Each encrypted sample includes:
 
 ```text
 Encrypted Sample
 |
-+-- KID / key association
++-- KID association
 +-- IV
-+-- encryption scheme
-+-- subsample information
-+-- ciphertext
++-- encryption scheme (cenc or cbcs)
++-- subsample mapping
++-- ciphertext payload
 
 ```
 
-Decryptor/CDM xác định:
+The CDM / Decryptor matches:
 
 ```text
 KID = UUID-A
       |
       v
-Find Key
+Locate Key in CDM
       |
       v
 SECRET-A
 
 ```
 
-Sau đó:
+Decryption arithmetic:
 
 ```text
 Ciphertext
@@ -1658,15 +1623,15 @@ Clear Compressed Sample
 
 ```
 
-Đây chính là phép toán ngược với packaging side.
+This exactly reverses the packaging encryption transformation.
 
 ---
 
 # 28. Decoder
 
-Sau DRM decryption, dữ liệu chưa phải raw video frame.
+Following DRM decryption, the data is not yet raw video frames.
 
-Nó vẫn là **compressed media**:
+It remains **compressed elementary media**:
 
 ```text
 Encrypted H.264 Sample
@@ -1675,13 +1640,13 @@ Encrypted H.264 Sample
         v
 Clear H.264 Sample
         |
-        | H.264 decoder
+        | H.264 codec decode
         v
 Raw Video Frame
 
 ```
 
-Tương tự:
+Similarly for HEVC:
 
 ```text
 Encrypted HEVC
@@ -1696,30 +1661,26 @@ Clear HEVC
 HEVC Decoder
       |
       v
-Video Frame
+Raw Video Frame
 
 ```
 
-Do đó cần phân biệt:
+Critical conceptual distinction:
 
 ```text
-DECRYPT
-    ≠
-DECODE
+DECRYPTION ≠ DECODING
 
 ```
 
-Decrypt:
-
+Decryption:
 ```text
-ciphertext > clear compressed media
+ciphertext -> clear compressed media (H.264/HEVC/AAC)
 
 ```
 
-Decode:
-
+Decoding:
 ```text
-compressed media > raw video/audio
+compressed media -> raw uncompressed frames (YUV/PCM)
 
 ```
 
@@ -1727,13 +1688,11 @@ compressed media > raw video/audio
 
 # 29. Secure Playback Path
 
-Ở DRM security level cao, Content Key và clear media không nhất thiết được expose cho normal application memory.
-
-Conceptually:
+At elevated DRM security levels (e.g. Widevine L1, PlayReady SL3000), Content Keys and decrypted media samples are never exposed to general application memory.
 
 ```text
-              Untrusted World
-----------------------------------------
+              Untrusted User Space
+--------------------------------------------------
 
 Application
 Browser
@@ -1741,99 +1700,90 @@ Network
 Encrypted Media
 
 
-              Security Boundary
-----------------------------------------
+              Security Boundary (Hardware / TEE)
+--------------------------------------------------
 
-                    CDM
-                     |
-                     | protected key
-                     v
-                  Decrypt
-                     |
-                     v
-               Secure Decoder
-                     |
-                     v
-              Secure Video Path
-                     |
-                     v
-                  Display
+                     CDM
+                      |
+                      | protected key
+                      v
+                   Decrypt
+                      |
+                      v
+                Secure Decoder
+                      |
+                      v
+               Secure Video Path
+                      |
+                      v
+                   Display (HDCP Protected)
 
 ```
 
-Implementation cụ thể phụ thuộc DRM, OS và hardware.
-
-Có thể có:
+Protective hardware mechanisms:
 
 ```text
-TEE
-Trusted Execution Environment
-
-Hardware-backed key storage
-
-Secure Decoder
-
-Protected Video Path
-
-HDCP
+TEE (Trusted Execution Environment)
+Hardware-backed key provisioning & storage
+Secure Hardware Decoders
+Protected Video Pipeline
+HDCP link encryption
 
 ```
 
-Mục tiêu là hạn chế việc plaintext key hoặc decoded high-value content xuất hiện ở vùng memory mà application thông thường có thể truy cập.
+This ensures that neither raw Content Keys nor uncompressed 4K video frames can be scraped from host memory by malicious processes.
 
 ---
 
 # 30. Software DRM vs Hardware-backed DRM
 
-Conceptually:
+Conceptual comparison:
 
 ```text
-Software DRM
+Software DRM (e.g. Widevine L3)
 
 Encrypted Media
       |
       v
-Software CDM
+Software CDM (User space library)
       |
       v
-Software Decryption
+Software Decryption (Host CPU memory)
       |
       v
-Decoder
+Decoder (System media framework)
 
 ```
 
-Hardware-backed:
+Hardware-backed DRM (e.g. Widevine L1, Apple FairPlay):
 
 ```text
 Encrypted Media
       |
       v
-CDM / Trusted Environment
+CDM / Trusted Environment (TEE / Secure Enclave)
       |
       v
 Hardware-backed Key Handling
       |
       v
-Secure Decryption
+Secure Hardware Decryption
       |
       v
 Secure Decoder
       |
       v
-Protected Output
+Protected Video Pipeline & Display
 
 ```
 
-Exact security architecture phụ thuộc platform và DRM implementation.
-
 ---
 
-# 31. Key Service và License Service phải đồng bộ
+# 31. Synchronization Invariant Between Key Service & License Service
 
-Đây là invariant quan trọng nhất của DRM backend.
+This represents the foundational invariant of any DRM architecture:
 
-Packaging:
+Packaging phase:
 
 ```text
 KID UUID-A
@@ -1849,7 +1799,7 @@ Encrypt Media
 
 ```
 
-Playback:
+Playback phase:
 
 ```text
 KID UUID-A
@@ -1865,7 +1815,7 @@ Decrypt Media
 
 ```
 
-Nếu:
+If key synchronization fails:
 
 ```text
 Encryption Key = SECRET-A
@@ -1874,7 +1824,7 @@ Decryption Key = SECRET-B
 
 ```
 
-thì:
+then:
 
 ```text
 Ciphertext
@@ -1882,19 +1832,19 @@ Ciphertext
 SECRET-B
     |
     v
-INVALID DATA
+INVALID DATA / CORRUPTED FRAMES
 
 ```
 
-Playback thất bại.
+Playback immediately fails.
 
 ---
 
 # 32. Key Rotation
 
-Không bắt buộc một stream phải dùng một Content Key mãi mãi.
+Live streaming systems do not require using a single Content Key indefinitely.
 
-Ví dụ live stream:
+In live streaming, keys can rotate periodically across time windows:
 
 ```text
 TIME ----------------------------------------->
@@ -1908,29 +1858,29 @@ segment 1-10      segment 11-20     segment 21-30
 
 ```
 
-Player/CDM phải acquire và sử dụng đúng key tương ứng với từng period.
+The player and CDM acquire and activate keys dynamically as playback crosses period boundaries.
 
-CPIX hỗ trợ mô hình key periods cho content preparation.
+CPIX natively defines key period specifications for packagers.
 
 ---
 
 # 33. Multi-DRM
 
-Multi-DRM không nhất thiết có nghĩa:
+Multi-DRM does not require duplicating video storage:
 
 ```text
 Widevine
-    > encrypted copy A
+    > encrypted copy A (NOT REQUIRED)
 
 PlayReady
-    > encrypted copy B
+    > encrypted copy B (NOT REQUIRED)
 
 FairPlay
-    > encrypted copy C
+    > encrypted copy C (NOT REQUIRED)
 
 ```
 
-Common Encryption cho phép:
+Common Encryption enables:
 
 ```text
                   Encrypted CMAF
@@ -1941,76 +1891,67 @@ Common Encryption cho phép:
 
 ```
 
-nếu các DRM và client target cùng hỗ trợ encryption scheme được chọn.
+provided that target DRMs and client platforms support the shared scheme (e.g. `cbcs`).
 
-Sự khác biệt chủ yếu nằm ở:
+Platform variations exist solely in:
 
 ```text
-DRM signaling
-
-License protocol
-
-License format
-
-CDM
-
-Security level
-
-Policy enforcement
+DRM signaling metadata
+License protocols
+License container formats
+CDM implementations
+Hardware security certifications
+Policy enforcement mechanisms
 
 ```
 
-chứ không nhất thiết ở ciphertext.
+The underlying media ciphertext remains 100% identical.
 
 ---
 
 # 34. Security Boundaries
 
-Có thể chia dữ liệu thành ba nhóm.
+Data assets fall into three security classifications:
 
-### Public / distributable
+### Public / Distributable Assets
 
 ```text
-Encrypted CMAF
-Manifest
-KID
-PSSH
-DRM signaling
+Encrypted CMAF fragments (.m4s)
+Manifest files (.mpd, .m3u8)
+KID (Key ID)
+PSSH boxes
+DRM signaling descriptors
 
 ```
 
-### Secret
+### Secret Credentials
 
 ```text
-Content Key
-Key Seed
-Provider credentials
-Signing secrets
+Content Keys
+Key Seed material
+DRM provider API credentials
+Entitlement signing secret keys (Communication Keys)
 
 ```
 
-### DRM-protected
+### DRM-Protected Material
 
 ```text
-DRM License
-Device credentials
-CDM state
-Protected key material
+DRM License tokens
+Device credentials / private keys
+Internal CDM state
+Hardware-wrapped key storage
 
 ```
 
-Content Key không nên:
+Content Keys must never be:
 
 ```text
-log ra console
-
-ghi plaintext vào disk nếu không cần
-
-đưa vào metrics
-
-đưa vào error message
-
-expose qua application API
+printed to console or stdout logs
+written to unencrypted disk storage without necessity
+included in telemetry metrics
+embedded in operational error messages
+exposed over client-facing application APIs
 
 ```
 
@@ -2171,7 +2112,7 @@ expose qua application API
 
 # 36. Mental Model
 
-Nếu chỉ nhớ một flow:
+If you retain only one complete flow:
 
 ```text
 1. KEY ACQUISITION
@@ -2257,7 +2198,7 @@ Video / Audio
 Playback
 ```
 
-Hay ngắn nhất:
+Or in the most concise summary:
 
 ```text
 PACKAGING
@@ -2280,32 +2221,24 @@ Entitlement ----------------+                              |
                                               Encrypted Media --> Decrypt
 ```
 
-Đây là xương sống của toàn bộ DRM system.
+This represents the architectural backbone of end-to-end DRM systems:
 
-**Key Service giúp Encryptor có Content Key ở packaging time.**
-
-**Entitlement Service quyết định user/client có quyền xin license cho content/KID nào.**
-
-**License Service chỉ phát DRM License sau khi authorization hợp lệ và DRM request thỏa policy.**
-
-**License Service giúp CDM có cùng Content Key ở playback time, nhưng ở dạng được DRM bảo vệ.**
-
-**CPIX/SPEKE giải quyết key exchange phía packaging.**
-
-**Signed Entitlement + DRM License Challenge giải quyết authorization/license acquisition phía playback.**
-
-**Widevine / PlayReady / FairPlay giải quyết license format, key protection, device trust và policy enforcement phía playback.**
-
-**Common Encryption (`cenc` / `cbcs`) định nghĩa cách media được encrypt/decrypt.**
-
-**CDM giữ và sử dụng key để decrypt media trên thiết bị.**
+- **Key Service provisions the Content Key to the Encryptor during packaging.**
+- **Entitlement Service determines whether the user/client is entitled to request a license for a specific content/KID.**
+- **License Service issues a DRM License only after valid authorization and compliant DRM policy evaluation.**
+- **License Service delivers the exact same Content Key to the client CDM, securely wrapped by DRM.**
+- **CPIX/SPEKE handles key exchange on the packaging side.**
+- **Signed Entitlement + DRM License Challenge orchestrates authorization and license acquisition on the playback side.**
+- **Widevine / PlayReady / FairPlay manages license formatting, key protection, device trust, and policy enforcement on playback devices.**
+- **Common Encryption (`cenc` / `cbcs`) specifies how media samples are encrypted and decrypted.**
+- **The CDM retains and utilizes keys to decrypt media inside the secure client environment.**
 
 ---
 
-# 37. Tài liệu tham khảo
+# 37. References
 
-- DASH-IF CPIX: https://dashif.org/CPIX/
-- W3C Encrypted Media Extensions: https://www.w3.org/TR/encrypted-media/
+- DASH-IF CPIX Specification: https://dashif.org/CPIX/
+- W3C Encrypted Media Extensions (EME): https://www.w3.org/TR/encrypted-media/
 - Axinom DRM License Service: https://docs.axinom.com/services/drm/license-service/
 - Axinom License Acquisition API: https://docs.axinom.com/services/drm/license-service/license-acquisition-api
 - Axinom — Sign License Service Message: https://docs.axinom.com/services/drm/how-to-guides/sign-license-service-message
