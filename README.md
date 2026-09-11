@@ -364,7 +364,7 @@ To ensure reproducible builds and avoid unexpected breaking changes from in-flig
 
 ```toml
 [dependencies]
-drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.0" }
+drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.1" }
 ```
 
 > [!NOTE]
@@ -384,21 +384,27 @@ drmpack = { path = "../drmpack" }
 
 ### Feature Flags
 
-`drmpack` exposes modular cargo feature flags:
-
-| Feature Flag | Default | Description |
-| :--- | :--- | :--- |
-| `cpix` | Yes | DASH-IF CPIX 2.3 request builder, response parser, and `CpixProvider`. |
-| `speke-v2` | Yes | AWS SPEKE v2 wire client (`SpekeClient`) with SigV4 and token authentication. |
-| `axinom` | Yes | Axinom Key Service provider, signing utilities, and token generator. |
-| `license-proxy` | Yes | In-process DRM license proxy client, handlers, and FairPlay cert cache. |
-
-To disable default features and compile only core packaging orchestration with static keys:
+All enterprise DRM features (`axinom`, `speke-v2`, `cpix`, `license-proxy`) are **enabled by default**. The standard import provides out-of-the-box integration for Axinom Key Service, SPEKE v2, and DRM license proxying:
 
 ```toml
 [dependencies]
-drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.0", default-features = false }
+drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.1" }
 ```
+
+| Feature Flag | Default | Description |
+| :--- | :--- | :--- |
+| `cpix` | **Yes** | DASH-IF CPIX 2.3 request builder, response parser, and `CpixProvider`. |
+| `speke-v2` | **Yes** | AWS SPEKE v2 wire client (`SpekeClient`) with SigV4 and token authentication. |
+| `axinom` | **Yes** | Axinom Key Service provider, signing utilities, and token generator. |
+| `license-proxy` | **Yes** | In-process DRM license proxy client, handlers, and FairPlay cert cache. |
+
+> [!TIP]
+> **Minimal Build (`default-features = false`)**: If your pipeline uses static/pre-shared keys (via `StaticKeySource` or raw keys) and does not call remote key servers, you can disable default features to strip HTTP client (`reqwest`), XML parser, and crypto (`ring`) dependencies for faster build times and smaller binary footprints:
+>
+> ```toml
+> [dependencies]
+> drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.1", default-features = false }
+> ```
 
 ## Documentation
 

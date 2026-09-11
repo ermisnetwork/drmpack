@@ -71,6 +71,8 @@ By applying `#[serde(rename_all = "lowercase")]` alongside `#[serde(alias = "Cen
     - **`cenc`**: The 'cenc' mode, defined in [CENC], section 4.2a.
     - **`cbcs`**: The 'cbcs' mode, defined in [CENC], section 4.2d.
     - **`cbcs-1-9`**: The same as 'cbcs' mode, with encrypt:skip pattern of 1:9.
+    
+    > **Note:** The W3C EME specification also defines a `cbcs-1-9` variant with a fixed 1:9 encryption pattern. In practice, all major DRM systems (Widevine, FairPlay, PlayReady) use the 1:9 pattern by default when `cbcs` is specified, making the two values functionally equivalent for production use.
 
 - **Strict Case Sensitivity in Browsers:**
   - Section 3.2.2.3 (*Get Supported Capabilities for Audio/Video Type*) specifies that string comparison in EME is **case-sensitive**.

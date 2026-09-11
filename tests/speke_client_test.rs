@@ -281,7 +281,7 @@ async fn test_speke_client_basic_auth_and_headers() {
     );
     assert_eq!(
         r.headers.get("user-agent").map(|s| s.as_str()),
-        Some("drmpack/0.1.0")
+        Some(concat!("drmpack/", env!("CARGO_PKG_VERSION")))
     );
     assert_eq!(
         r.headers.get("content-type").map(|s| s.as_str()),

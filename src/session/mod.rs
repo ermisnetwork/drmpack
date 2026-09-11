@@ -35,6 +35,12 @@ use tokio_util::sync::{CancellationToken, PollSender};
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
+use memchr::memmem;
+use std::sync::LazyLock;
+
+static MOOF_FINDER: LazyLock<memmem::Finder<'static>> =
+    LazyLock::new(|| memmem::Finder::new(b"moof"));
+
 const DEFAULT_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WATCHDOG_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -117,12 +123,11 @@ impl PackagingSessionConfig {
         }
     }
 
-    /// Preconfigured preset for standard live CENC streaming (Widevine + PlayReady, LowLatency).
+    /// Preconfigured preset for standard live CENC streaming (Widevine + PlayReady). Standard latency per ADR-0014.
     pub fn cenc(content_id: impl Into<String>) -> Self {
         let mut s = Self::new(content_id);
         s.encryption_scheme = EncryptionScheme::Cenc;
         s.drm_systems = vec![DrmSystem::Widevine, DrmSystem::PlayReady];
-        s.latency_mode = LatencyMode::LowLatency;
         s
     }
 
@@ -545,12 +550,17 @@ impl PackagingSession {
                 if let Some(ref htx) = heartbeat_tx {
                     let _ = htx.try_send(());
                 }
-                if bytes.windows(4).any(|w| w == b"moof") {
-                    has_pushed_media.store(true, Ordering::Release);
+                if !has_pushed_media.load(Ordering::Relaxed) {
+                    let scan_limit = bytes.len().min(4096);
+                    if MOOF_FINDER.find(&bytes[..scan_limit]).is_some() {
+                        has_pushed_media.store(true, Ordering::Release);
+                    }
                 }
                 let write_failures = cluster.write_data(&bytes).await;
                 if !write_failures.is_empty() {
                     error!(failures = ?write_failures, "SessionWriter: write_data failed, stopping forwarding task");
+                    is_terminal.store(true, Ordering::Release);
+                    cancellation_token.cancel();
                     break;
                 }
             }
@@ -572,7 +582,12 @@ impl PackagingSession {
     #[instrument(skip(self, bytes), fields(len = bytes.as_ref().len()))]
     pub async fn push(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
         let slice = bytes.as_ref();
-        let is_media = slice.windows(4).any(|w| w == b"moof");
+        let is_media = if !self.has_pushed_media.load(Ordering::Relaxed) {
+            let scan_limit = slice.len().min(4096);
+            MOOF_FINDER.find(&slice[..scan_limit]).is_some()
+        } else {
+            true
+        };
         self.push_data(slice, is_media).await
     }
 
@@ -2366,7 +2381,7 @@ mod tests {
             cenc_cfg.drm_systems,
             vec![DrmSystem::Widevine, DrmSystem::PlayReady]
         );
-        assert_eq!(cenc_cfg.latency_mode, LatencyMode::LowLatency);
+        assert_eq!(cenc_cfg.latency_mode, LatencyMode::Standard);
         assert_eq!(cenc_cfg.segment_duration, 2.0);
         assert_eq!(cenc_cfg.chunk_duration, 0.2);
 
@@ -2745,5 +2760,32 @@ mod tests {
 
         let mut session = session.unwrap();
         let _ = session.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_moof_scan_latch() {
+        use std::sync::atomic::Ordering;
+        let r1 = Rendition::video(QualityTier::hd());
+        let key_source = crate::key::StaticKeySource::shared_key([0x55; 16]);
+        let config = PackagingSessionConfig::cenc("moof_latch_test")
+            .with_rendition(r1)
+            .with_gpac_bin("false"); // doesn't matter for this test
+
+        let mut session = PackagingSession::create(config, &key_source).await.unwrap();
+
+        // Initial state
+        assert!(!session.has_pushed_media.load(Ordering::Relaxed));
+
+        // Push buffer without moof
+        let _ = session.push(b"no-m00f-here").await;
+        assert!(!session.has_pushed_media.load(Ordering::Relaxed));
+
+        // Push buffer with moof
+        let _ = session.push(b"moof-is-here").await;
+        assert!(session.has_pushed_media.load(Ordering::Relaxed));
+
+        // Push buffer without moof AGAIN, it should NOT reset the latch
+        let _ = session.push(b"no-m00f-here-either").await;
+        assert!(session.has_pushed_media.load(Ordering::Relaxed));
     }
 }

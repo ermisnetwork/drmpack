@@ -4,7 +4,8 @@ use crate::license::response::LicenseResponse;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
+
 use tracing::{debug, warn};
 
 /// Trait converting various types into an optional FairPlay Certificate URL.
@@ -52,7 +53,7 @@ impl<T: IntoCertUrl> IntoCertUrl for Option<T> {
 pub struct LicenseProxy {
     client: reqwest::Client,
     config: LicenseProxyConfig,
-    fairplay_cert_cache: Arc<RwLock<HashMap<String, bytes::Bytes>>>,
+    fairplay_cert_cache: Arc<Mutex<HashMap<String, bytes::Bytes>>>,
 }
 
 impl fmt::Debug for LicenseProxy {
@@ -70,7 +71,13 @@ impl LicenseProxy {
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "reqwest client builder failed, using fallback with default timeout");
+                reqwest::Client::builder()
+                    .timeout(config.timeout)
+                    .build()
+                    .expect("reqwest fallback client with only timeout should never fail")
+            });
         Self::with_client(config, client)
     }
 
@@ -92,7 +99,7 @@ impl LicenseProxy {
         Self {
             client,
             config: config.into(),
-            fairplay_cert_cache: Arc::new(RwLock::new(HashMap::new())),
+            fairplay_cert_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -109,7 +116,7 @@ impl LicenseProxy {
     /// Return the currently cached FairPlay certificate for the configured endpoint, if any.
     pub async fn cached_fairplay_certificate(&self) -> Option<bytes::Bytes> {
         let cert_url = self.config.fairplay_cert_url.as_ref()?;
-        let lock = self.fairplay_cert_cache.read().await;
+        let lock = self.fairplay_cert_cache.lock().await;
         lock.get(cert_url).cloned()
     }
 
@@ -120,13 +127,13 @@ impl LicenseProxy {
             .fairplay_cert_url
             .clone()
             .unwrap_or_else(|| "manual".to_string());
-        let mut lock = self.fairplay_cert_cache.write().await;
+        let mut lock = self.fairplay_cert_cache.lock().await;
         lock.insert(key, cert);
     }
 
     /// Clear the FairPlay certificate cache.
     pub async fn clear_fairplay_certificate(&self) {
-        let mut lock = self.fairplay_cert_cache.write().await;
+        let mut lock = self.fairplay_cert_cache.lock().await;
         lock.clear();
     }
 
@@ -212,15 +219,12 @@ impl LicenseProxy {
             )));
         }
 
-        // 1. Check read lock first (fast path)
-        {
-            let lock = self.fairplay_cert_cache.read().await;
-            if let Some(cert) = lock.get(trimmed_url) {
-                return Ok(cert.clone());
-            }
+        let mut lock = self.fairplay_cert_cache.lock().await;
+        if let Some(cert) = lock.get(trimmed_url) {
+            return Ok(cert.clone());
         }
 
-        // 2. Fetch certificate over network WITHOUT holding any lock to prevent contention
+        // 2. Fetch certificate over network while holding lock to prevent thundering herd
         let mut req = self
             .client
             .get(trimmed_url)
@@ -265,8 +269,7 @@ impl LicenseProxy {
             });
         }
 
-        // 3. Briefly acquire write lock solely to insert the fetched certificate
-        let mut lock = self.fairplay_cert_cache.write().await;
+        // 3. Insert the fetched certificate
         lock.insert(trimmed_url.to_string(), data.clone());
         Ok(data)
     }
@@ -546,5 +549,67 @@ mod tests {
 
         let opt_none: Option<&str> = None;
         assert_eq!(opt_none.into_cert_url(), None);
+    }
+
+    #[tokio::test]
+    async fn test_license_proxy_concurrent_cert_fetch() {
+        use axum::{routing::get, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+
+        let req_count = Arc::new(AtomicUsize::new(0));
+        let req_count_clone = req_count.clone();
+
+        let app = Router::new().route(
+            "/cert",
+            get(move || {
+                let count = req_count_clone.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    bytes::Bytes::from_static(b"cert_data")
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = LicenseProxyConfig::new(
+            "https://example.com/wv",
+            "https://example.com/fp",
+            "https://example.com/pr",
+            Some(format!("http://{}/cert", addr)),
+        );
+        let proxy = Arc::new(LicenseProxy::new(config));
+
+        // Spawn 10 concurrent requests
+        let mut tasks = vec![];
+        for _ in 0..10 {
+            let proxy_clone = proxy.clone();
+            tasks.push(tokio::spawn(async move {
+                proxy_clone
+                    .handle_fairplay_certificate(None::<&str>)
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut results = vec![];
+        for task in tasks {
+            results.push(task.await);
+        }
+
+        for res in results {
+            assert_eq!(res.unwrap(), bytes::Bytes::from_static(b"cert_data"));
+        }
+
+        // Only 1 request should have hit the server because of the lock
+        assert_eq!(req_count.load(Ordering::SeqCst), 1);
     }
 }

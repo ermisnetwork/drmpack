@@ -75,6 +75,7 @@ pub fn diagnose_gpac_crash(exit_code: Option<i32>, stderr: &str) -> &'static str
     }
 }
 
+#[cfg(feature = "license-proxy")]
 fn format_license_diagnostic(diagnostic: &Option<String>) -> String {
     match diagnostic {
         Some(diag) if !diag.is_empty() => format!(" [Diagnostic: {diag}]"),

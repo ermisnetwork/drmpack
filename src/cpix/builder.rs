@@ -136,15 +136,7 @@ impl CpixRequestBuilder {
         for spec in &specs {
             let intended_track_type = match spec.track_type {
                 TrackType::Video => spec.quality_tier.0.clone(),
-                TrackType::Audio => {
-                    if spec.quality_tier == QualityTier::audio()
-                        || spec.quality_tier == QualityTier::sd()
-                    {
-                        "AUDIO".to_string()
-                    } else {
-                        format!("AUDIO_{}", spec.quality_tier)
-                    }
-                }
+                TrackType::Audio => "AUDIO".to_string(),
                 TrackType::Subtitle => "SUBTITLE".to_string(),
             };
 

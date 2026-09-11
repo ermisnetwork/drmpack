@@ -6,7 +6,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -254,7 +254,7 @@ impl GpacProcessConfig {
 /// Managed GPAC child process instance monitored by a ProcessSupervisor task.
 pub struct GpacProcess {
     config: GpacProcessConfig,
-    stdin: Option<BufWriter<ChildStdin>>,
+    stdin: Option<ChildStdin>,
     stderr_buffer: Arc<Mutex<VecDeque<String>>>,
     pub(crate) is_running: Arc<AtomicBool>,
     status_rx: watch::Receiver<Option<ProcessExitStatus>>,
@@ -384,7 +384,7 @@ impl GpacProcess {
 
         Ok(Self {
             config,
-            stdin: Some(BufWriter::new(stdin)),
+            stdin: Some(stdin),
             stderr_buffer,
             is_running,
             status_rx,
@@ -401,9 +401,6 @@ impl GpacProcess {
         if let Some(ref mut stdin) = self.stdin {
             if let Err(e) = stdin.write_all(data).await {
                 return Err(self.map_stdin_io_error("write to", e).await);
-            }
-            if let Err(e) = stdin.flush().await {
-                return Err(self.map_stdin_io_error("flush", e).await);
             }
             Ok(())
         } else {
