@@ -364,7 +364,7 @@ To ensure reproducible builds and avoid unexpected breaking changes from in-flig
 
 ```toml
 [dependencies]
-drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.0" }
+drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.1" }
 ```
 
 > [!NOTE]
@@ -397,7 +397,7 @@ To disable default features and compile only core packaging orchestration with s
 
 ```toml
 [dependencies]
-drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.0", default-features = false }
+drmpack = { git = "https://github.com/ermisnetwork/drmpack.git", tag = "v0.1.1", default-features = false }
 ```
 
 ## Documentation
