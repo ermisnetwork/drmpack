@@ -2,7 +2,6 @@ use crate::error::{DrmpackError, Result};
 use crate::key::{ContentKey, KeySet, PsshData};
 use crate::types::{DrmSystem, EncryptionScheme, QualityTier, TrackType};
 use base64::prelude::*;
-use memchr::memmem;
 use std::fmt::Write;
 use uuid::Uuid;
 

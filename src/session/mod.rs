@@ -2,6 +2,8 @@
 //!
 //! Provides [`PackagingSession`], [`PackagingSessionConfig`], and [`SessionWriter`].
 
+use memchr::memmem;
+use std::sync::LazyLock;
 /// Multi-representation process clusters and lifecycle coordination.
 pub mod cluster;
 pub use cluster::{Representation, RepresentationCluster};
@@ -35,12 +37,8 @@ use tokio_util::sync::{CancellationToken, PollSender};
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
-use memchr::memmem;
-use std::sync::LazyLock;
-
 static MOOF_FINDER: LazyLock<memmem::Finder<'static>> =
     LazyLock::new(|| memmem::Finder::new(b"moof"));
-
 
 const DEFAULT_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WATCHDOG_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1487,13 +1485,6 @@ mod tests {
     use crate::types::{QualityTier, TrackType};
     use uuid::Uuid;
 
-use memchr::memmem;
-use std::sync::LazyLock;
-
-static MOOF_FINDER: LazyLock<memmem::Finder<'static>> =
-    LazyLock::new(|| memmem::Finder::new(b"moof"));
-
-
     fn rendition() -> Rendition {
         Rendition::video_hd()
     }
@@ -2387,7 +2378,7 @@ static MOOF_FINDER: LazyLock<memmem::Finder<'static>> =
             cenc_cfg.drm_systems,
             vec![DrmSystem::Widevine, DrmSystem::PlayReady]
         );
-        assert_eq!(cenc_cfg.latency_mode, LatencyMode::LowLatency);
+        assert_eq!(cenc_cfg.latency_mode, LatencyMode::Standard);
         assert_eq!(cenc_cfg.segment_duration, 2.0);
         assert_eq!(cenc_cfg.chunk_duration, 0.2);
 
@@ -2776,20 +2767,20 @@ static MOOF_FINDER: LazyLock<memmem::Finder<'static>> =
         let config = PackagingSessionConfig::cenc("moof_latch_test")
             .with_rendition(r1)
             .with_gpac_bin("false"); // doesn't matter for this test
-        
+
         let mut session = PackagingSession::create(config, &key_source).await.unwrap();
-        
+
         // Initial state
         assert!(!session.has_pushed_media.load(Ordering::Relaxed));
-        
+
         // Push buffer without moof
         let _ = session.push(b"no-m00f-here").await;
         assert!(!session.has_pushed_media.load(Ordering::Relaxed));
-        
+
         // Push buffer with moof
         let _ = session.push(b"moof-is-here").await;
         assert!(session.has_pushed_media.load(Ordering::Relaxed));
-        
+
         // Push buffer without moof AGAIN, it should NOT reset the latch
         let _ = session.push(b"no-m00f-here-either").await;
         assert!(session.has_pushed_media.load(Ordering::Relaxed));

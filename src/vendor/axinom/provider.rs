@@ -73,12 +73,15 @@ impl KeyProvider for AxinomProvider {
         if concrete_schemes.len() > 1 {
             let mut combined_set = KeySet::new();
             // Build requests first
-            let mut reqs: Vec<KeyRequest> = concrete_schemes.into_iter().map(|scheme| {
-                let mut single_req = request.clone();
-                single_req.encryption_schemes = vec![scheme];
-                single_req
-            }).collect();
-            
+            let mut reqs: Vec<KeyRequest> = concrete_schemes
+                .into_iter()
+                .map(|scheme| {
+                    let mut single_req = request.clone();
+                    single_req.encryption_schemes = vec![scheme];
+                    single_req
+                })
+                .collect();
+
             // For exactly 2 schemes (CENC + CBCS), use try_join!
             if reqs.len() == 2 {
                 let req_b = reqs.pop().unwrap();
