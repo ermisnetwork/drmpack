@@ -2,8 +2,6 @@
 //!
 //! Provides [`PackagingSession`], [`PackagingSessionConfig`], and [`SessionWriter`].
 
-use memchr::memmem;
-use std::sync::LazyLock;
 /// Multi-representation process clusters and lifecycle coordination.
 pub mod cluster;
 pub use cluster::{Representation, RepresentationCluster};
@@ -36,6 +34,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, PollSender};
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
+
+use memchr::memmem;
+use std::sync::LazyLock;
 
 static MOOF_FINDER: LazyLock<memmem::Finder<'static>> =
     LazyLock::new(|| memmem::Finder::new(b"moof"));
