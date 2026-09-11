@@ -21,29 +21,22 @@ pub struct KeyPlan {
 
 fn video_tier_rank(rendition: &Rendition) -> u32 {
     let name = rendition.quality_tier.0.to_uppercase();
-    if name.contains("8K") {
-        4320
-    } else if name.contains("4K") || name.contains("UHD") {
-        2160
-    } else if name.contains("1080") || name.contains("FHD") {
-        1080
-    } else if name.contains("HD") || name.contains("720") {
-        720
-    } else if name.contains("SD") || name.contains("480") || name.contains("360") {
-        480
-    } else {
-        0
+    match name.as_str() {
+        n if n.contains("8K") => 4320,
+        n if n.contains("4K") || n.contains("UHD") => 2160,
+        n if n.contains("1080") || n.contains("FHD") => 1080,
+        n if n.contains("HD") || n.contains("720") => 720,
+        n if n.contains("SD") || n.contains("480") || n.contains("360") => 480,
+        _ => 0,
     }
 }
 
 fn audio_tier_rank(rendition: &Rendition) -> u32 {
     let name = rendition.quality_tier.0.to_uppercase();
-    if name.contains("HD") || name.contains("HIGH") {
-        256
-    } else if name.contains("AUDIO") || name.contains("SD") || name.contains("STANDARD") {
-        128
-    } else {
-        64
+    match name.as_str() {
+        n if n.contains("HD") || n.contains("HIGH") => 256,
+        n if n.contains("AUDIO") || n.contains("SD") || n.contains("STANDARD") => 128,
+        _ => 64,
     }
 }
 

@@ -559,6 +559,8 @@ impl PackagingSession {
                 let write_failures = cluster.write_data(&bytes).await;
                 if !write_failures.is_empty() {
                     error!(failures = ?write_failures, "SessionWriter: write_data failed, stopping forwarding task");
+                    is_terminal.store(true, Ordering::Release);
+                    cancellation_token.cancel();
                     break;
                 }
             }
