@@ -96,9 +96,10 @@ impl fmt::Display for ManifestFormat {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LatencyMode {
     /// Standard delivery with traditional segment durations (2s - 6s).
+    /// This is the canonical production baseline per ADR-0014.
+    #[default]
     Standard,
     /// Low-latency streaming with CMAF chunking, LL-HLS partial segments, and LL-DASH availability time offset.
-    #[default]
     LowLatency,
 }
 
@@ -496,5 +497,10 @@ mod tests {
         assert_eq!(ArtifactKind::InitSegment.to_string(), "init_segment");
         assert_eq!(ArtifactKind::MediaSegment.to_string(), "media_segment");
         assert_eq!(ArtifactKind::Manifest.to_string(), "manifest");
+    }
+
+    #[test]
+    fn test_latency_mode_default() {
+        assert_eq!(LatencyMode::default(), LatencyMode::Standard);
     }
 }

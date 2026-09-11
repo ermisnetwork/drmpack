@@ -58,10 +58,7 @@ impl SpekeExchangeResponse {
         let body_trim = self.body.trim();
         let truncated_storage;
         let body_bounded = if body_trim.len() > 2048 {
-            let mut end = 2048;
-            while !body_trim.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = body_trim.floor_char_boundary(2048);
             truncated_storage = format!("{}...", &body_trim[..end]);
             truncated_storage.as_str()
         } else {

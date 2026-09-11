@@ -163,6 +163,7 @@ dependencies = [
  "base64",
  "bytes",
  "dotenvy",
+ "memchr",
  "notify",
  "quick-xml",
  "reqwest",

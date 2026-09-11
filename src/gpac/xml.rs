@@ -2,6 +2,7 @@ use crate::error::{DrmpackError, Result};
 use crate::key::{ContentKey, KeySet, PsshData};
 use crate::types::{DrmSystem, EncryptionScheme, QualityTier, TrackType};
 use base64::prelude::*;
+use memchr::memmem;
 use std::fmt::Write;
 use uuid::Uuid;
 
@@ -302,13 +303,12 @@ fn build_hls_info(
             }
             has_fairplay = true;
             let mut skd_uri = if !pssh.data.is_empty() {
-                let s = String::from_utf8_lossy(&pssh.data);
-                if s.starts_with("skd://") {
-                    s.to_string()
-                } else if let Some(start) = s.find("URI=\"skd://") {
-                    let rem = &s[start + 5..];
-                    if let Some(end) = rem.find('"') {
-                        rem[..end].to_string()
+                if pssh.data.starts_with(b"skd://") {
+                    String::from_utf8_lossy(&pssh.data).to_string()
+                } else if let Some(start) = memchr::memmem::find(&pssh.data, b"URI=\"skd://") {
+                    let rem = &pssh.data[start + 5..];
+                    if let Some(end) = memchr::memmem::find(rem, b"\"") {
+                        String::from_utf8_lossy(&rem[..end]).to_string()
                     } else {
                         format!("skd://{}", key.kid.0.hyphenated())
                     }
