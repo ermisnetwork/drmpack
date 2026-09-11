@@ -334,7 +334,7 @@ async fn test_axinom_provider_headers_and_basic_auth() {
     );
     assert_eq!(
         r.headers.get("user-agent").map(|s| s.as_str()),
-        Some("drmpack/0.1.0")
+        Some(concat!("drmpack/", env!("CARGO_PKG_VERSION")))
     );
 
     // 3. XML Content-Type and Accept headers

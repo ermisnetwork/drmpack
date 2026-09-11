@@ -3,7 +3,7 @@ name = "drmpack"
 version = "0.1.1"
 edition = "2021"
 description = "Native Rust DRM packaging library for CENC/CBCS fMP4 and HLS/DASH manifests"
-authors = ["ermis-stream"]
+authors = ["sub2s"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ermisnetwork/drmpack"
 
