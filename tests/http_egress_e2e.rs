@@ -496,46 +496,12 @@ async fn test_http_egress_unclaimed_receiver_closed_cleanly() {
         .await
         .expect("Unclaimed HttpPush session must close cleanly without deadlock");
 
-    assert_no_media_segment_files(&out_dir);
-    let _ = tokio::fs::remove_dir_all(&out_dir).await;
-}
-
-#[tokio::test]
-async fn test_http_egress_take_output_receiver_after_close_returns_none() {
-    if !media_tools_available() {
-        require_media_tools();
-        return;
-    }
-
-    let key_provider = StaticKeySource::shared_key([0x33; 16]);
-    let out_dir = std::env::temp_dir().join(format!("drmpack_http_after_close_{}", Uuid::new_v4()));
-
-    let config = PackagingSessionConfig::cenc("e2e-http-after-close")
-        .with_rendition(Rendition::video_hd())
-        .with_egress_mode(EgressMode::HttpPush)
-        .with_segment_duration(1.0)
-        .with_chunk_duration(0.2)
-        .with_time_shift_buffer(Duration::from_secs(60))
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_output_dir(&out_dir);
-
-    let mut session = PackagingSession::create(config, &key_provider)
-        .await
-        .expect("Failed to create PackagingSession");
-
-    let sample_bytes = generate_sample_mp4("after_close_http", 4).await;
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Push should succeed");
-
-    session.close().await.expect("Failed to close session");
-
     assert!(
         session.take_output_receiver().is_none(),
         "take_output_receiver after close must return None"
     );
 
+    assert_no_media_segment_files(&out_dir);
     let _ = tokio::fs::remove_dir_all(&out_dir).await;
 }
 
