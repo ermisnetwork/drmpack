@@ -17,8 +17,8 @@ use crate::error::{
 };
 use crate::key::{KeyPolicyEngine, KeyProvider, KeySet};
 use crate::types::{
-    DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat, PackagedArtifact,
-    Rendition, TrackType,
+    DrmSystem, EgressMode, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat,
+    PackagedArtifact, Rendition, TrackType,
 };
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
@@ -96,6 +96,8 @@ pub struct PackagingSessionConfig {
     pub gpac_bin: Option<String>,
     /// Policy for mapping ContentKeys across declared Renditions.
     pub key_mapping_policy: KeyMappingPolicy,
+    /// Egress delivery mode for packaged artifacts (FileSystemStaging or HttpPush).
+    pub egress_mode: EgressMode,
 }
 
 impl PackagingSessionConfig {
@@ -120,6 +122,7 @@ impl PackagingSessionConfig {
             finalization_timeout: DEFAULT_FINALIZATION_TIMEOUT,
             gpac_bin: None,
             key_mapping_policy: KeyMappingPolicy::default(),
+            egress_mode: EgressMode::FileSystemStaging,
         }
     }
 
@@ -288,6 +291,12 @@ impl PackagingSessionConfig {
     /// Override the binary executable name or path for GPAC.
     pub fn with_gpac_bin(mut self, bin: impl Into<String>) -> Self {
         self.gpac_bin = Some(bin.into());
+        self
+    }
+
+    /// Set the egress delivery mode (FileSystemStaging or HttpPush).
+    pub fn with_egress_mode(mut self, mode: EgressMode) -> Self {
+        self.egress_mode = mode;
         self
     }
 }
@@ -2787,5 +2796,14 @@ mod tests {
         // Push buffer without moof AGAIN, it should NOT reset the latch
         let _ = session.push(b"no-m00f-here-either").await;
         assert!(session.has_pushed_media.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_session_config_egress_mode() {
+        let config = PackagingSessionConfig::new("test");
+        assert_eq!(config.egress_mode, EgressMode::FileSystemStaging);
+
+        let http_config = config.with_egress_mode(EgressMode::HttpPush);
+        assert_eq!(http_config.egress_mode, EgressMode::HttpPush);
     }
 }

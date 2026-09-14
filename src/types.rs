@@ -112,6 +112,25 @@ impl fmt::Display for LatencyMode {
     }
 }
 
+/// Strategy for delivering packaged artifacts from GPAC into memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum EgressMode {
+    /// Staged in temporary directory (OS /tmp backed by kernel Page Cache) and harvested by ArtifactHarvester (default).
+    #[default]
+    FileSystemStaging,
+    /// Direct in-process HTTP loopback push from GPAC to RAM channel via httpout:hmode=push.
+    HttpPush,
+}
+
+impl fmt::Display for EgressMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EgressMode::FileSystemStaging => write!(f, "file-system-staging"),
+            EgressMode::HttpPush => write!(f, "http-push"),
+        }
+    }
+}
+
 /// DRM system targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DrmSystem {
@@ -515,5 +534,19 @@ mod tests {
         assert_eq!(QualityTier::hd().audio_compat_fallback(), None);
         assert_eq!(QualityTier::uhd_4k().audio_compat_fallback(), None);
         assert_eq!(QualityTier::new("custom").audio_compat_fallback(), None);
+    }
+
+    #[test]
+    fn test_egress_mode_default_and_serde() {
+        assert_eq!(EgressMode::default(), EgressMode::FileSystemStaging);
+        assert_eq!(
+            EgressMode::FileSystemStaging.to_string(),
+            "file-system-staging"
+        );
+        assert_eq!(EgressMode::HttpPush.to_string(), "http-push");
+
+        let serialized = serde_json::to_string(&EgressMode::HttpPush).unwrap();
+        let deserialized: EgressMode = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, EgressMode::HttpPush);
     }
 }
