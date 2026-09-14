@@ -71,13 +71,7 @@ impl LicenseProxy {
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "reqwest client builder failed, using fallback with default timeout");
-                reqwest::Client::builder()
-                    .timeout(config.timeout)
-                    .build()
-                    .expect("reqwest fallback client with only timeout should never fail")
-            });
+            .expect("reqwest client builder with only timeout should never fail");
         Self::with_client(config, client)
     }
 

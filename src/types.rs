@@ -203,12 +203,10 @@ impl QualityTier {
 
     /// Returns the alternative audio quality tier for backwards-compatibility fallbacks (`AUDIO` <-> `SD`).
     pub fn audio_compat_fallback(&self) -> Option<Self> {
-        if self == &Self::audio() {
-            Some(Self::sd())
-        } else if self == &Self::sd() {
-            Some(Self::audio())
-        } else {
-            None
+        match self.0.as_str() {
+            "AUDIO" => Some(Self::sd()),
+            "SD" => Some(Self::audio()),
+            _ => None,
         }
     }
 }
@@ -502,5 +500,20 @@ mod tests {
     #[test]
     fn test_latency_mode_default() {
         assert_eq!(LatencyMode::default(), LatencyMode::Standard);
+    }
+
+    #[test]
+    fn test_quality_tier_audio_compat_fallback_match() {
+        assert_eq!(
+            QualityTier::audio().audio_compat_fallback(),
+            Some(QualityTier::sd())
+        );
+        assert_eq!(
+            QualityTier::sd().audio_compat_fallback(),
+            Some(QualityTier::audio())
+        );
+        assert_eq!(QualityTier::hd().audio_compat_fallback(), None);
+        assert_eq!(QualityTier::uhd_4k().audio_compat_fallback(), None);
+        assert_eq!(QualityTier::new("custom").audio_compat_fallback(), None);
     }
 }
