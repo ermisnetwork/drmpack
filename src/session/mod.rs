@@ -770,6 +770,13 @@ impl PackagingSession {
         }
 
         self.stop_watchdog();
+        // If output receiver was never claimed, drop internal receiver before finalization
+        // so that final GPAC segment/manifest flushes are discarded with HTTP 200 OK rather
+        // than blocking on channel capacity.
+        if !self.output_receiver_claimed {
+            let _ = self.http_output_rx.take();
+        }
+
         let mut failures = self
             .cluster
             .close(self.config.finalization_timeout, PackagingOperation::Close)
