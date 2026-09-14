@@ -14,6 +14,8 @@ pub use metadata::{DrmKeyEntry, DrmStreamMetadata};
 /// In-process HTTP egress server loopback sink.
 pub mod http_egress;
 pub use http_egress::HttpEgressServer;
+/// Shared ISOBMFF box parsing and validation.
+pub(crate) mod isobmff;
 
 use crate::error::{
     DrmpackError, PackagingOperation, PackagingSessionFailure, RepresentationFailure, Result,

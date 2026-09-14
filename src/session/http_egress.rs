@@ -6,9 +6,12 @@
 //! [`PackagedArtifact`]s without filesystem staging.
 
 use crate::error::{DrmpackError, Result};
+use crate::session::isobmff::{
+    is_complete_isobmff_init_segment, is_complete_isobmff_media_segment,
+};
 use crate::types::{ArtifactKind, EncryptionScheme, PackagedArtifact};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -22,7 +25,11 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
+
+/// Maximum allowable request body payload (64 MB).
+const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
 
 /// In-process HTTP egress server acting as an in-memory loopback sink for GPAC `httpout:hmode=push`.
 pub struct HttpEgressServer {
@@ -30,6 +37,7 @@ pub struct HttpEgressServer {
     auth_token: String,
     shutdown_token: CancellationToken,
     server_task: Option<JoinHandle<()>>,
+    conn_tracker: TaskTracker,
 }
 
 impl std::fmt::Debug for HttpEgressServer {
@@ -44,6 +52,7 @@ impl std::fmt::Debug for HttpEgressServer {
 impl Drop for HttpEgressServer {
     fn drop(&mut self) {
         self.shutdown_token.cancel();
+        self.conn_tracker.close();
         if let Some(task) = self.server_task.take() {
             task.abort();
         }
@@ -60,75 +69,17 @@ fn full_body(msg: &'static str) -> BoxBody {
     Full::new(Bytes::from_static(msg.as_bytes()))
 }
 
-fn next_isobmff_box(data: &[u8], offset: usize) -> Option<(&[u8; 4], usize)> {
-    if offset + 8 > data.len() {
-        return None;
+/// Classify an incoming artifact path or filename into its corresponding [`ArtifactKind`].
+fn classify_artifact_path(path: &str) -> Option<ArtifactKind> {
+    if path.ends_with(".m3u8") || path.ends_with(".mpd") {
+        Some(ArtifactKind::Manifest)
+    } else if path.ends_with(".m4s") {
+        Some(ArtifactKind::MediaSegment)
+    } else if path.ends_with("init.mp4") || path.ends_with("_init.mp4") {
+        Some(ArtifactKind::InitSegment)
+    } else {
+        None
     }
-    let size32 = u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]);
-    let box_type: &[u8; 4] = data[offset + 4..offset + 8].try_into().ok()?;
-
-    let box_size = match size32 {
-        0 => data.len() - offset,
-        1 => {
-            if offset + 16 > data.len() {
-                return None;
-            }
-            let s64 = u64::from_be_bytes(data[offset + 8..offset + 16].try_into().ok()?);
-            if s64 < 16 || s64 > (data.len() - offset) as u64 {
-                return None;
-            }
-            s64 as usize
-        }
-        s if s >= 8 => {
-            let s = s as usize;
-            if s > data.len() - offset {
-                return None;
-            }
-            s
-        }
-        _ => return None,
-    };
-
-    Some((box_type, box_size))
-}
-
-fn is_complete_isobmff_media_segment(data: &[u8]) -> bool {
-    let mut offset = 0;
-    let mut has_moof = false;
-    let mut has_mdat = false;
-
-    while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
-        if box_type == b"moof" {
-            has_moof = true;
-        } else if box_type == b"mdat" {
-            has_mdat = true;
-        }
-        offset += box_size;
-    }
-
-    has_moof && has_mdat && !data.is_empty() && offset == data.len()
-}
-
-fn is_complete_isobmff_init_segment(data: &[u8]) -> bool {
-    let mut offset = 0;
-    let mut has_ftyp = false;
-    let mut has_moov = false;
-
-    while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
-        if box_type == b"ftyp" {
-            has_ftyp = true;
-        } else if box_type == b"moov" {
-            has_moov = true;
-        }
-        offset += box_size;
-    }
-
-    has_ftyp && has_moov && !data.is_empty() && offset == data.len()
 }
 
 fn parse_relative_path(
@@ -161,7 +112,7 @@ fn parse_relative_path(
 
 async fn handle_request(
     req: Request<Incoming>,
-    auth_token: Arc<String>,
+    token_prefix: Arc<String>,
     artifact_tx: mpsc::Sender<PackagedArtifact>,
     default_scheme: EncryptionScheme,
 ) -> std::result::Result<Response<BoxBody>, Infallible> {
@@ -174,10 +125,9 @@ async fn handle_request(
             .unwrap());
     }
 
-    // 2. Verify URI path starts with /{auth_token}/
-    let token_prefix = format!("/{}/", auth_token.as_str());
+    // 2. Verify URI path starts with precomputed token prefix (e.g. /{auth_token}/)
     let req_path = req.uri().path();
-    let rel_path = match req_path.strip_prefix(&token_prefix) {
+    let rel_path = match req_path.strip_prefix(token_prefix.as_str()) {
         Some(p) if !p.is_empty() => p,
         _ => {
             return Ok(Response::builder()
@@ -199,10 +149,20 @@ async fn handle_request(
         }
     };
 
-    // 4. Collect request body
-    let body_bytes = match req.into_body().collect().await {
+    // 4. Collect request body with bounded payload size limit (64 MB)
+    let body_bytes = match Limited::new(req.into_body(), MAX_PAYLOAD_SIZE)
+        .collect()
+        .await
+    {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
+            if e.is::<LengthLimitError>() {
+                warn!(filename = %filename, "Payload exceeded 64 MB limit in HttpEgressServer");
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .body(full_body("Payload Too Large"))
+                    .unwrap());
+            }
             warn!(error = %e, "Failed to read request body in HttpEgressServer");
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
@@ -212,18 +172,15 @@ async fn handle_request(
     };
 
     // 5. Determine ArtifactKind
-    let kind = if filename.ends_with(".m3u8") || filename.ends_with(".mpd") {
-        ArtifactKind::Manifest
-    } else if filename.contains("init") || filename.ends_with("_init.mp4") {
-        ArtifactKind::InitSegment
-    } else if filename.ends_with(".m4s") {
-        ArtifactKind::MediaSegment
-    } else {
-        warn!(filename = %filename, "Unknown artifact type received in HttpEgressServer");
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(full_body("Unknown artifact type"))
-            .unwrap());
+    let kind = match classify_artifact_path(&filename) {
+        Some(k) => k,
+        None => {
+            warn!(filename = %filename, "Unknown artifact type received in HttpEgressServer");
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(full_body("Unknown artifact type"))
+                .unwrap());
+        }
     };
 
     // 6. Validate binary ISOBMFF boxes for InitSegment and MediaSegment
@@ -292,6 +249,12 @@ impl HttpEgressServer {
         artifact_tx: mpsc::Sender<PackagedArtifact>,
         default_scheme: EncryptionScheme,
     ) -> Result<Self> {
+        if auth_token.trim().is_empty() {
+            return Err(DrmpackError::Validation(
+                "auth_token cannot be empty".into(),
+            ));
+        }
+
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(DrmpackError::Io)?;
@@ -299,7 +262,9 @@ impl HttpEgressServer {
         let shutdown_token = CancellationToken::new();
         let loop_token = shutdown_token.clone();
 
-        let auth_token_arc = Arc::new(auth_token.clone());
+        let token_prefix = Arc::new(format!("/{auth_token}/"));
+        let conn_tracker = TaskTracker::new();
+        let task_tracker = conn_tracker.clone();
 
         let server_task = tokio::spawn(async move {
             let auto = auto::Builder::new(TokioExecutor::new());
@@ -320,13 +285,13 @@ impl HttpEgressServer {
 
                 let io = TokioIo::new(stream);
                 let auto = auto.clone();
-                let token = Arc::clone(&auth_token_arc);
+                let token_prefix = Arc::clone(&token_prefix);
                 let tx = artifact_tx.clone();
                 let conn_token = loop_token.clone();
 
-                tokio::spawn(async move {
+                task_tracker.spawn(async move {
                     let service = service_fn(move |req| {
-                        handle_request(req, Arc::clone(&token), tx.clone(), default_scheme)
+                        handle_request(req, Arc::clone(&token_prefix), tx.clone(), default_scheme)
                     });
 
                     let conn = auto.serve_connection_with_upgrades(io, service);
@@ -340,10 +305,14 @@ impl HttpEgressServer {
                         }
                         _ = conn_token.cancelled() => {
                             conn.as_mut().graceful_shutdown();
+                            let _ = conn.as_mut().await;
                         }
                     }
                 });
             }
+
+            task_tracker.close();
+            task_tracker.wait().await;
         });
 
         Ok(Self {
@@ -351,6 +320,7 @@ impl HttpEgressServer {
             auth_token,
             shutdown_token,
             server_task: Some(server_task),
+            conn_tracker,
         })
     }
 
@@ -366,12 +336,14 @@ impl HttpEgressServer {
         format!("http://{}/{}", self.local_addr, self.auth_token)
     }
 
-    /// Gracefully shut down the server and wait for the listener task to terminate.
+    /// Gracefully shut down the server, draining in-flight requests and waiting for the listener task to terminate.
     pub async fn shutdown(mut self) {
         self.shutdown_token.cancel();
+        self.conn_tracker.close();
         if let Some(task) = self.server_task.take() {
             let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
         }
+        let _ = tokio::time::timeout(Duration::from_secs(3), self.conn_tracker.wait()).await;
     }
 }
 
@@ -489,6 +461,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_empty_auth_token_rejected() {
+        let (tx, _rx) = mpsc::channel(16);
+        let res_empty = HttpEgressServer::start("".to_string(), tx.clone()).await;
+        assert!(
+            matches!(res_empty, Err(DrmpackError::Validation(msg)) if msg.contains("auth_token cannot be empty"))
+        );
+
+        let res_whitespace = HttpEgressServer::start("   ".to_string(), tx).await;
+        assert!(
+            matches!(res_whitespace, Err(DrmpackError::Validation(msg)) if msg.contains("auth_token cannot be empty"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_method_not_allowed() {
         let (tx, mut rx) = mpsc::channel(16);
         let token = "token-method-test";
@@ -580,27 +566,76 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown() {
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let token = "shutdown-token";
+        let mut server = HttpEgressServer::start(token.to_string(), tx)
+            .await
+            .expect("server start failed");
+        let endpoint_url = server.endpoint_url();
+        let client = reqwest::Client::new();
+
+        // 1. Verify endpoint is responsive before shutdown
+        let test_url = format!("{}/cbcs/video_720p.m3u8", endpoint_url);
+        let res = client
+            .put(&test_url)
+            .body("#EXTM3U\n")
+            .send()
+            .await
+            .expect("PUT before shutdown failed");
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+        assert!(rx.recv().await.is_some());
+
+        // 2. Trigger cancellation and verify server_task completes cleanly
+        let server_task = server.server_task.take().expect("server_task must exist");
+        server.shutdown_token.cancel();
+        let task_result = tokio::time::timeout(Duration::from_secs(3), server_task).await;
+        assert!(task_result.is_ok(), "server_task did not complete in time");
+        assert!(
+            task_result.unwrap().is_ok(),
+            "server_task panicked or failed"
+        );
+
+        // 3. Close and drain active connections
+        server.conn_tracker.close();
+        let drain_result =
+            tokio::time::timeout(Duration::from_secs(3), server.conn_tracker.wait()).await;
+        assert!(
+            drain_result.is_ok(),
+            "connection tasks did not drain in time"
+        );
+
+        // 4. Verify request to endpoint_url returns error (connection refused / unreachable)
+        let res_after = client.put(&test_url).body("#EXTM3U\n").send().await;
+        assert!(
+            res_after.is_err(),
+            "Server should reject connections to endpoint_url after shutdown: got {res_after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_shutdown_method() {
+        let (tx, _rx) = mpsc::channel(16);
+        let token = "shutdown-method-token";
         let server = HttpEgressServer::start(token.to_string(), tx)
             .await
             .expect("server start failed");
-        let addr = server.local_addr();
+        let endpoint_url = server.endpoint_url();
+        let client = reqwest::Client::new();
 
-        // Verify TCP connection succeeds before shutdown
-        let stream = tokio::net::TcpStream::connect(addr).await;
-        assert!(stream.is_ok());
-        drop(stream);
+        let test_url = format!("{}/cbcs/video_720p.m3u8", endpoint_url);
+        let res = client
+            .put(&test_url)
+            .body("#EXTM3U\n")
+            .send()
+            .await
+            .expect("PUT before shutdown failed");
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
 
-        // Graceful shutdown
+        // Call graceful shutdown convenience method
         server.shutdown().await;
 
-        // Verify TCP connection fails after shutdown
-        let stream = tokio::net::TcpStream::connect(addr).await;
-        assert!(
-            stream.is_err(),
-            "Server should reject connections after shutdown"
-        );
+        let res_after = client.put(&test_url).body("#EXTM3U\n").send().await;
+        assert!(res_after.is_err());
     }
 
     #[tokio::test]
@@ -646,6 +681,66 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_payload_limit_64mb() {
+        let (tx, _rx) = mpsc::channel(16);
+        let token = "payload-limit-token";
+        let server = HttpEgressServer::start(token.to_string(), tx)
+            .await
+            .expect("server start failed");
+        let client = reqwest::Client::new();
+
+        // 64 MB + 1 byte payload exceeds 64 MB limit
+        let oversized = vec![0u8; 64 * 1024 * 1024 + 1];
+        let url = format!("{}/cbcs/video_720p_1.m4s", server.endpoint_url());
+        let res = client
+            .put(&url)
+            .body(oversized)
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(res.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn test_classify_artifact_path_order_and_rules() {
+        // Manifest: .m3u8 and .mpd
+        assert_eq!(
+            classify_artifact_path("master.m3u8"),
+            Some(ArtifactKind::Manifest)
+        );
+        assert_eq!(
+            classify_artifact_path("stream.mpd"),
+            Some(ArtifactKind::Manifest)
+        );
+
+        // Media segment: .m4s MUST be checked before init!
+        assert_eq!(
+            classify_artifact_path("video_init_1.m4s"),
+            Some(ArtifactKind::MediaSegment)
+        );
+        assert_eq!(
+            classify_artifact_path("segment_0001.m4s"),
+            Some(ArtifactKind::MediaSegment)
+        );
+
+        // Init segment: init.mp4 or _init.mp4
+        assert_eq!(
+            classify_artifact_path("init.mp4"),
+            Some(ArtifactKind::InitSegment)
+        );
+        assert_eq!(
+            classify_artifact_path("video_720p_init.mp4"),
+            Some(ArtifactKind::InitSegment)
+        );
+
+        // Unknown
+        assert_eq!(classify_artifact_path("unknown.txt"), None);
+        assert_eq!(classify_artifact_path("video.mp4"), None);
     }
 
     #[tokio::test]

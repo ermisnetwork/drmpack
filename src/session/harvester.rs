@@ -1,3 +1,6 @@
+use crate::session::isobmff::{
+    is_complete_isobmff_init_segment, is_complete_isobmff_media_segment,
+};
 use crate::types::{ArtifactKind, EncryptionScheme, PackagedArtifact};
 use bytes::Bytes;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -183,77 +186,6 @@ pub fn sanitize_static_mpd(xml: &str, max_segment_number: Option<u64>) -> String
     }
 
     result
-}
-
-fn next_isobmff_box(data: &[u8], offset: usize) -> Option<(&[u8; 4], usize)> {
-    if offset + 8 > data.len() {
-        return None;
-    }
-    let size32 = u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]);
-    let box_type: &[u8; 4] = data[offset + 4..offset + 8].try_into().ok()?;
-
-    let box_size = match size32 {
-        0 => data.len() - offset,
-        1 => {
-            if offset + 16 > data.len() {
-                return None;
-            }
-            let s64 = u64::from_be_bytes(data[offset + 8..offset + 16].try_into().ok()?);
-            if s64 < 16 || s64 > (data.len() - offset) as u64 {
-                return None;
-            }
-            s64 as usize
-        }
-        s if s >= 8 => {
-            let s = s as usize;
-            if s > data.len() - offset {
-                return None;
-            }
-            s
-        }
-        _ => return None,
-    };
-
-    Some((box_type, box_size))
-}
-
-fn is_complete_isobmff_media_segment(data: &[u8]) -> bool {
-    let mut offset = 0;
-    let mut has_moof = false;
-    let mut has_mdat = false;
-
-    while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
-        if box_type == b"moof" {
-            has_moof = true;
-        } else if box_type == b"mdat" {
-            has_mdat = true;
-        }
-        offset += box_size;
-    }
-
-    has_moof && has_mdat && !data.is_empty() && offset == data.len()
-}
-
-fn is_complete_isobmff_init_segment(data: &[u8]) -> bool {
-    let mut offset = 0;
-    let mut has_ftyp = false;
-    let mut has_moov = false;
-
-    while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
-        if box_type == b"ftyp" {
-            has_ftyp = true;
-        } else if box_type == b"moov" {
-            has_moov = true;
-        }
-        offset += box_size;
-    }
-
-    has_ftyp && has_moov && !data.is_empty() && offset == data.len()
 }
 
 fn is_valid_hls_manifest(text: &str) -> bool {
