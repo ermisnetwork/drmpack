@@ -62,6 +62,7 @@ Focuses on eliminating filesystem staging completely for live streams via in-pro
 - [x] Zero-disk buffer handoff forwarding received HTTP request payloads directly into `output_rx: mpsc::Receiver<PackagedArtifact>`, completely bypassing filesystem staging and kernel file watchers for live streams
 - [x] Dual-scheme routing support (`/cenc/*` and `/cbcs/*`) for concurrent Dual live packaging sessions
 - [x] Low-latency chunked transfer support (`Transfer-Encoding: chunked`) for CMAF chunk delivery
+- [x] End-to-end runnable examples: `10_http_output_live_stream` and `11_http_output_playback_server` (supporting both Axinom cloud DRM and offline ClearKey with Shaka Player UI)
 
 ### VOD Whole-File Batch Packaging (`drmpack::vod`)
 - [ ] Standalone batch packaging API `package_vod_file(config, key_provider)` decoupled from real-time live streaming sessions

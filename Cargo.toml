@@ -83,3 +83,11 @@ required-features = ["axinom"]
 name = "09_axum_playback_server"
 required-features = ["axinom", "license-proxy"]
 
+[[example]]
+name = "10_http_output_live_stream"
+required-features = ["axinom"]
+
+[[example]]
+name = "11_http_output_playback_server"
+required-features = ["axinom", "license-proxy"]
+

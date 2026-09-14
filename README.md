@@ -726,6 +726,17 @@ async fn mint_playback_token(
 }
 ```
 
+### 7. Runnable Examples
+
+The `examples/` directory contains end-to-end runnable pipelines demonstrating drmpack capabilities:
+
+| Example | Description | Run Command |
+| :--- | :--- | :--- |
+| `08_in_memory_live_stream` | Live packaging pipeline via filesystem staging (`EgressMode::FileSystemStaging`) with FFmpeg and latency metrics. | `cargo run --example 08_in_memory_live_stream -- --static --duration 15` |
+| `09_axum_playback_server` | Standalone Axum playback server with Shaka Player and Axinom DRM token generation. | `cargo run --example 09_axum_playback_server -- --stream-dir scratch/example08_stream` |
+| `10_http_output_live_stream` | **Zero-disk HTTP egress** live packaging pipeline (`EgressMode::HttpPush`), streaming media segments directly over in-process HTTP into RAM. | `cargo run --example 10_http_output_live_stream -- --dual --static --duration 15` |
+| `11_http_output_playback_server` | Standalone playback server serving HTTP egress stream dump with Axinom & ClearKey DRM and Shaka Player Web UI. | `cargo run --example 11_http_output_playback_server -- --port 8080` |
+
 
 ## Domain Glossary
 
