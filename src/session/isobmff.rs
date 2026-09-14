@@ -44,42 +44,32 @@ pub(crate) fn next_isobmff_box(data: &[u8], offset: usize) -> Option<(&[u8; 4], 
     Some((box_type, box_size))
 }
 
-/// Verify if `data` is a complete ISOBMFF media segment containing both `moof` and `mdat` boxes,
-/// and all boxes are fully received.
-pub(crate) fn is_complete_isobmff_media_segment(data: &[u8]) -> bool {
+fn has_isobmff_boxes(data: &[u8], box_a: &[u8; 4], box_b: &[u8; 4]) -> bool {
     let mut offset = 0;
-    let mut has_moof = false;
-    let mut has_mdat = false;
+    let (mut has_a, mut has_b) = (false, false);
 
     while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
-        if box_type == b"moof" {
-            has_moof = true;
-        } else if box_type == b"mdat" {
-            has_mdat = true;
+        if box_type == box_a {
+            has_a = true;
+        } else if box_type == box_b {
+            has_b = true;
         }
         offset += box_size;
     }
 
-    has_moof && has_mdat && !data.is_empty() && offset == data.len()
+    has_a && has_b && !data.is_empty() && offset == data.len()
+}
+
+/// Verify if `data` is a complete ISOBMFF media segment containing both `moof` and `mdat` boxes,
+/// and all boxes are fully received.
+pub(crate) fn is_complete_isobmff_media_segment(data: &[u8]) -> bool {
+    has_isobmff_boxes(data, b"moof", b"mdat")
 }
 
 /// Verify if `data` is a complete ISOBMFF init segment containing both `ftyp` and `moov` boxes,
 /// and all boxes are fully received.
 pub(crate) fn is_complete_isobmff_init_segment(data: &[u8]) -> bool {
-    let mut offset = 0;
-    let mut has_ftyp = false;
-    let mut has_moov = false;
-
-    while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
-        if box_type == b"ftyp" {
-            has_ftyp = true;
-        } else if box_type == b"moov" {
-            has_moov = true;
-        }
-        offset += box_size;
-    }
-
-    has_ftyp && has_moov && !data.is_empty() && offset == data.len()
+    has_isobmff_boxes(data, b"ftyp", b"moov")
 }
 
 #[cfg(test)]

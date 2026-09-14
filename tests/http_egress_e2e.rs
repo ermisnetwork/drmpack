@@ -163,6 +163,7 @@ async fn test_http_egress_live_cenc_e2e() {
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_time_shift_buffer(Duration::from_secs(60))
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &key_provider)
@@ -325,6 +326,7 @@ async fn test_http_egress_dual_scheme_e2e() {
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_time_shift_buffer(Duration::from_secs(60))
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &key_provider)
@@ -472,6 +474,7 @@ async fn test_http_egress_unclaimed_receiver_closed_cleanly() {
     let config = PackagingSessionConfig::cenc("e2e-http-unclaimed")
         .with_rendition(Rendition::video_hd())
         .with_egress_mode(EgressMode::HttpPush)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &key_provider)
@@ -507,6 +510,8 @@ async fn test_http_egress_take_output_receiver_after_close_returns_none() {
     let config = PackagingSessionConfig::cenc("e2e-http-after-close")
         .with_rendition(Rendition::video_hd())
         .with_egress_mode(EgressMode::HttpPush)
+        .with_segment_duration(1.0)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &key_provider)
@@ -542,6 +547,7 @@ async fn test_http_egress_receiver_dropped_early() {
     let config = PackagingSessionConfig::cenc("e2e-http-dropped-rx")
         .with_rendition(Rendition::video_hd())
         .with_egress_mode(EgressMode::HttpPush)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &key_provider)

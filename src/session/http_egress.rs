@@ -61,10 +61,6 @@ impl Drop for HttpEgressServer {
 
 type BoxBody = Full<Bytes>;
 
-fn empty_body() -> BoxBody {
-    Full::new(Bytes::new())
-}
-
 fn full_body(msg: &'static str) -> BoxBody {
     Full::new(Bytes::from_static(msg.as_bytes()))
 }
@@ -184,28 +180,17 @@ async fn handle_request(
     };
 
     // 6. Validate binary ISOBMFF boxes for InitSegment and MediaSegment
-    match kind {
-        ArtifactKind::InitSegment => {
-            if !is_complete_isobmff_init_segment(&body_bytes) {
-                warn!(filename = %filename, "Invalid ISOBMFF init segment: missing ftyp or moov box");
-                return Ok(Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(full_body("Invalid ISOBMFF init segment"))
-                    .unwrap());
-            }
-        }
-        ArtifactKind::MediaSegment => {
-            if !is_complete_isobmff_media_segment(&body_bytes) {
-                warn!(filename = %filename, "Invalid ISOBMFF media segment: missing moof or mdat box");
-                return Ok(Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(full_body("Invalid ISOBMFF media segment"))
-                    .unwrap());
-            }
-        }
-        ArtifactKind::Manifest => {
-            // Text playlists/descriptions, no binary box validation
-        }
+    let is_valid = match kind {
+        ArtifactKind::InitSegment => is_complete_isobmff_init_segment(&body_bytes),
+        ArtifactKind::MediaSegment => is_complete_isobmff_media_segment(&body_bytes),
+        ArtifactKind::Manifest => true,
+    };
+    if !is_valid {
+        warn!(filename = %filename, kind = ?kind, "Invalid ISOBMFF segment received in HttpEgressServer");
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(full_body("Invalid ISOBMFF segment"))
+            .unwrap());
     }
 
     // 7. Construct PackagedArtifact
@@ -228,7 +213,7 @@ async fn handle_request(
     // 9. Return HTTP 200 OK
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(empty_body())
+        .body(Full::default())
         .unwrap())
 }
 
