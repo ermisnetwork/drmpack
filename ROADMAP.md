@@ -52,16 +52,16 @@ Initial production-ready baseline for in-process live packaging, DRM encryption,
 Focuses on eliminating filesystem staging completely for live streams via in-process loopback HTTP push, providing standalone static VOD packaging, and establishing production observability.
 
 ### Code Health & Debt Cleanup (v0.1.1 Review Baseline)
-- [ ] Concurrent multi-scheme key fetch consolidation: replace manual `reqs.len() == 2` branching with `futures::future::try_join_all` in `AxinomProvider` to eliminate boilerplate and unify $N \ge 1$ concurrent execution
-- [ ] Eliminate redundant `reqwest::Client` builder fallback in `LicenseProxy::new`
-- [ ] Apply Ponytail review optimizations (-41 lines): static slice QualityTier lookup, `String::clone` in XML generator, and consolidated URL validation
+- [x] Concurrent multi-scheme key fetch consolidation: replace manual `pop()` and dead branching with `tokio::try_join!` in `AxinomProvider`
+- [x] Eliminate redundant `reqwest::Client` builder fallback in `LicenseProxy::new`
+- [x] Apply Ponytail review optimizations: non-allocating static slice `QualityTier` match fallback, clean client builder
 
 ### Zero-Disk In-Process HTTP Egress Engine
-- [ ] Pluggable `EgressMode` abstraction supporting `EgressMode::HttpPush` (new v0.2.0 default) and `EgressMode::FileSystemStaging` (fallback per ADR-0015)
-- [ ] In-process HTTP loopback sink (`httpout:hmode=push`): GPAC pushes packaged segments and playlists directly via HTTP PUT to an internal lightweight listener in RAM (`127.0.0.1:<ephemeral_port>`)
-- [ ] Zero-disk buffer handoff forwarding received HTTP request payloads directly into `output_rx: mpsc::Receiver<PackagedArtifact>`, completely bypassing filesystem staging and kernel file watchers for live streams
-- [ ] Dual-scheme routing support (`/cenc/*` and `/cbcs/*`) for concurrent Dual live packaging sessions
-- [ ] Low-latency chunked transfer support (`Transfer-Encoding: chunked`) for CMAF chunk delivery
+- [x] Pluggable `EgressMode` abstraction supporting `EgressMode::FileSystemStaging` (canonical default backed by Linux Page Cache) and `EgressMode::HttpPush` (in-process zero-disk mode)
+- [x] In-process HTTP loopback sink (`httpout:hmode=push`): GPAC pushes packaged segments and playlists directly via HTTP PUT to an internal lightweight listener in RAM (`127.0.0.1:<ephemeral_port>`) with UUID auth token
+- [x] Zero-disk buffer handoff forwarding received HTTP request payloads directly into `output_rx: mpsc::Receiver<PackagedArtifact>`, completely bypassing filesystem staging and kernel file watchers for live streams
+- [x] Dual-scheme routing support (`/cenc/*` and `/cbcs/*`) for concurrent Dual live packaging sessions
+- [x] Low-latency chunked transfer support (`Transfer-Encoding: chunked`) for CMAF chunk delivery
 
 ### VOD Whole-File Batch Packaging (`drmpack::vod`)
 - [ ] Standalone batch packaging API `package_vod_file(config, key_provider)` decoupled from real-time live streaming sessions

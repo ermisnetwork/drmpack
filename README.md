@@ -27,8 +27,10 @@ By piping media ingress directly into memory pipes and using ephemeral staging w
 ### Data Plane
 
 - Media Ingress: Pushes raw fMP4 chunks into GPAC's standard input pipe through `PackagingSession::push()` or `SessionWriter` (an adapter implementing `tokio::io::AsyncWrite`).
-- Media Egress: `ArtifactHarvester` detects finished segments and updated manifests from ephemeral staging using kernel filesystem events (`inotify`/`FSEvents`), delivering `PackagedArtifact` items through a bounded asynchronous channel.
-- Manifest-Driven Readiness: Emits media segments only after GPAC has completely flushed the segment and referenced it in the manifest, eliminating partial-read race conditions for downstream edge handlers.
+- Media Egress: Supports two pluggable delivery strategies via `EgressMode`:
+  - `EgressMode::FileSystemStaging` (default): `ArtifactHarvester` detects finished segments and updated manifests from ephemeral staging using kernel filesystem events (`inotify`/`FSEvents`), delivering `PackagedArtifact` items through a bounded asynchronous channel.
+  - `EgressMode::HttpPush`: GPAC streams segments directly over in-process HTTP loopback push (`httpout:hmode=push`) into RAM, completely eliminating disk staging for live streams.
+- Manifest-Driven Readiness: In `FileSystemStaging` mode, emits media segments only after GPAC has completely flushed the segment and referenced it in the manifest, eliminating partial-read race conditions for downstream edge handlers. In `HttpPush` mode, segments are validated via ISOBMFF box parsing upon arrival.
 
 ```
 +-------------------------------------------------------------------------------+
@@ -318,11 +320,31 @@ let config = PackagingSessionConfig::new("live-session")
     .with_gpac_bin("/usr/local/bin/gpac"); // Defaults to "gpac" in PATH
 ```
 
-### 2. Ephemeral Storage Staging Filesystem
+### 2. Media Egress Delivery Modes (`EgressMode`)
 
-`drmpack` writes low-latency CMAF media segments and manifests into an ephemeral staging directory (`std::env::temp_dir()`, typically `/tmp` on Linux or `$TMPDIR` on macOS) before `ArtifactHarvester` reads them into memory channels and purges them:
-- **Linux & Containers (Production):** Standard temporary directory `/tmp` backed by local disk or NVMe SSD. Linux automatically leverages the **kernel Page Cache** for sub-millisecond RAM write/read speeds without the risk of container crashes from Docker's default 64MB `/dev/shm` quota ([ADR-0015](docs/adr/0015-direct-output-channel-and-safe-storage.md)).
-- **Optional Ramdisk (Opt-in):** If you explicitly provision `/dev/shm` or tmpfs with verified memory headroom, you can configure `.with_output_dir("/dev/shm/...")`.
+`drmpack` supports two delivery staging strategies configured via `.with_egress_mode(...)`:
+
+#### `EgressMode::FileSystemStaging` (Default)
+Writes low-latency CMAF media segments and manifests into an ephemeral staging directory (`std::env::temp_dir()`, typically `/tmp` on Linux or `$TMPDIR` on macOS) before `ArtifactHarvester` reads them into memory channels and unlinks them:
+- **Linux & Containers (Production):** Standard temporary directory `/tmp` backed by local disk or NVMe SSD. Linux automatically leverages the **kernel Page Cache** for sub-millisecond RAM write/read speeds (35–80µs) with zero physical disk I/O when files are purged promptly ([ADR-0015](docs/adr/0015-direct-output-channel-and-safe-storage.md)).
+- **Optional Ramdisk (Opt-in):** If you explicitly provision `/dev/shm` or tmpfs with verified memory headroom, configure `.with_output_dir("/dev/shm/...")`.
+
+#### `EgressMode::HttpPush` (Zero-Disk In-Process HTTP Egress)
+GPAC pushes packaged segments and playlists directly via HTTP `PUT` requests to an internal loopback server (`HttpEgressServer`) listening on an ephemeral localhost port (`127.0.0.1:0`) with UUID token authentication:
+- **Zero Disk Footprint:** Segments and manifests are streamed directly into `output_rx: mpsc::Receiver<PackagedArtifact>` in memory without touching the filesystem.
+- **Dual Scheme Routing:** Automatically routes `/cbcs/` and `/cenc/` partitions for concurrent Dual packaging sessions.
+
+```rust
+use drmpack::types::EgressMode;
+use drmpack::session::PackagingSessionConfig;
+
+// Default: FileSystemStaging backed by Linux Page Cache
+let config = PackagingSessionConfig::new("live-session");
+
+// Opt-in: Zero-disk in-memory HTTP egress
+let http_config = PackagingSessionConfig::new("live-session")
+    .with_egress_mode(EgressMode::HttpPush);
+```
 
 
 ## Environment Configuration
