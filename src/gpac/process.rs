@@ -90,6 +90,8 @@ pub struct GpacProcessConfig {
     pub time_shift_buffer: Duration,
     /// Binary executable name or path for GPAC (defaults to `"gpac"`).
     pub gpac_bin: String,
+    /// Optional HTTP egress endpoint URL for in-process push (e.g. `http://127.0.0.1:PORT/TOKEN/live.mpd`).
+    pub http_egress_endpoint: Option<String>,
 }
 
 impl GpacProcessConfig {
@@ -104,6 +106,7 @@ impl GpacProcessConfig {
             availability_time_offset: None,
             time_shift_buffer: DEFAULT_TIME_SHIFT_BUFFER,
             gpac_bin: "gpac".into(),
+            http_egress_endpoint: None,
         }
     }
 
@@ -140,6 +143,15 @@ impl GpacProcessConfig {
     /// Override the path or binary name for the GPAC executable.
     pub fn with_gpac_bin(mut self, bin: impl Into<String>) -> Self {
         self.gpac_bin = bin.into();
+        self
+    }
+
+    /// Set the in-process HTTP egress endpoint URL (e.g. `http://127.0.0.1:PORT/TOKEN/live.mpd`).
+    ///
+    /// When set, GPAC redirects dasher output to `httpout:hmode=push` targeting the endpoint
+    /// instead of writing to local storage.
+    pub fn with_http_egress_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.http_egress_endpoint = Some(endpoint.into());
         self
     }
 
@@ -199,8 +211,14 @@ impl GpacProcessConfig {
         let spd_ms = (self.segment_duration * DEFAULT_SPD_SEGMENT_FACTOR * 1000.0).round() as u64;
         let tsb_secs = self.time_shift_buffer.as_secs().max(1);
 
+        let destination = if let Some(ref http_endpoint) = self.http_egress_endpoint {
+            format!("{http_endpoint}:gpac:hmode=push")
+        } else {
+            manifest_path.display().to_string()
+        };
+
         let mut dasher_opts = vec![
-            manifest_path.display().to_string(),
+            destination,
             // dual: generate both DASH (.mpd) and HLS (.m3u8) manifests simultaneously
             "dual".into(),
             // profile=live: enforce MPEG-DASH Live profile using segment templates
@@ -669,5 +687,23 @@ mod tests {
         assert_eq!(buf.len(), 3);
         let slice: Vec<String> = buf.into_iter().collect();
         assert_eq!(slice, vec!["line 2", "line 3", "line 4"]);
+    }
+
+    #[test]
+    fn test_gpac_process_args_http_push() {
+        let endpoint = "http://127.0.0.1:45678/my-token/live.mpd";
+        let config =
+            GpacProcessConfig::new(PathBuf::from("/tmp/test"), PathBuf::from("/tmp/drm.xml"))
+                .with_http_egress_endpoint(endpoint);
+
+        assert_eq!(config.http_egress_endpoint, Some(endpoint.to_string()));
+
+        let args = config.build_args();
+        let expected_dest = format!("{endpoint}:gpac:hmode=push");
+        let dasher_arg = args.iter().find(|a| a.starts_with(&expected_dest));
+        assert!(
+            dasher_arg.is_some(),
+            "Expected dasher option starting with destination '{expected_dest}', found args: {args:?}"
+        );
     }
 }
