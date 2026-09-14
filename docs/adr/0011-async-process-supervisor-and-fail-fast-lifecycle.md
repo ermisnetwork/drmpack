@@ -1,6 +1,6 @@
 # Asynchronous ProcessSupervisor and Fail-Fast Lifecycle
 
-**Status: Accepted**
+**Status: Accepted (Amended by ADR-0012 and ADR-0015)**
 
 `drmpack` implements an asynchronous `ProcessSupervisor` per GPAC subprocess, combining immediate crash detection via dedicated `child.wait()` tasks, clean plaintext stderr severity parsing via `-logs=ncl`, symmetric teardown for Dual representations, and strict `#EXT-X-ENDLIST` verification on session close.
 
@@ -31,7 +31,7 @@ Packaging fMP4 live media through external GPAC subprocesses over kernel pipes i
 3. **Symmetric Teardown for Dual Mode**:
    - If either the CENC or CBCS representation encounters an unexpected process termination, the cluster immediately terminates the peer process and surfaces a unified `PackagingSessionFailure`.
 4. **Manifest Finalization Verification**:
-   - For streams with media segments pushed, `session.close()` verifies the presence of `#EXT-X-ENDLIST` in the generated `.m3u8` manifest before declaring finalization successful and executing Ramdisk cleanup.
+   - For streams with media segments pushed, `session.close()` verifies the presence of `#EXT-X-ENDLIST` in the generated `.m3u8` manifest before declaring finalization successful. Storage cleanup is intentionally decoupled from finalization.
 
 ## Consequences
 
@@ -39,3 +39,9 @@ Packaging fMP4 live media through external GPAC subprocesses over kernel pipes i
 - Zero CPU spent on polling timers.
 - Log output from GPAC is clean, uncolored, and properly tiered across `tracing` log levels.
 - HLS clients are protected against manifest stall conditions.
+
+## Implementation Reality / Amendments
+
+1. **Decoupled Session Finalization and Storage Cleanup (ADR-0012)**: The original lifecycle design in Decision 4 linked manifest finalization directly to storage cleanup. ADR-0012 formally decoupled these concerns: `session.close()` finalizes GPAC subprocesses, flushes pipes, and verifies `#EXT-X-ENDLIST`, leaving all media segments and manifests intact on disk for downstream delivery. Storage reclamation is handled separately via explicit `session.cleanup()` or through RAII `Drop` guards.
+2. **Safe Disk-Backed Staging by Default (ADR-0015)**: Staging files are allocated by default under standard OS temporary storage (`/tmp` / `std::env::temp_dir()`) backed by the Linux kernel Page Cache instead of shared memory (`/dev/shm`). This prevents catastrophic container terminations under Docker and Kubernetes 64MB `/dev/shm` constraints and avoids kernel OOM killer actions, while Ramdisk `/dev/shm` remains available as an opt-in configuration for hosts with verified memory capacity.
+

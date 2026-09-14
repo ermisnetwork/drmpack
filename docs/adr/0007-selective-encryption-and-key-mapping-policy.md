@@ -1,6 +1,6 @@
 # Selective encryption and key mapping policy in PackagingSession
 
-**Status: Accepted**
+**Status: Accepted (Amended by ADR-0013)**
 
 `drmpack` supports Selective Encryption (encrypting a subset of Renditions while passing others through unencrypted) and configurable `KeyMappingPolicy` with `SharedAll` as the default.
 
@@ -29,3 +29,10 @@ Streaming platforms have diverse encryption requirements:
 
 - GPAC XML generator omits clear tracks or marks them `IsEncrypted="0"`, eliminating spurious "No ContentKey found" errors when clear tracks are present.
 - Manifest generators must strictly omit DRM signaling tags (`#EXT-X-KEY`, `<ContentProtection>`) from playlists/adaptation sets of clear Renditions to prevent player stalls.
+
+## Implementation Reality / Amendments
+
+1. **GPAC Pipeline & Clear Track Signaling**: The GPAC `cecrypt` filter remains in the filter graph even when clear tracks are present. Clear video and audio tracks are explicitly signaled in the GPAC DRM XML using `<CrypTrack trackID="..." IsEncrypted="0"/>`, instructing GPAC to multiplex the media unencrypted while preserving correct elementary stream PID routing.
+2. **Subtitle Track Omission**: Subtitle (text) tracks cannot be encrypted with Common Encryption (CENC/CBCS). Emitting a `CrypTrack` element for text PIDs causes GPAC's `MP4Mux` filter to abort with `"Missing CENC Key config, cannot mux"`. Under GPAC `cecrypt`, any PID without a `CrypTrack` entry passes through unencrypted by design. Therefore, subtitle tracks are completely omitted from the DRM XML.
+3. **Rendition Subtitle Defaults (ADR-0013)**: In alignment with ADR-0013, `Rendition::subtitle()` defaults to `encrypted: false`, ensuring subtitle tracks are automatically treated as clear without requiring manual `.clear()` invocation by callers.
+
