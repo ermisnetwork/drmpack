@@ -307,12 +307,6 @@ impl PackagingSessionConfig {
         self.egress_mode = mode;
         self
     }
-
-    /// Set the HTTP egress base URL for loopback push egress.
-    pub fn with_http_egress_base_url(mut self, url: impl Into<String>) -> Self {
-        self.http_egress_base_url = Some(url.into());
-        self
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -804,6 +798,7 @@ impl PackagingSession {
         if let Some(http_server) = self.http_server.take() {
             http_server.shutdown().await;
         }
+        let _ = self.http_output_rx.take();
 
         let control_cleanup = self.cleanup_control_dir().await.err();
 
