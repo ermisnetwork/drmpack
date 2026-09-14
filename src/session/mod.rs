@@ -11,6 +11,9 @@ use harvester::Harvester;
 /// DRM stream playback metadata and key transfer objects.
 pub mod metadata;
 pub use metadata::{DrmKeyEntry, DrmStreamMetadata};
+/// In-process HTTP egress server loopback sink.
+pub mod http_egress;
+pub use http_egress::HttpEgressServer;
 
 use crate::error::{
     DrmpackError, PackagingOperation, PackagingSessionFailure, RepresentationFailure, Result,
