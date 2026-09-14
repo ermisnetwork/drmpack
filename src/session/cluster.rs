@@ -184,6 +184,19 @@ impl RepresentationCluster {
                 process_config = process_config.with_gpac_bin(bin);
             }
 
+            if let Some(ref base_url) = config.http_egress_base_url {
+                let endpoint = if is_dual {
+                    match scheme {
+                        EncryptionScheme::Cbcs => format!("{base_url}/cbcs/live.mpd"),
+                        EncryptionScheme::Cenc => format!("{base_url}/cenc/live.mpd"),
+                        _ => format!("{base_url}/live.mpd"),
+                    }
+                } else {
+                    format!("{base_url}/live.mpd")
+                };
+                process_config = process_config.with_http_egress_endpoint(endpoint);
+            }
+
             match GpacProcess::spawn(process_config).await {
                 Ok(process) => {
                     representations.push(Representation::new(scheme, process));

@@ -103,6 +103,8 @@ pub struct PackagingSessionConfig {
     pub key_mapping_policy: KeyMappingPolicy,
     /// Egress delivery mode for packaged artifacts (FileSystemStaging or HttpPush).
     pub egress_mode: EgressMode,
+    /// Base URL for HTTP push egress (internal/loopback), populated when egress_mode is HttpPush.
+    pub(crate) http_egress_base_url: Option<String>,
 }
 
 impl PackagingSessionConfig {
@@ -128,6 +130,7 @@ impl PackagingSessionConfig {
             gpac_bin: None,
             key_mapping_policy: KeyMappingPolicy::default(),
             egress_mode: EgressMode::FileSystemStaging,
+            http_egress_base_url: None,
         }
     }
 
@@ -304,6 +307,12 @@ impl PackagingSessionConfig {
         self.egress_mode = mode;
         self
     }
+
+    /// Set the HTTP egress base URL for loopback push egress.
+    pub fn with_http_egress_base_url(mut self, url: impl Into<String>) -> Self {
+        self.http_egress_base_url = Some(url.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,6 +433,8 @@ pub struct PackagingSession {
     watchdog_handle: Option<JoinHandle<()>>,
     preserve_output: bool,
     harvester: Option<Harvester>,
+    http_server: Option<HttpEgressServer>,
+    http_output_rx: Option<mpsc::Receiver<PackagedArtifact>>,
     output_receiver_claimed: bool,
 }
 
@@ -441,7 +452,7 @@ impl PackagingSession {
     /// per concrete Representation.
     #[instrument(skip(key_provider), fields(content_id = %config.content_id))]
     pub async fn create<P: KeyProvider>(
-        config: PackagingSessionConfig,
+        mut config: PackagingSessionConfig,
         key_provider: &P,
     ) -> Result<Self> {
         validate_config(&config)?;
@@ -458,10 +469,45 @@ impl PackagingSession {
             }
         };
 
-        let cluster = Arc::new(
-            RepresentationCluster::spawn(&config, &key_set, &control_dir, output_dir_created)
-                .await?,
-        );
+        let (http_server, http_output_rx) = if config.egress_mode == EgressMode::HttpPush {
+            let (artifact_tx, artifact_rx) = mpsc::channel(1024);
+            let auth_token = Uuid::new_v4().to_string();
+            let default_scheme = match config.encryption_scheme {
+                EncryptionScheme::Dual => EncryptionScheme::Cbcs,
+                scheme => scheme,
+            };
+            let http_server =
+                match HttpEgressServer::start_with_scheme(auth_token, artifact_tx, default_scheme)
+                    .await
+                {
+                    Ok(server) => server,
+                    Err(error) => {
+                        let _ = tokio::fs::remove_dir_all(&control_dir).await;
+                        if output_dir_created {
+                            let _ = tokio::fs::remove_dir_all(&config.output_dir).await;
+                        }
+                        return Err(error);
+                    }
+                };
+            let base_url = http_server.endpoint_url();
+            config.http_egress_base_url = Some(base_url);
+            (Some(http_server), Some(artifact_rx))
+        } else {
+            (None, None)
+        };
+
+        let cluster =
+            match RepresentationCluster::spawn(&config, &key_set, &control_dir, output_dir_created)
+                .await
+            {
+                Ok(cluster) => Arc::new(cluster),
+                Err(error) => {
+                    if let Some(server) = http_server {
+                        server.shutdown().await;
+                    }
+                    return Err(error);
+                }
+            };
 
         let lifecycle = Arc::new(Mutex::new(Lifecycle::new()));
         let is_terminal = Arc::new(AtomicBool::new(false));
@@ -492,6 +538,8 @@ impl PackagingSession {
             watchdog_handle,
             preserve_output,
             harvester: None,
+            http_server,
+            http_output_rx,
             output_receiver_claimed: false,
         })
     }
@@ -515,6 +563,10 @@ impl PackagingSession {
             return None;
         }
         self.output_receiver_claimed = true;
+
+        if self.config.egress_mode == EgressMode::HttpPush {
+            return self.http_output_rx.take();
+        }
 
         let (tx, rx) = mpsc::channel(1024);
         let is_dual = self.config.encryption_scheme == EncryptionScheme::Dual;
@@ -705,6 +757,9 @@ impl PackagingSession {
             SessionState::Failed => {
                 let err = lifecycle.failure_error();
                 drop(lifecycle);
+                if let Some(http_server) = self.http_server.take() {
+                    http_server.shutdown().await;
+                }
                 let _ = self.cleanup_control_dir().await;
                 self.is_terminal.store(true, Ordering::Release);
                 return Err(err);
@@ -721,7 +776,10 @@ impl PackagingSession {
             .await;
 
         // If media segments were pushed, verify #EXT-X-ENDLIST in HLS manifests
-        if failures.is_empty() && self.has_pushed_media.load(Ordering::Acquire) {
+        if failures.is_empty()
+            && self.has_pushed_media.load(Ordering::Acquire)
+            && self.config.egress_mode != EgressMode::HttpPush
+        {
             let is_dual = self.config.encryption_scheme == EncryptionScheme::Dual;
             for rep in self.cluster.representations() {
                 let rep_output_dir = if is_dual {
@@ -741,6 +799,10 @@ impl PackagingSession {
 
         if let Some(harvester) = self.harvester.take() {
             harvester.finish_and_flush().await;
+        }
+
+        if let Some(http_server) = self.http_server.take() {
+            http_server.shutdown().await;
         }
 
         let control_cleanup = self.cleanup_control_dir().await.err();
@@ -2531,6 +2593,43 @@ mod tests {
             "take_output_receiver on closed session must return None"
         );
 
+        let _ = tokio::fs::remove_file(&mock_bin).await;
+    }
+
+    #[tokio::test]
+    async fn test_take_output_receiver_http_push() {
+        let mock_bin = std::env::temp_dir().join(format!("mock_gpac_{}.sh", Uuid::new_v4()));
+        std::fs::write(&mock_bin, "#!/bin/sh\ncat > /dev/null\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PackagingSessionConfig::cenc("http_push_claim_test")
+            .with_rendition(Rendition::video_hd().clear())
+            .with_egress_mode(EgressMode::HttpPush)
+            .with_gpac_bin(mock_bin.to_str().unwrap());
+
+        let mut session = PackagingSession::create(config, &RawKeyProvider::new())
+            .await
+            .unwrap();
+
+        assert!(session.config.http_egress_base_url.is_some());
+
+        let first_claim = session.take_output_receiver();
+        assert!(
+            first_claim.is_some(),
+            "First call to take_output_receiver in HttpPush mode must return Some(Receiver)"
+        );
+
+        let second_claim = session.take_output_receiver();
+        assert!(
+            second_claim.is_none(),
+            "Second call to take_output_receiver in HttpPush mode must return None (single-ownership)"
+        );
+
+        session.close().await.unwrap();
         let _ = tokio::fs::remove_file(&mock_bin).await;
     }
 
