@@ -144,6 +144,7 @@ async fn test_direct_output_channel_live_cenc_e2e() {
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_time_shift_buffer(std::time::Duration::from_secs(60))
+        .with_finalization_timeout(std::time::Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &provider)
@@ -316,6 +317,7 @@ async fn test_direct_output_channel_dual_scheme_e2e() {
         .with_segment_duration(2.0)
         .with_chunk_duration(0.2)
         .with_time_shift_buffer(std::time::Duration::from_secs(60))
+        .with_finalization_timeout(std::time::Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &provider)
@@ -408,6 +410,7 @@ async fn test_direct_output_channel_receiver_dropped_early() {
     let config = PackagingSessionConfig::new("e2e-doc-dropped-stream")
         .with_rendition(rendition)
         .with_encryption_scheme(EncryptionScheme::Cenc)
+        .with_finalization_timeout(std::time::Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &provider)
@@ -445,6 +448,7 @@ async fn test_direct_output_channel_unclaimed_receiver_preserves_files() {
     let config = PackagingSessionConfig::new("e2e-doc-unclaimed-stream")
         .with_rendition(rendition)
         .with_encryption_scheme(EncryptionScheme::Cenc)
+        .with_finalization_timeout(std::time::Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &provider)
@@ -486,6 +490,7 @@ async fn test_direct_output_channel_ephemeral_staging_during_active_push() {
         .with_segment_duration(1.0)
         .with_chunk_duration(0.2)
         .with_time_shift_buffer(std::time::Duration::from_secs(30))
+        .with_finalization_timeout(std::time::Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
     let mut session = PackagingSession::create(config, &provider)
