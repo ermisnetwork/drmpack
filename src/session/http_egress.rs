@@ -203,11 +203,7 @@ async fn handle_request(
 
     // 8. Forward to artifact channel respecting backpressure
     if artifact_tx.send(artifact).await.is_err() {
-        warn!(filename = %filename, "HttpEgressServer: artifact receiver dropped");
-        return Ok(Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(full_body("Service Unavailable: receiver dropped"))
-            .unwrap());
+        debug!(filename = %filename, "HttpEgressServer: artifact receiver dropped, discarding artifact");
     }
 
     // 9. Return HTTP 200 OK
@@ -729,7 +725,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_receiver_dropped_returns_503() {
+    async fn test_receiver_dropped_discards_gracefully() {
         let (tx, rx) = mpsc::channel(16);
         let token = "drop-token";
         let server = HttpEgressServer::start(token.to_string(), tx)
@@ -747,7 +743,7 @@ mod tests {
             .send()
             .await
             .expect("request failed");
-        assert_eq!(res.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
 
         server.shutdown().await;
     }
