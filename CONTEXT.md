@@ -171,6 +171,10 @@ _Avoid_: Output type, playlist type
 File-to-file static packaging for on-demand media assets, reading complete source containers from disk and generating static manifests with fixed durations and `#EXT-X-ENDLIST`, decoupled from the live streaming pipe orchestrator.
 _Avoid_: Offline job, batch transcode, file packager
 
+**EgressMode**:
+The delivery staging strategy for live packaging artifacts — `HttpPush` (in-process zero-disk HTTP loopback sink pushing directly to RAM via `httpout:hmode=push`, default in v0.2.0) or `FileSystemStaging` (ephemeral disk staging in `/tmp` observed via `ArtifactHarvester`, legacy fallback from v0.1.x per ADR-0015).
+_Avoid_: Output mode, delivery mode, transport mode
+
 **PackagedArtifact**:
 The structured container carrying an encrypted media segment or updated manifest emitted directly to callers via an async output channel. Eliminates manual filesystem polling for consumers.
 _Avoid_: Output event, packaging message, segment packet
@@ -184,11 +188,11 @@ The synchronization invariant guaranteeing that a media segment is only emitted 
 _Avoid_: File polling, file stability check, timer delay
 
 **ArtifactHarvester**:
-The asynchronous background subsystem that monitors the Storage Staging Directory for completed segments and updated manifests, emitting them as PackagedArtifact values through the direct output channel. Uses kernel filesystem events (`inotify`/`FSEvents`) as the primary detection mechanism with a relaxed watchdog timer as safety net (ADR-0016).
+The asynchronous background subsystem that monitors the Storage Staging Directory for completed segments and updated manifests, emitting them as PackagedArtifact values through the direct output channel. Uses kernel filesystem events (`inotify`/`FSEvents`) as the primary detection mechanism with a low-latency 50ms watchdog timer as safety net (ADR-0016).
 _Avoid_: File watcher, polling loop, segment scanner
 
 **HarvesterCadence**:
-The detection and scheduling strategy governing how the ArtifactHarvester observes the staging directory — kernel event-driven (sub-millisecond, primary) or watchdog timer fallback (1500ms, safety net).
+The detection and scheduling strategy governing how the ArtifactHarvester observes the staging directory — kernel event-driven (sub-millisecond, primary) or watchdog timer fallback (50ms low-latency safety net).
 _Avoid_: Polling interval, scan rate, timer frequency
 
 **Metadata Guarding**:

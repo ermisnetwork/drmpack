@@ -3,6 +3,7 @@
 [![CI](https://github.com/ermisnetwork/drmpack/actions/workflows/ci.yml/badge.svg)](https://github.com/ermisnetwork/drmpack/actions/workflows/ci.yml)
 [![DRM E2E](https://github.com/ermisnetwork/drmpack/actions/workflows/drm-e2e.yml/badge.svg)](https://github.com/ermisnetwork/drmpack/actions/workflows/drm-e2e.yml)
 [![docs](https://img.shields.io/badge/docs-GitHub_Pages-brightgreen)](https://ermisnetwork.github.io/drmpack/)
+[![roadmap](https://img.shields.io/badge/roadmap-ROADMAP.md-orange)](ROADMAP.md)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 Native Rust DRM packaging and manifest generation library orchestrating GPAC filters for CENC/CBCS fMP4 and HLS/DASH delivery.
@@ -719,6 +720,10 @@ Key terminology used throughout `drmpack` (aligned with `CONTEXT.md`):
 - **Manifest-Driven Readiness**: Synchronization guarantee ensuring a media segment is emitted to callers only after GPAC has fully written the segment and updated the manifest.
 - **DrmStreamMetadata**: Public, serializable data transfer object emitted by `PackagingSession::playback_metadata()` for application-level state persistence (PostgreSQL/Redis). Encapsulates public KIDs, IVs, track bindings, and encryption schemes needed by playback authorization backends to issue DRM entitlement tokens, while strictly excluding raw AES keys to prevent leakage across service boundaries ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)).
 - **AxinomSigningConfig**: Secure credential container managing Axinom Communication Key ID and secret for minting entitlement JWTs, with redacted debug logs and direct JWT signing over `DrmStreamMetadata` ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)).
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the detailed development roadmap, status checklists across release milestones (v0.1.x, v0.2.0, v0.3.0, v1.0.0), and architectural non-goals.
 
 ## License
 

@@ -37,3 +37,10 @@ AWS SPEKE (Secure Packager and Encoder Key Exchange) v2.0 key servers often run 
 - Core `drmpack` remains fast to compile, lightweight, and completely decoupled from AWS SDK release cycles.
 - Consumers needing live IAM/STS SigV4 signing can effortlessly integrate their existing AWS SDK client or custom KMS signing middleware via `SpekeConfig::with_signer(...)`.
 - `SpekeExchangeResponse` and `SpekeClient` remain pure wire-protocol abstractions adhering strictly to the `KeyProvider` domain model.
+
+## Implementation Reality
+
+1. **Zero AWS SDK Dependencies in `Cargo.toml`**: The crate dependencies contain no AWS SDK crates (`aws-config`, `aws-sigv4`, `aws-sdk-kms`, etc.). Compilation remains fast and completely decoupled from AWS SDK release cycles or dependency conflicts in consuming applications.
+2. **Direct XML Payload Signing**: `SpekeSigner::sign(&self, builder, endpoint, body)` operates directly on the serialized SPEKE v2 CPIX XML payload (`body: &str`). During `SpekeClient::raw_exchange`, dynamic signers compute request body hashes (e.g., `x-amz-content-sha256`) and authorization signatures directly against the exact runtime XML string.
+3. **Secret Redaction in Debug**: All authentication credentials in `SpekeAuth` and `SigV4Credentials` strictly implement `fmt::Debug` with secrets masked as `[REDACTED]` (including passwords, bearer tokens, API keys, AWS secret access keys, and security tokens), preventing credential leakage into logs or telemetry.
+

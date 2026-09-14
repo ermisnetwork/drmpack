@@ -1,6 +1,6 @@
 # Streamlined API Ergonomics, Concrete PackagingSession, and Safe Ramdisk Lifecycle
 
-**Status: Accepted**
+**Status: Accepted (Amended by ADR-0013, ADR-0014, and ADR-0015)**
 
 `drmpack` eliminates phantom configuration fields, replaces generic type pollution on `PackagingSession` with a non-generic concrete struct, introduces collision-free standardized track identifiers (`track_{type}_{uuid}`), streamlines `Rendition` constructors, adds flexible ingestion adapters (`push`, `ingest_stream`, `run_to_completion`), and decouples stream finalization from Ramdisk resource cleanup with RAII safety.
 
@@ -53,3 +53,12 @@ An exhaustive audit of library usability and developer experience revealed sever
 - Type signatures across `media-server` no longer require generic propagation for `PackagingSession`.
 - Multiple renditions sharing the same QualityTier work seamlessly without ID collisions.
 - Ramdisk memory leaks are prevented by RAII guards while avoiding premature manifest deletion during active edge distribution.
+
+## Implementation Reality / Amendments
+
+1. **Concrete Non-Generic Architecture**: Confirms that `PackagingSession` is a concrete struct devoid of generic type parameters. Key acquisition occurs during `PackagingSession::create(config, &provider).await`, which borrows `&impl KeyProvider` only at startup and stores the resolved `KeySet`.
+2. **Purge of `label` and `.with_label` (ADR-0013)**: While Decision 2 originally proposed `.with_label(name)`, ADR-0013 completely removed `label` and `.with_label` from `Rendition`. GPAC inspects container metadata (`moov`/`stsd`/`mdhd`) directly from the fMP4 stream, rendering manual label configuration redundant and eliminating configuration drift.
+3. **Ergonomic Byte Ingestion (`AsRef<[u8]>`)**: `session.push(bytes: impl AsRef<[u8]>)` accepts any byte reference (`&[u8]`, `Vec<u8>`, `Bytes`, etc.) rather than forcing callers to convert into an owned `Bytes` instance, minimizing allocation overhead on high-throughput ingest paths.
+4. **Canonical CBCS Standard Latency Baseline (ADR-0014)**: The default configuration produced by `PackagingSessionConfig::new` initializes with `EncryptionScheme::Cbcs` and `LatencyMode::Standard` (2.0s segments, 4.0s suggestedPresentationDelay) instead of CENC LowLatency, establishing single-stream Multi-DRM convergence across Apple FairPlay, Google Widevine, and Microsoft PlayReady.
+5. **Safe OS Temp Storage Staging (ADR-0015)**: The default staging output directory is resolved via `std::env::temp_dir()` (`/tmp`) rather than `/dev/shm`, preventing container `ENOSPC` crashes and OOM kills on 64MB shared memory limits while leveraging the Linux kernel Page Cache for sub-millisecond I/O.
+
