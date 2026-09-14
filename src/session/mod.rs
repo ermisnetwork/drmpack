@@ -663,6 +663,12 @@ impl PackagingSession {
 
     /// Ingest an entire stream channel and cleanly close the session, returning manifest paths.
     pub async fn run_to_completion(mut self, rx: mpsc::Receiver<Bytes>) -> Result<PackagingResult> {
+        if self.config.egress_mode == EgressMode::HttpPush {
+            return Err(DrmpackError::InvalidConfig(
+                "run_to_completion is only supported for EgressMode::FileSystemStaging; \
+                 for HttpPush, claim session.take_output_receiver() and ingest with push() or ingest_stream()".into(),
+            ));
+        }
         let segments_ingested = self.ingest_stream(rx).await?;
         let output_dir = self.config.output_dir.clone();
         let is_dual = self.config.encryption_scheme == EncryptionScheme::Dual;
@@ -2904,5 +2910,22 @@ mod tests {
 
         let http_config = config.with_egress_mode(EgressMode::HttpPush);
         assert_eq!(http_config.egress_mode, EgressMode::HttpPush);
+    }
+
+    #[tokio::test]
+    async fn test_run_to_completion_rejected_for_http_push() {
+        let key_source = crate::key::StaticKeySource::shared_key([0x55; 16]);
+        let config = PackagingSessionConfig::cenc("http_run_to_completion")
+            .with_rendition(Rendition::video(QualityTier::hd()))
+            .with_egress_mode(EgressMode::HttpPush)
+            .with_gpac_bin("false");
+
+        let session = PackagingSession::create(config, &key_source).await.unwrap();
+        let (_tx, rx) = mpsc::channel(1);
+        let err = session.run_to_completion(rx).await.unwrap_err();
+        assert!(matches!(err, DrmpackError::InvalidConfig(_)));
+        assert!(err
+            .to_string()
+            .contains("run_to_completion is only supported for EgressMode::FileSystemStaging"));
     }
 }

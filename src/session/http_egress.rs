@@ -75,7 +75,7 @@ fn classify_artifact_path(path: &str) -> Option<ArtifactKind> {
         Some(ArtifactKind::Manifest)
     } else if path.ends_with(".m4s") {
         Some(ArtifactKind::MediaSegment)
-    } else if path.ends_with("init.mp4") || path.ends_with("_init.mp4") {
+    } else if path.ends_with("init.mp4") {
         Some(ArtifactKind::InitSegment)
     } else {
         None
@@ -305,7 +305,7 @@ impl HttpEgressServer {
                         }
                         _ = conn_token.cancelled() => {
                             conn.as_mut().graceful_shutdown();
-                            let _ = conn.as_mut().await;
+                            let _ = tokio::time::timeout(Duration::from_secs(2), conn.as_mut()).await;
                         }
                     }
                 });

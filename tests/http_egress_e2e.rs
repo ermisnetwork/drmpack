@@ -528,3 +528,40 @@ async fn test_http_egress_take_output_receiver_after_close_returns_none() {
 
     let _ = tokio::fs::remove_dir_all(&out_dir).await;
 }
+
+#[tokio::test]
+async fn test_http_egress_receiver_dropped_early() {
+    if !media_tools_available() {
+        require_media_tools();
+        return;
+    }
+
+    let key_provider = StaticKeySource::shared_key([0x44; 16]);
+    let out_dir = std::env::temp_dir().join(format!("drmpack_http_dropped_rx_{}", Uuid::new_v4()));
+
+    let config = PackagingSessionConfig::cenc("e2e-http-dropped-rx")
+        .with_rendition(Rendition::video_hd())
+        .with_egress_mode(EgressMode::HttpPush)
+        .with_output_dir(&out_dir);
+
+    let mut session = PackagingSession::create(config, &key_provider)
+        .await
+        .expect("Failed to create PackagingSession");
+
+    // Claim receiver and immediately drop it (simulating consumer crash)
+    let rx = session.take_output_receiver().expect("Must yield receiver");
+    drop(rx);
+
+    // Ingestion should not panic or hang even when receiver is dead
+    let sample_bytes = generate_sample_mp4("dropped_rx_http", 4).await;
+    let _ = session.push(sample_bytes).await;
+
+    // Teardown must succeed without deadlock
+    let close_res = session.close().await;
+    assert!(
+        close_res.is_ok(),
+        "Session close must succeed cleanly after early receiver drop: {close_res:?}"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&out_dir).await;
+}
