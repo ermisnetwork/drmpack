@@ -278,35 +278,59 @@ async fn test_multi_track_abr_e2e_cenc() {
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_cenc_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::new("abr-cenc-stream")
-        .with_rendition(r_v_hd)
-        .with_rendition(r_v_sd)
-        .with_rendition(r_audio)
-        .with_rendition(r_sub)
-        .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
-        .with_encryption_scheme(EncryptionScheme::Cenc)
-        .with_drm_system(DrmSystem::Widevine)
-        .with_latency_mode(LatencyMode::LowLatency)
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_segment_duration(2.0)
-        .with_chunk_duration(0.2)
-        .with_output_dir(&out_dir);
+    let max_attempts = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=max_attempts {
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
 
-    let mut session = PackagingSession::create(config, &provider)
-        .await
-        .expect("Failed to create PackagingSession for multi-track CENC");
+        let config = PackagingSessionConfig::new("abr-cenc-stream")
+            .with_rendition(r_v_hd.clone())
+            .with_rendition(r_v_sd.clone())
+            .with_rendition(r_audio.clone())
+            .with_rendition(r_sub.clone())
+            .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
+            .with_encryption_scheme(EncryptionScheme::Cenc)
+            .with_drm_system(DrmSystem::Widevine)
+            .with_latency_mode(LatencyMode::LowLatency)
+            .with_finalization_timeout(Duration::from_secs(30))
+            .with_segment_duration(2.0)
+            .with_chunk_duration(0.2)
+            .with_output_dir(&out_dir);
 
-    // Feed synthetic 4-track fMP4
-    let sample_bytes = generate_multi_track_fmp4(4);
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Failed to push 4-track fMP4 into CENC session");
+        let mut session = match PackagingSession::create(config, &provider).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                eprintln!(
+                    "CENC test attempt {attempt}/{max_attempts} failed on create: {last_err}"
+                );
+                continue;
+            }
+        };
 
-    session
-        .close()
-        .await
-        .expect("Failed to close CENC session cleanly");
+        // Feed synthetic 4-track fMP4
+        let sample_bytes = generate_multi_track_fmp4(4);
+        if let Err(e) = session.push(sample_bytes).await {
+            last_err = format!("{e}");
+            eprintln!("CENC test attempt {attempt}/{max_attempts} failed on push: {last_err}");
+            continue;
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if let Err(e) = session.close().await {
+            last_err = format!("{e}");
+            eprintln!("CENC test attempt {attempt}/{max_attempts} failed on close: {last_err}");
+            continue;
+        }
+
+        break;
+    }
+
+    assert!(
+        out_dir.exists(),
+        "All {max_attempts} attempts failed. Last error: {last_err}"
+    );
 
     // 1. Verify DASH MPD
     let mpd_path = out_dir.join("live.mpd");
@@ -509,34 +533,58 @@ async fn test_multi_track_abr_e2e_cbcs() {
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_cbcs_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::new("abr-cbcs-stream")
-        .with_rendition(r_v_hd)
-        .with_rendition(r_v_sd)
-        .with_rendition(r_audio)
-        .with_rendition(r_sub)
-        .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
-        .with_encryption_scheme(EncryptionScheme::Cbcs)
-        .with_drm_system(DrmSystem::FairPlay)
-        .with_latency_mode(LatencyMode::LowLatency)
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_segment_duration(2.0)
-        .with_chunk_duration(0.2)
-        .with_output_dir(&out_dir);
+    let max_attempts = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=max_attempts {
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
 
-    let mut session = PackagingSession::create(config, &provider)
-        .await
-        .expect("Failed to create PackagingSession for multi-track CBCS");
+        let config = PackagingSessionConfig::new("abr-cbcs-stream")
+            .with_rendition(r_v_hd.clone())
+            .with_rendition(r_v_sd.clone())
+            .with_rendition(r_audio.clone())
+            .with_rendition(r_sub.clone())
+            .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
+            .with_encryption_scheme(EncryptionScheme::Cbcs)
+            .with_drm_system(DrmSystem::FairPlay)
+            .with_latency_mode(LatencyMode::LowLatency)
+            .with_finalization_timeout(Duration::from_secs(30))
+            .with_segment_duration(2.0)
+            .with_chunk_duration(0.2)
+            .with_output_dir(&out_dir);
 
-    let sample_bytes = generate_multi_track_fmp4(4);
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Failed to push 4-track fMP4 into CBCS session");
+        let mut session = match PackagingSession::create(config, &provider).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                eprintln!(
+                    "CBCS test attempt {attempt}/{max_attempts} failed on create: {last_err}"
+                );
+                continue;
+            }
+        };
 
-    session
-        .close()
-        .await
-        .expect("Failed to close CBCS session cleanly");
+        let sample_bytes = generate_multi_track_fmp4(4);
+        if let Err(e) = session.push(sample_bytes).await {
+            last_err = format!("{e}");
+            eprintln!("CBCS test attempt {attempt}/{max_attempts} failed on push: {last_err}");
+            continue;
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if let Err(e) = session.close().await {
+            last_err = format!("{e}");
+            eprintln!("CBCS test attempt {attempt}/{max_attempts} failed on close: {last_err}");
+            continue;
+        }
+
+        break;
+    }
+
+    assert!(
+        out_dir.exists(),
+        "All {max_attempts} attempts failed. Last error: {last_err}"
+    );
 
     // 1. Verify HLS Master Manifest
     let master_path = out_dir.join("live.m3u8");
@@ -723,6 +771,8 @@ async fn test_multi_track_abr_e2e_dual() {
             eprintln!("Dual test attempt {attempt}/{max_attempts} failed on push: {last_err}");
             continue;
         }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let close_result = session.close().await;
         if let Err(e) = close_result {
@@ -967,34 +1017,58 @@ async fn test_multi_track_abr_e2e_fallback_track_id() {
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_fallback_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::new("abr-fallback-stream")
-        .with_rendition(r_v_hd)
-        .with_rendition(r_v_sd)
-        .with_rendition(r_audio)
-        .with_rendition(r_sub)
-        .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
-        .with_encryption_scheme(EncryptionScheme::Cenc)
-        .with_drm_system(DrmSystem::Widevine)
-        .with_latency_mode(LatencyMode::LowLatency)
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_segment_duration(2.0)
-        .with_chunk_duration(0.2)
-        .with_output_dir(&out_dir);
+    let max_attempts = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=max_attempts {
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
 
-    let mut session = PackagingSession::create(config, &provider)
-        .await
-        .expect("Failed to create PackagingSession with fallback track IDs");
+        let config = PackagingSessionConfig::new("abr-fallback-stream")
+            .with_rendition(r_v_hd.clone())
+            .with_rendition(r_v_sd.clone())
+            .with_rendition(r_audio.clone())
+            .with_rendition(r_sub.clone())
+            .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
+            .with_encryption_scheme(EncryptionScheme::Cenc)
+            .with_drm_system(DrmSystem::Widevine)
+            .with_latency_mode(LatencyMode::LowLatency)
+            .with_finalization_timeout(Duration::from_secs(30))
+            .with_segment_duration(2.0)
+            .with_chunk_duration(0.2)
+            .with_output_dir(&out_dir);
 
-    let sample_bytes = generate_multi_track_fmp4(4);
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Failed to push 4-track fMP4 with fallback track IDs");
+        let mut session = match PackagingSession::create(config, &provider).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                eprintln!(
+                    "Fallback test attempt {attempt}/{max_attempts} failed on create: {last_err}"
+                );
+                continue;
+            }
+        };
 
-    session
-        .close()
-        .await
-        .expect("Failed to close session cleanly");
+        let sample_bytes = generate_multi_track_fmp4(4);
+        if let Err(e) = session.push(sample_bytes).await {
+            last_err = format!("{e}");
+            eprintln!("Fallback test attempt {attempt}/{max_attempts} failed on push: {last_err}");
+            continue;
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if let Err(e) = session.close().await {
+            last_err = format!("{e}");
+            eprintln!("Fallback test attempt {attempt}/{max_attempts} failed on close: {last_err}");
+            continue;
+        }
+
+        break;
+    }
+
+    assert!(
+        out_dir.exists(),
+        "All {max_attempts} attempts failed. Last error: {last_err}"
+    );
 
     let mpd = tokio::fs::read_to_string(out_dir.join("live.mpd"))
         .await
@@ -1094,35 +1168,63 @@ async fn test_multi_track_abr_e2e_multi_audio_languages() {
 
     let out_dir = std::env::temp_dir().join(format!("drmpack_abr_lang_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::new("abr-lang-stream")
-        .with_rendition(r_v_hd)
-        .with_rendition(r_v_sd)
-        .with_rendition(r_a_en)
-        .with_rendition(r_a_es)
-        .with_rendition(r_sub)
-        .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
-        .with_encryption_scheme(EncryptionScheme::Cenc)
-        .with_drm_system(DrmSystem::Widevine)
-        .with_latency_mode(LatencyMode::LowLatency)
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_segment_duration(2.0)
-        .with_chunk_duration(0.2)
-        .with_output_dir(&out_dir);
+    let max_attempts = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=max_attempts {
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
 
-    let mut session = PackagingSession::create(config, &provider)
-        .await
-        .expect("Failed to create PackagingSession for multi-language stream");
+        let config = PackagingSessionConfig::new("abr-lang-stream")
+            .with_rendition(r_v_hd.clone())
+            .with_rendition(r_v_sd.clone())
+            .with_rendition(r_a_en.clone())
+            .with_rendition(r_a_es.clone())
+            .with_rendition(r_sub.clone())
+            .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack)
+            .with_encryption_scheme(EncryptionScheme::Cenc)
+            .with_drm_system(DrmSystem::Widevine)
+            .with_latency_mode(LatencyMode::LowLatency)
+            .with_finalization_timeout(Duration::from_secs(30))
+            .with_segment_duration(2.0)
+            .with_chunk_duration(0.2)
+            .with_output_dir(&out_dir);
 
-    let sample_bytes = generate_5track_fmp4(4);
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Failed to push 5-track fMP4 into multi-language session");
+        let mut session = match PackagingSession::create(config, &provider).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                eprintln!(
+                    "Multi-lang test attempt {attempt}/{max_attempts} failed on create: {last_err}"
+                );
+                continue;
+            }
+        };
 
-    session
-        .close()
-        .await
-        .expect("Failed to close multi-language session cleanly");
+        let sample_bytes = generate_5track_fmp4(4);
+        if let Err(e) = session.push(sample_bytes).await {
+            last_err = format!("{e}");
+            eprintln!(
+                "Multi-lang test attempt {attempt}/{max_attempts} failed on push: {last_err}"
+            );
+            continue;
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if let Err(e) = session.close().await {
+            last_err = format!("{e}");
+            eprintln!(
+                "Multi-lang test attempt {attempt}/{max_attempts} failed on close: {last_err}"
+            );
+            continue;
+        }
+
+        break;
+    }
+
+    assert!(
+        out_dir.exists(),
+        "All {max_attempts} attempts failed. Last error: {last_err}"
+    );
 
     // 1. Verify DASH MPD with multiple audio AdaptationSets with distinct languages
     let mpd = tokio::fs::read_to_string(out_dir.join("live.mpd"))

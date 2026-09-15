@@ -370,7 +370,7 @@ impl GpacProcess {
                             #[cfg(unix)]
                             let (code, success) = {
                                 use std::os::unix::process::ExitStatusExt;
-                                let code = status.code();
+                                let code = status.code().or_else(|| status.signal().map(|sig| 128 + sig));
                                 let success = status.success();
                                 if !success {
                                     if let Some(sig) = status.signal() {
@@ -397,8 +397,19 @@ impl GpacProcess {
                     debug!("ProcessSupervisor received kill signal; terminating child process");
                     let _ = child.start_kill();
                     let wait_res = child.wait().await;
+                    let code = wait_res.ok().and_then(|s| {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::ExitStatusExt;
+                            s.code().or_else(|| s.signal().map(|sig| 128 + sig))
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            s.code()
+                        }
+                    });
                     ProcessExitStatus {
-                        code: wait_res.ok().and_then(|s| s.code()),
+                        code,
                         success: false,
                     }
                 }
