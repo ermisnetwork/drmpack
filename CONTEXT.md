@@ -172,7 +172,7 @@ File-to-file static packaging for on-demand media assets, reading complete sourc
 _Avoid_: Offline job, batch transcode, file packager
 
 **EgressMode**:
-The delivery staging strategy for live packaging artifacts — `HttpPush` (in-process zero-disk HTTP loopback sink pushing directly to RAM via `httpout:hmode=push`, default in v0.2.0) or `FileSystemStaging` (ephemeral disk staging in `/tmp` observed via `ArtifactHarvester`, legacy fallback from v0.1.x per ADR-0015).
+The delivery staging strategy for live packaging artifacts — `FileSystemStaging` (canonical default: ephemeral disk staging in `/tmp` backed by Linux kernel Page Cache and observed via `ArtifactHarvester` per ADR-0015) or `HttpPush` (in-process zero-disk HTTP loopback sink pushing directly to RAM via `httpout:hmode=push`).
 _Avoid_: Output mode, delivery mode, transport mode
 
 **PackagedArtifact**:

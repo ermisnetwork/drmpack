@@ -70,44 +70,23 @@ impl KeyProvider for AxinomProvider {
         let concrete_schemes: Vec<crate::types::EncryptionScheme> =
             concrete_schemes.into_iter().flatten().collect();
 
-        if concrete_schemes.len() > 1 {
-            let mut combined_set = KeySet::new();
-            // Build requests first
-            let mut reqs: Vec<KeyRequest> = concrete_schemes
-                .into_iter()
-                .map(|scheme| {
-                    let mut single_req = request.clone();
-                    single_req.encryption_schemes = vec![scheme];
-                    single_req
-                })
-                .collect();
+        if concrete_schemes.len() == 2 {
+            let mut req_a = request.clone();
+            req_a.encryption_schemes = vec![concrete_schemes[0]];
+            let mut req_b = request.clone();
+            req_b.encryption_schemes = vec![concrete_schemes[1]];
 
-            // For exactly 2 schemes (CENC + CBCS), use try_join!
-            if reqs.len() == 2 {
-                let req_b = reqs.pop().unwrap();
-                let req_a = reqs.pop().unwrap();
-                let (set_a, set_b) = tokio::try_join!(
-                    self.fetch_single_scheme_keys(&req_a),
-                    self.fetch_single_scheme_keys(&req_b),
-                )?;
-                for sub_set in [set_a, set_b] {
-                    for key in sub_set.all_keys() {
-                        combined_set.insert_key(key.clone());
-                    }
-                    for pssh in sub_set.pssh {
-                        combined_set.add_pssh(pssh);
-                    }
+            let (set_a, set_b) = tokio::try_join!(
+                self.fetch_single_scheme_keys(&req_a),
+                self.fetch_single_scheme_keys(&req_b),
+            )?;
+            let mut combined_set = KeySet::new();
+            for sub_set in [set_a, set_b] {
+                for key in sub_set.all_keys() {
+                    combined_set.insert_key(key.clone());
                 }
-            } else {
-                // Fallback to sequential for >2 schemes (unlikely but safe)
-                for req in &reqs {
-                    let sub_set = self.fetch_single_scheme_keys(req).await?;
-                    for key in sub_set.all_keys() {
-                        combined_set.insert_key(key.clone());
-                    }
-                    for pssh in sub_set.pssh {
-                        combined_set.add_pssh(pssh);
-                    }
+                for pssh in sub_set.pssh {
+                    combined_set.add_pssh(pssh);
                 }
             }
             Ok(combined_set)

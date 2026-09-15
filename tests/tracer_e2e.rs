@@ -76,6 +76,12 @@ async fn generate_sample_mp4(prefix: &str) -> Vec<u8> {
             "baseline",
             "-pix_fmt",
             "yuv420p",
+            "-g",
+            "30",
+            "-keyint_min",
+            "30",
+            "-sc_threshold",
+            "0",
             "-movflags",
             "empty_moov+default_base_moof+frag_keyframe",
             "-f",
@@ -90,16 +96,6 @@ async fn generate_sample_mp4(prefix: &str) -> Vec<u8> {
     let sample_bytes = tokio::fs::read(&sample_mp4_path).await.unwrap();
     let _ = tokio::fs::remove_file(&sample_mp4_path).await;
     sample_bytes
-}
-
-async fn wait_for_path(path: &std::path::Path) {
-    for _ in 0..100 {
-        if path.exists() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("Timed out waiting for {}", path.display());
 }
 
 #[tokio::test]
@@ -340,6 +336,7 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
         .with_latency_mode(LatencyMode::LowLatency)
         .with_segment_duration(1.0)
         .with_chunk_duration(0.2)
+        .with_finalization_timeout(std::time::Duration::from_secs(30))
         .with_output_dir(&out_dir)
         .with_encryption_scheme(EncryptionScheme::Dual)
         .with_drm_system(DrmSystem::Widevine);
@@ -380,11 +377,12 @@ async fn test_tracer_gpac_e2e_dual_packaging() {
         .await
         .expect("Failed to fan out fMP4 to both Dual Representations");
 
+    session.close().await.expect("Failed to close Dual session");
+
     let cenc_init = out_dir.join("cenc/video_360p_init.mp4");
     let cbcs_init = out_dir.join("cbcs/video_360p_init.mp4");
-    wait_for_path(&cenc_init).await;
-    wait_for_path(&cbcs_init).await;
-    session.close().await.expect("Failed to close Dual session");
+    assert!(cenc_init.exists(), "cenc init segment must exist");
+    assert!(cbcs_init.exists(), "cbcs init segment must exist");
 
     let expected_pssh_base64 = BASE64_STANDARD.encode(expected_widevine_pssh());
     let cenc_mpd = tokio::fs::read_to_string(&cenc_dash).await.unwrap();

@@ -24,6 +24,10 @@ pub enum DrmpackError {
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 
+    /// Validation error for input parameters or arguments.
+    #[error("Validation error: {0}")]
+    Validation(String),
+
     /// Orchestration error within a packaging session.
     #[error("Session error: {0}")]
     Session(String),

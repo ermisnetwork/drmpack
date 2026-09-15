@@ -38,4 +38,4 @@ jobs:
           gpac -version 2>&1 | grep -F "${GPAC_VERSION}"
           ffmpeg -version
       - name: Run required DRM end-to-end tests
-        run: cargo test --all-targets -- --test-threads=2
+        run: cargo test --all-targets -- --test-threads=1

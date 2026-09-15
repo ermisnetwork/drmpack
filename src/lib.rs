@@ -98,8 +98,8 @@ pub use session::{
     Representation, RepresentationCluster, SessionWriter,
 };
 pub use types::{
-    ArtifactKind, DrmSystem, EncryptionScheme, KeyMappingPolicy, LatencyMode, ManifestFormat,
-    PackagedArtifact, QualityTier, Rendition, TrackType,
+    ArtifactKind, DrmSystem, EgressMode, EncryptionScheme, KeyMappingPolicy, LatencyMode,
+    ManifestFormat, PackagedArtifact, QualityTier, Rendition, TrackType,
 };
 
 #[cfg(feature = "cpix")]

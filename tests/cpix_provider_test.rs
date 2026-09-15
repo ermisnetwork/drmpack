@@ -7,6 +7,7 @@ use drmpack::session::{PackagingSession, PackagingSessionConfig};
 use drmpack::types::{DrmSystem, EncryptionScheme, LatencyMode, QualityTier, Rendition, TrackType};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
@@ -38,6 +39,12 @@ async fn generate_sample_mp4(prefix: &str) -> Vec<u8> {
             "baseline",
             "-pix_fmt",
             "yuv420p",
+            "-g",
+            "30",
+            "-keyint_min",
+            "30",
+            "-sc_threshold",
+            "0",
             "-movflags",
             "empty_moov+default_base_moof+frag_keyframe",
             "-f",
@@ -590,6 +597,7 @@ async fn test_cpix_provider_e2e_real_packaging_cenc() {
         .with_latency_mode(LatencyMode::LowLatency)
         .with_segment_duration(1.0)
         .with_chunk_duration(0.2)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir)
         .with_encryption_scheme(EncryptionScheme::Cenc)
         .with_drm_system(DrmSystem::Widevine);
@@ -653,6 +661,7 @@ async fn test_cpix_provider_e2e_real_packaging_dual() {
         .with_latency_mode(LatencyMode::LowLatency)
         .with_segment_duration(1.0)
         .with_chunk_duration(0.2)
+        .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir)
         .with_encryption_scheme(EncryptionScheme::Dual)
         .with_drm_system(DrmSystem::Widevine)
