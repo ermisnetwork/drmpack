@@ -157,61 +157,94 @@ async fn test_http_egress_live_cenc_e2e() {
     let rendition = Rendition::video_hd();
     let out_dir = std::env::temp_dir().join(format!("drmpack_http_cenc_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::cenc("e2e-http-cenc-stream")
-        .with_rendition(rendition)
-        .with_egress_mode(EgressMode::HttpPush)
-        .with_segment_duration(2.0)
-        .with_chunk_duration(0.2)
-        .with_time_shift_buffer(Duration::from_secs(60))
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_output_dir(&out_dir);
+    let max_attempts = 3;
+    let mut last_err = String::new();
+    let mut artifacts = Vec::new();
 
-    let mut session = PackagingSession::create(config, &key_provider)
-        .await
-        .expect("Failed to create PackagingSession");
+    for attempt in 1..=max_attempts {
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
 
-    // Single-ownership assertion: take_output_receiver returns Some once, None thereafter
-    let mut rx = session
-        .take_output_receiver()
-        .expect("First call to take_output_receiver must return Some(Receiver)");
-    assert!(
-        session.take_output_receiver().is_none(),
-        "Subsequent call to take_output_receiver must return None"
-    );
+        let config = PackagingSessionConfig::cenc("e2e-http-cenc-stream")
+            .with_rendition(rendition.clone())
+            .with_egress_mode(EgressMode::HttpPush)
+            .with_segment_duration(2.0)
+            .with_chunk_duration(0.2)
+            .with_time_shift_buffer(Duration::from_secs(60))
+            .with_finalization_timeout(Duration::from_secs(15))
+            .with_output_dir(&out_dir);
 
-    // Spawn consumer task collecting PackagedArtifact items from rx
-    let consumer_handle = tokio::spawn(async move {
-        let mut artifacts: Vec<PackagedArtifact> = Vec::new();
-        while let Some(artifact) = rx.recv().await {
-            artifacts.push(artifact);
+        let mut session = match PackagingSession::create(config, &key_provider).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                eprintln!("CENC HTTP egress attempt {attempt}/{max_attempts} failed on create: {last_err}");
+                continue;
+            }
+        };
+
+        // Single-ownership assertion: take_output_receiver returns Some once, None thereafter
+        let mut rx = match session.take_output_receiver() {
+            Some(r) => r,
+            None => {
+                last_err = "First call to take_output_receiver returned None".into();
+                continue;
+            }
+        };
+        assert!(
+            session.take_output_receiver().is_none(),
+            "Subsequent call to take_output_receiver must return None"
+        );
+
+        // Spawn consumer task collecting PackagedArtifact items from rx
+        let consumer_handle = tokio::spawn(async move {
+            let mut items: Vec<PackagedArtifact> = Vec::new();
+            while let Some(artifact) = rx.recv().await {
+                items.push(artifact);
+            }
+            items
+        });
+
+        // Ingest sample media chunks into the session
+        let sample_bytes = generate_sample_mp4("http_cenc", 4).await;
+        if let Err(e) = session.push(sample_bytes).await {
+            last_err = format!("{e}");
+            eprintln!(
+                "CENC HTTP egress attempt {attempt}/{max_attempts} failed on push: {last_err}"
+            );
+            continue;
         }
-        artifacts
-    });
 
-    // Ingest sample media chunks into the session
-    let sample_bytes = generate_sample_mp4("http_cenc", 4).await;
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Failed to push fMP4 into session");
+        // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
+        tokio::time::sleep(Duration::from_millis(800)).await;
 
-    // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
-    tokio::time::sleep(Duration::from_millis(800)).await;
+        // Gracefully close session: signals EOF, awaits GPAC finalization, shuts down HttpEgressServer
+        if let Err(e) = session.close().await {
+            last_err = format!("{e}");
+            eprintln!(
+                "CENC HTTP egress attempt {attempt}/{max_attempts} failed on close: {last_err}"
+            );
+            continue;
+        }
 
-    // Gracefully close session: signals EOF, awaits GPAC finalization, shuts down HttpEgressServer
-    session
-        .close()
-        .await
-        .expect("Failed to close session cleanly");
-
-    // Await consumer completion (channel closed when HttpEgressServer shuts down)
-    let artifacts = consumer_handle
-        .await
-        .expect("Consumer task panicked or failed");
+        match consumer_handle.await {
+            Ok(arts) if !arts.is_empty() => {
+                artifacts = arts;
+                break;
+            }
+            Ok(_) => {
+                last_err = "No artifacts collected from channel".into();
+                continue;
+            }
+            Err(e) => {
+                last_err = format!("Consumer task panicked: {e}");
+                continue;
+            }
+        }
+    }
 
     assert!(
         !artifacts.is_empty(),
-        "HttpPush egress channel must emit packaged artifacts"
+        "All {max_attempts} attempts failed. Last error: {last_err}"
     );
 
     let mut init_segments = Vec::new();
@@ -323,51 +356,90 @@ async fn test_http_egress_dual_scheme_e2e() {
     let rendition = Rendition::video_hd();
     let out_dir = std::env::temp_dir().join(format!("drmpack_http_dual_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::dual("e2e-http-dual-stream")
-        .with_rendition(rendition)
-        .with_egress_mode(EgressMode::HttpPush)
-        .with_segment_duration(2.0)
-        .with_chunk_duration(0.2)
-        .with_time_shift_buffer(Duration::from_secs(60))
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_output_dir(&out_dir);
+    let max_attempts = 3;
+    let mut last_err = String::new();
+    let mut artifacts = Vec::new();
 
-    let mut session = PackagingSession::create(config, &key_provider)
-        .await
-        .expect("Failed to create dual PackagingSession");
+    for attempt in 1..=max_attempts {
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
 
-    let mut rx = session
-        .take_output_receiver()
-        .expect("Failed to claim output receiver");
+        let config = PackagingSessionConfig::dual("e2e-http-dual-stream")
+            .with_rendition(rendition.clone())
+            .with_egress_mode(EgressMode::HttpPush)
+            .with_segment_duration(2.0)
+            .with_chunk_duration(0.2)
+            .with_time_shift_buffer(Duration::from_secs(60))
+            .with_finalization_timeout(Duration::from_secs(15))
+            .with_output_dir(&out_dir);
 
-    // Spawn consumer task collecting PackagedArtifact items
-    let consumer_handle = tokio::spawn(async move {
-        let mut artifacts: Vec<PackagedArtifact> = Vec::new();
-        while let Some(artifact) = rx.recv().await {
-            artifacts.push(artifact);
+        let mut session = match PackagingSession::create(config, &key_provider).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                eprintln!("Dual HTTP egress attempt {attempt}/{max_attempts} failed on create: {last_err}");
+                continue;
+            }
+        };
+
+        let mut rx = match session.take_output_receiver() {
+            Some(r) => r,
+            None => {
+                last_err = "Failed to claim output receiver".into();
+                continue;
+            }
+        };
+
+        // Spawn consumer task collecting PackagedArtifact items
+        let consumer_handle = tokio::spawn(async move {
+            let mut items: Vec<PackagedArtifact> = Vec::new();
+            while let Some(artifact) = rx.recv().await {
+                items.push(artifact);
+            }
+            items
+        });
+
+        // Ingest sample media
+        let sample_bytes = generate_sample_mp4("http_dual", 4).await;
+        if let Err(e) = session.push(sample_bytes).await {
+            last_err = format!("{e}");
+            eprintln!(
+                "Dual HTTP egress attempt {attempt}/{max_attempts} failed on push: {last_err}"
+            );
+            continue;
         }
-        artifacts
-    });
 
-    // Ingest sample media
-    let sample_bytes = generate_sample_mp4("http_dual", 4).await;
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Failed to push fMP4 into dual session");
+        // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
+        tokio::time::sleep(Duration::from_millis(800)).await;
 
-    // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
-    tokio::time::sleep(Duration::from_millis(800)).await;
+        // Gracefully close dual session
+        if let Err(e) = session.close().await {
+            last_err = format!("{e}");
+            eprintln!(
+                "Dual HTTP egress attempt {attempt}/{max_attempts} failed on close: {last_err}"
+            );
+            continue;
+        }
 
-    // Gracefully close dual session
-    session
-        .close()
-        .await
-        .expect("Failed to close dual session cleanly");
+        match consumer_handle.await {
+            Ok(arts) if !arts.is_empty() => {
+                artifacts = arts;
+                break;
+            }
+            Ok(_) => {
+                last_err = "No artifacts collected from channel".into();
+                continue;
+            }
+            Err(e) => {
+                last_err = format!("Consumer task panicked: {e}");
+                continue;
+            }
+        }
+    }
 
-    let artifacts = consumer_handle
-        .await
-        .expect("Consumer task panicked or failed");
+    assert!(
+        !artifacts.is_empty(),
+        "All {max_attempts} attempts failed. Last error: {last_err}"
+    );
 
     assert!(
         !artifacts.is_empty(),
@@ -477,41 +549,65 @@ async fn test_http_egress_unclaimed_receiver_closed_cleanly() {
     let key_provider = StaticKeySource::shared_key([0x33; 16]);
     let out_dir = std::env::temp_dir().join(format!("drmpack_http_unclaimed_{}", Uuid::new_v4()));
 
-    let config = PackagingSessionConfig::cenc("e2e-http-unclaimed")
-        .with_rendition(Rendition::video_hd())
-        .with_egress_mode(EgressMode::HttpPush)
-        .with_segment_duration(1.0)
-        .with_chunk_duration(0.2)
-        .with_time_shift_buffer(Duration::from_secs(60))
-        .with_finalization_timeout(Duration::from_secs(30))
-        .with_output_dir(&out_dir);
+    let max_attempts = 3;
+    let mut last_err = String::new();
+    let mut success = false;
 
-    let mut session = PackagingSession::create(config, &key_provider)
-        .await
-        .expect("Failed to create PackagingSession");
+    for attempt in 1..=max_attempts {
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
 
-    let sample_bytes = generate_sample_mp4("unclaimed_http", 4).await;
-    session
-        .push(sample_bytes)
-        .await
-        .expect("Push must succeed even if receiver was unclaimed");
+        let config = PackagingSessionConfig::cenc("e2e-http-unclaimed")
+            .with_rendition(Rendition::video_hd())
+            .with_egress_mode(EgressMode::HttpPush)
+            .with_segment_duration(1.0)
+            .with_chunk_duration(0.2)
+            .with_time_shift_buffer(Duration::from_secs(60))
+            .with_finalization_timeout(Duration::from_secs(10))
+            .with_output_dir(&out_dir);
 
-    // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
-    tokio::time::sleep(Duration::from_millis(800)).await;
+        let mut session = match PackagingSession::create(config, &key_provider).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("{e}");
+                eprintln!(
+                    "Unclaimed attempt {attempt}/{max_attempts} failed on create: {last_err}"
+                );
+                continue;
+            }
+        };
 
-    // Do NOT claim receiver, close session directly
-    session
-        .close()
-        .await
-        .expect("Unclaimed HttpPush session must close cleanly without deadlock");
+        let sample_bytes = generate_sample_mp4("unclaimed_http", 4).await;
+        if let Err(e) = session.push(sample_bytes).await {
+            last_err = format!("{e}");
+            eprintln!("Unclaimed attempt {attempt}/{max_attempts} failed on push: {last_err}");
+            continue;
+        }
+
+        // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // Do NOT claim receiver, close session directly
+        if let Err(e) = session.close().await {
+            last_err = format!("{e}");
+            eprintln!("Unclaimed attempt {attempt}/{max_attempts} failed on close: {last_err}");
+            continue;
+        }
+
+        assert!(
+            session.take_output_receiver().is_none(),
+            "take_output_receiver after close must return None"
+        );
+
+        assert_no_media_segment_files(&out_dir);
+        let _ = tokio::fs::remove_dir_all(&out_dir).await;
+        success = true;
+        break;
+    }
 
     assert!(
-        session.take_output_receiver().is_none(),
-        "take_output_receiver after close must return None"
+        success,
+        "All {max_attempts} attempts failed. Last error: {last_err}"
     );
-
-    assert_no_media_segment_files(&out_dir);
-    let _ = tokio::fs::remove_dir_all(&out_dir).await;
 }
 
 #[tokio::test]

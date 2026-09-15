@@ -209,6 +209,7 @@ async fn handle_request(
     // 9. Return HTTP 200 OK
     Ok(Response::builder()
         .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_LENGTH, "0")
         .body(Full::default())
         .unwrap())
 }
