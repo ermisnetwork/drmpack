@@ -2890,7 +2890,7 @@ mod tests {
         let key_source = crate::key::StaticKeySource::shared_key([0x55; 16]);
         let config = PackagingSessionConfig::cenc("moof_latch_test")
             .with_rendition(r1)
-            .with_gpac_bin("false"); // doesn't matter for this test
+            .with_gpac_bin("cat"); // keeps stdin open for push operations
 
         let mut session = PackagingSession::create(config, &key_source).await.unwrap();
 
