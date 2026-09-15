@@ -366,10 +366,24 @@ impl GpacProcess {
             let exit_status = tokio::select! {
                 res = child.wait() => {
                     match res {
-                        Ok(status) => ProcessExitStatus {
-                            code: status.code(),
-                            success: status.success(),
-                        },
+                        Ok(status) => {
+                            #[cfg(unix)]
+                            let (code, success) = {
+                                use std::os::unix::process::ExitStatusExt;
+                                let code = status.code();
+                                let success = status.success();
+                                if !success {
+                                    if let Some(sig) = status.signal() {
+                                        warn!(signal = sig, code = ?code, "GPAC process terminated by signal");
+                                    }
+                                }
+                                (code, success)
+                            };
+                            #[cfg(not(unix))]
+                            let (code, success) = (status.code(), status.success());
+
+                            ProcessExitStatus { code, success }
+                        }
                         Err(e) => {
                             error!("Error waiting on GPAC child: {e}");
                             ProcessExitStatus {
@@ -420,6 +434,9 @@ impl GpacProcess {
             if let Err(e) = stdin.write_all(data).await {
                 return Err(self.map_stdin_io_error("write to", e).await);
             }
+            if let Err(e) = stdin.flush().await {
+                return Err(self.map_stdin_io_error("flush", e).await);
+            }
             Ok(())
         } else {
             Err(DrmpackError::Session(
@@ -468,8 +485,11 @@ impl GpacProcess {
 
     /// Gracefully close the stdin pipe and await GPAC completion.
     pub async fn close_and_wait(&mut self, timeout: Duration) -> Result<()> {
-        // 1. Close stdin to signal EOF to GPAC
-        self.stdin.take(); // Dropping ChildStdin closes the write pipe
+        // 1. Flush and close stdin to signal EOF to GPAC
+        if let Some(mut stdin) = self.stdin.take() {
+            let _ = stdin.flush().await;
+            let _ = stdin.shutdown().await;
+        }
         debug!("Closed GPAC stdin pipe, awaiting graceful finalization");
 
         // 2. Await ProcessSupervisor completion with timeout

@@ -195,6 +195,9 @@ async fn test_http_egress_live_cenc_e2e() {
         .await
         .expect("Failed to push fMP4 into session");
 
+    // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Gracefully close session: signals EOF, awaits GPAC finalization, shuts down HttpEgressServer
     session
         .close()
@@ -353,6 +356,9 @@ async fn test_http_egress_dual_scheme_e2e() {
         .await
         .expect("Failed to push fMP4 into dual session");
 
+    // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Gracefully close dual session
     session
         .close()
@@ -490,6 +496,9 @@ async fn test_http_egress_unclaimed_receiver_closed_cleanly() {
         .await
         .expect("Push must succeed even if receiver was unclaimed");
 
+    // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Do NOT claim receiver, close session directly
     session
         .close()
@@ -532,6 +541,9 @@ async fn test_http_egress_receiver_dropped_early() {
     // Ingestion should not panic or hang even when receiver is dead
     let sample_bytes = generate_sample_mp4("dropped_rx_http", 4).await;
     let _ = session.push(sample_bytes).await;
+
+    // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Teardown must succeed without deadlock
     let close_res = session.close().await;
