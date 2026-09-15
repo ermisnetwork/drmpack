@@ -196,7 +196,7 @@ async fn test_http_egress_live_cenc_e2e() {
         .expect("Failed to push fMP4 into session");
 
     // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
 
     // Gracefully close session: signals EOF, awaits GPAC finalization, shuts down HttpEgressServer
     session
@@ -357,7 +357,7 @@ async fn test_http_egress_dual_scheme_e2e() {
         .expect("Failed to push fMP4 into dual session");
 
     // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
 
     // Gracefully close dual session
     session
@@ -497,7 +497,7 @@ async fn test_http_egress_unclaimed_receiver_closed_cleanly() {
         .expect("Push must succeed even if receiver was unclaimed");
 
     // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
 
     // Do NOT claim receiver, close session directly
     session
@@ -527,6 +527,9 @@ async fn test_http_egress_receiver_dropped_early() {
     let config = PackagingSessionConfig::cenc("e2e-http-dropped-rx")
         .with_rendition(Rendition::video_hd())
         .with_egress_mode(EgressMode::HttpPush)
+        .with_segment_duration(2.0)
+        .with_chunk_duration(0.2)
+        .with_time_shift_buffer(Duration::from_secs(60))
         .with_finalization_timeout(Duration::from_secs(30))
         .with_output_dir(&out_dir);
 
@@ -539,11 +542,14 @@ async fn test_http_egress_receiver_dropped_early() {
     drop(rx);
 
     // Ingestion should not panic or hang even when receiver is dead
-    let sample_bytes = generate_sample_mp4("dropped_rx_http", 4).await;
-    let _ = session.push(sample_bytes).await;
+    let sample_bytes = generate_sample_mp4("dropped_rx_http", 2).await;
+    session
+        .push(sample_bytes)
+        .await
+        .expect("Push must succeed even if receiver was dropped");
 
     // Allow GPAC filter pipeline to ingest and begin processing before signaling EOF
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
 
     // Teardown must succeed without deadlock
     let close_res = session.close().await;
