@@ -7,5 +7,6 @@
 pub mod engine;
 pub mod types;
 
+pub use crate::session::isobmff::is_complete_isobmff_single_file;
 pub use engine::package_vod_file;
 pub use types::{VodInputSource, VodMode, VodPackageConfig, VodPackageResult};

@@ -92,17 +92,9 @@ impl GpacVodProcessConfig {
         args.push("-threads=-1".into());
 
         // 2. Add input files with representation mapping
-        match &self.input_source {
-            VodInputSource::SingleFile(path) => {
-                args.push("-i".into());
-                args.push(format!("{}{}", path.display(), VOD_REPRESENTATION_MAPPING));
-            }
-            VodInputSource::TrackFiles(paths) => {
-                for path in paths {
-                    args.push("-i".into());
-                    args.push(format!("{}{}", path.display(), VOD_REPRESENTATION_MAPPING));
-                }
-            }
+        for path in self.input_source.paths() {
+            args.push("-i".into());
+            args.push(format!("{}{}", path.display(), VOD_REPRESENTATION_MAPPING));
         }
 
         // 3. Cecrypt filter
@@ -112,7 +104,12 @@ impl GpacVodProcessConfig {
         let manifest_file = format!("{}.mpd", self.manifest_name);
         let destination = self.output_dir.join(manifest_file).display().to_string();
 
-        let mut dasher_opts = vec![destination, "dual".into(), "pssh=mv".into()];
+        let mut dasher_opts = vec![
+            destination,
+            "dual".into(),
+            format!("segdur={}", self.segment_duration),
+            "pssh=mv".into(),
+        ];
 
         match self.vod_mode {
             VodMode::SingleFile => {
@@ -120,7 +117,6 @@ impl GpacVodProcessConfig {
                 dasher_opts.push("template=$RepresentationID$".into());
             }
             VodMode::Segmented => {
-                dasher_opts.push(format!("segdur={}", self.segment_duration));
                 dasher_opts.push("template=$RepresentationID$_$Init=init$$Number$".into());
             }
         }

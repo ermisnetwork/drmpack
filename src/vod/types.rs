@@ -27,6 +27,16 @@ pub enum VodInputSource {
     TrackFiles(Vec<PathBuf>),
 }
 
+impl VodInputSource {
+    /// Return the list of input media file paths.
+    pub fn paths(&self) -> &[PathBuf] {
+        match self {
+            Self::SingleFile(path) => std::slice::from_ref(path),
+            Self::TrackFiles(paths) => paths.as_slice(),
+        }
+    }
+}
+
 /// Configuration for a whole-file VOD batch packaging job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VodPackageConfig {

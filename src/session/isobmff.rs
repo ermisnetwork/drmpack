@@ -72,23 +72,9 @@ pub(crate) fn is_complete_isobmff_init_segment(data: &[u8]) -> bool {
     has_isobmff_boxes(data, b"ftyp", b"moov")
 }
 
-/// Verify if `data` contains a top-level ISOBMFF box with matching 4-byte ASCII box identifier.
-#[allow(dead_code)]
-pub(crate) fn has_isobmff_box(data: &[u8], target_box: &[u8; 4]) -> bool {
-    let mut offset = 0;
-    while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
-        if box_type == target_box {
-            return true;
-        }
-        offset += box_size;
-    }
-    false
-}
-
 /// Verify if `data` is a valid self-initializing Single-File media container (e.g. DASH onDemand / HLS byte-range)
 /// containing `ftyp`, `moov`, and `sidx` (Segment Index) boxes.
-#[allow(dead_code)]
-pub(crate) fn is_complete_isobmff_single_file(data: &[u8]) -> bool {
+pub fn is_complete_isobmff_single_file(data: &[u8]) -> bool {
     let mut offset = 0;
     let (mut has_ftyp, mut has_moov, mut has_sidx) = (false, false, false);
 
@@ -301,18 +287,5 @@ mod tests {
         assert!(!is_complete_isobmff_single_file(
             &valid_single_file[..valid_single_file.len() - 5]
         ));
-    }
-
-    #[test]
-    fn test_has_isobmff_box() {
-        let ftyp = make_box(b"ftyp", b"isom");
-        let moov = make_box(b"moov", b"moov_payload");
-        let mut data = Vec::new();
-        data.extend_from_slice(&ftyp);
-        data.extend_from_slice(&moov);
-
-        assert!(has_isobmff_box(&data, b"ftyp"));
-        assert!(has_isobmff_box(&data, b"moov"));
-        assert!(!has_isobmff_box(&data, b"sidx"));
     }
 }

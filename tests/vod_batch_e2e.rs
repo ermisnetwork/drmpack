@@ -1,29 +1,39 @@
 mod common;
 
-use common::{find_box, is_complete_single_file_mp4, TempDirGuard};
+use common::{find_box, TempDirGuard};
 use drmpack::key::{ContentKey, StaticKeySource};
 use drmpack::types::{DrmSystem, EncryptionScheme, QualityTier, Rendition, TrackType};
-use drmpack::vod::{package_vod_file, VodInputSource, VodMode, VodPackageConfig};
+use drmpack::vod::{
+    is_complete_isobmff_single_file, package_vod_file, VodInputSource, VodMode, VodPackageConfig,
+};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use uuid::Uuid;
 
-fn generate_synthetic_mp4(path: &Path) {
+fn generate_synthetic_media(path: &Path, video: bool, audio: bool) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    let status = Command::new("ffmpeg")
-        .args([
-            "-y",
+    let mut args = vec!["-y"];
+    if video {
+        args.extend([
             "-f",
             "lavfi",
             "-i",
             "testsrc=duration=4:size=640x360:rate=30",
+        ]);
+    }
+    if audio {
+        args.extend([
             "-f",
             "lavfi",
             "-i",
             "sine=frequency=1000:duration=4:sample_rate=48000",
+        ]);
+    }
+    if video {
+        args.extend([
             "-c:v",
             "libx264",
             "-g",
@@ -32,14 +42,20 @@ fn generate_synthetic_mp4(path: &Path) {
             "60",
             "-sc_threshold",
             "0",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-f",
-            "mp4",
-            path.to_str().unwrap(),
-        ])
+        ]);
+    } else {
+        args.push("-vn");
+    }
+    if audio {
+        args.extend(["-c:a", "aac", "-b:a", "128k"]);
+    } else {
+        args.push("-an");
+    }
+    let path_str = path.to_str().unwrap();
+    args.extend(["-f", "mp4", path_str]);
+
+    let status = Command::new("ffmpeg")
+        .args(&args)
         .output()
         .expect("failed to run ffmpeg");
     assert!(
@@ -49,37 +65,12 @@ fn generate_synthetic_mp4(path: &Path) {
     );
 }
 
+fn generate_synthetic_mp4(path: &Path) {
+    generate_synthetic_media(path, true, true);
+}
+
 fn generate_synthetic_video_mp4(path: &Path) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    let status = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=duration=4:size=640x360:rate=30",
-            "-c:v",
-            "libx264",
-            "-g",
-            "60",
-            "-keyint_min",
-            "60",
-            "-sc_threshold",
-            "0",
-            "-an",
-            "-f",
-            "mp4",
-            path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("failed to run ffmpeg");
-    assert!(
-        status.status.success(),
-        "ffmpeg synthetic video generation failed: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
+    generate_synthetic_media(path, true, false);
 }
 
 fn generate_synthetic_audio_mp4(path: &Path) {
@@ -94,6 +85,10 @@ fn generate_synthetic_audio_mp4(path: &Path) {
             "-i",
             "sine=frequency=1000:duration=4:sample_rate=48000",
             "-vn",
+            "-streamid",
+            "0:2",
+            "-use_stream_ids_as_track_ids",
+            "1",
             "-c:a",
             "aac",
             "-b:a",
@@ -109,6 +104,32 @@ fn generate_synthetic_audio_mp4(path: &Path) {
         "ffmpeg synthetic audio generation failed: {}",
         String::from_utf8_lossy(&status.stderr)
     );
+}
+
+fn assert_isobmff_single_files(files: &[std::path::PathBuf]) {
+    for media_file in files {
+        let data = std::fs::read(media_file).expect("failed to read media file");
+        assert!(
+            is_complete_isobmff_single_file(&data),
+            "media file {:?} must be complete single-file ISOBMFF container",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"ftyp").is_some(),
+            "media file {:?} missing ftyp box",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"moov").is_some(),
+            "media file {:?} missing moov box",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"sidx").is_some(),
+            "media file {:?} missing sidx box",
+            media_file
+        );
+    }
 }
 
 #[tokio::test]
@@ -157,29 +178,7 @@ async fn test_package_vod_single_file_cbcs() {
     assert!(mpd_content.contains("<SegmentBase"));
 
     // Verify generated media files contain ftyp, moov, and sidx boxes
-    for media_file in &result.media_files {
-        let data = std::fs::read(media_file).expect("failed to read media file");
-        assert!(
-            is_complete_single_file_mp4(&data),
-            "media file {:?} must be complete single-file ISOBMFF container",
-            media_file
-        );
-        assert!(
-            find_box(&data, b"ftyp").is_some(),
-            "media file {:?} missing ftyp box",
-            media_file
-        );
-        assert!(
-            find_box(&data, b"moov").is_some(),
-            "media file {:?} missing moov box",
-            media_file
-        );
-        assert!(
-            find_box(&data, b"sidx").is_some(),
-            "media file {:?} missing sidx box",
-            media_file
-        );
-    }
+    assert_isobmff_single_files(&result.media_files);
 }
 
 #[tokio::test]
@@ -366,27 +365,5 @@ async fn test_package_vod_track_files_input() {
     assert!(mpd_content.contains("<SegmentBase"));
 
     // Verify media files contain ftyp, moov, and sidx
-    for media_file in &result.media_files {
-        let data = std::fs::read(media_file).expect("failed to read media file");
-        assert!(
-            is_complete_single_file_mp4(&data),
-            "media file {:?} must be complete single-file ISOBMFF container",
-            media_file
-        );
-        assert!(
-            find_box(&data, b"ftyp").is_some(),
-            "media file {:?} missing ftyp box",
-            media_file
-        );
-        assert!(
-            find_box(&data, b"moov").is_some(),
-            "media file {:?} missing moov box",
-            media_file
-        );
-        assert!(
-            find_box(&data, b"sidx").is_some(),
-            "media file {:?} missing sidx box",
-            media_file
-        );
-    }
+    assert_isobmff_single_files(&result.media_files);
 }

@@ -12,6 +12,19 @@ use tokio::process::Command;
 use tracing::{error, info, instrument};
 use uuid::Uuid;
 
+struct ControlDirGuard {
+    path: std::path::PathBuf,
+    preserve: bool,
+}
+
+impl Drop for ControlDirGuard {
+    fn drop(&mut self) {
+        if !self.preserve && self.path.exists() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 /// Package a static media file or set of track files into encrypted VOD DASH and HLS assets.
 #[instrument(skip(key_provider), fields(content_id = %config.content_id))]
 pub async fn package_vod_file<P: KeyProvider>(
@@ -26,6 +39,13 @@ pub async fn package_vod_file<P: KeyProvider>(
 
     let control_dir = std::env::temp_dir().join(format!("drmpack_vod_ctrl_{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&control_dir).await?;
+    let mut control_guard = ControlDirGuard {
+        path: control_dir.clone(),
+        preserve: false,
+    };
+
+    // 3. Acquire encryption keys once upfront (single network request for both single and dual schemes)
+    let key_set = fetch_vod_key_set(config, key_provider).await?;
 
     let execution_res = match config.encryption_scheme {
         EncryptionScheme::Dual => {
@@ -37,14 +57,14 @@ pub async fn package_vod_file<P: KeyProvider>(
             tokio::try_join!(
                 execute_single_scheme(
                     config,
-                    key_provider,
+                    &key_set,
                     EncryptionScheme::Cenc,
                     &cenc_dir,
                     &control_dir
                 ),
                 execute_single_scheme(
                     config,
-                    key_provider,
+                    &key_set,
                     EncryptionScheme::Cbcs,
                     &cbcs_dir,
                     &control_dir
@@ -53,22 +73,46 @@ pub async fn package_vod_file<P: KeyProvider>(
             .map(|(res_cenc, res_cbcs)| merge_dual_results(config, res_cenc, res_cbcs))
         }
         scheme => {
-            execute_single_scheme(
-                config,
-                key_provider,
-                scheme,
-                &config.output_dir,
-                &control_dir,
-            )
-            .await
+            execute_single_scheme(config, &key_set, scheme, &config.output_dir, &control_dir).await
         }
     };
 
-    let should_cleanup = !config.preserve_output || execution_res.is_ok();
-    if should_cleanup {
-        let _ = tokio::fs::remove_dir_all(&control_dir).await;
+    if execution_res.is_err() && config.preserve_output {
+        control_guard.preserve = true;
     }
     execution_res
+}
+
+async fn fetch_vod_key_set<P: KeyProvider>(
+    config: &VodPackageConfig,
+    provider: &P,
+) -> Result<KeySet> {
+    let plan = KeyPolicyEngine::plan(
+        &config.content_id,
+        &config.renditions,
+        config.key_mapping_policy,
+        config.encryption_scheme,
+        &config.drm_systems,
+    );
+
+    let key_set = match plan.request {
+        Some(ref request) => {
+            info!(
+                content_id = %config.content_id,
+                scheme = %config.encryption_scheme,
+                "Fetching keys for VOD packaging"
+            );
+            let fetched = provider.fetch_keys(request).await?;
+            KeyPolicyEngine::resolve(&plan, &config.renditions, config.encryption_scheme, fetched)?
+        }
+        None => KeyPolicyEngine::resolve(
+            &plan,
+            &config.renditions,
+            config.encryption_scheme,
+            KeySet::new(),
+        )?,
+    };
+    Ok(key_set)
 }
 
 fn validate_config(config: &VodPackageConfig) -> Result<()> {
@@ -120,34 +164,13 @@ fn validate_config(config: &VodPackageConfig) -> Result<()> {
     Ok(())
 }
 
-async fn execute_single_scheme<P: KeyProvider>(
+async fn execute_single_scheme(
     config: &VodPackageConfig,
-    key_provider: &P,
+    key_set: &KeySet,
     scheme: EncryptionScheme,
     output_dir: &Path,
     control_dir: &Path,
 ) -> Result<VodPackageResult> {
-    let plan = KeyPolicyEngine::plan(
-        &config.content_id,
-        &config.renditions,
-        config.key_mapping_policy,
-        scheme,
-        &config.drm_systems,
-    );
-
-    let key_set = match plan.request {
-        Some(ref request) => {
-            info!(
-                content_id = %config.content_id,
-                scheme = %scheme,
-                "Fetching keys for VOD packaging"
-            );
-            let fetched = key_provider.fetch_keys(request).await?;
-            KeyPolicyEngine::resolve(&plan, &config.renditions, scheme, fetched)?
-        }
-        None => KeyPolicyEngine::resolve(&plan, &config.renditions, scheme, KeySet::new())?,
-    };
-
     let mut drm_config = GpacDrmConfig::new(scheme);
     for (idx, rendition) in config.renditions.iter().enumerate() {
         if rendition.encrypted {
@@ -164,7 +187,7 @@ async fn execute_single_scheme<P: KeyProvider>(
         // "Invalid CENC key info / Missing CENC Key config".
     }
 
-    let drm_xml = GpacDrmXmlGenerator::generate(&key_set, &drm_config)?;
+    let drm_xml = GpacDrmXmlGenerator::generate(key_set, &drm_config)?;
     let drm_xml_path = control_dir.join(format!("drm_{}_{}.xml", scheme, Uuid::new_v4()));
     tokio::fs::write(&drm_xml_path, drm_xml).await?;
 
@@ -209,24 +232,14 @@ async fn execute_single_scheme<P: KeyProvider>(
         });
     }
 
-    inspect_and_validate_output(output_dir, config, scheme, &key_set).await
+    inspect_and_validate_output(output_dir, config, scheme, key_set).await
 }
 
 fn is_input_path(path: &Path, input: &VodInputSource) -> bool {
-    let check_match = |input_path: &Path| -> bool {
-        if path == input_path {
-            return true;
-        }
-        if let (Ok(c1), Ok(c2)) = (path.canonicalize(), input_path.canonicalize()) {
-            return c1 == c2;
-        }
-        false
-    };
-
-    match input {
-        VodInputSource::SingleFile(p) => check_match(p),
-        VodInputSource::TrackFiles(paths) => paths.iter().any(|p| check_match(p)),
-    }
+    input.paths().iter().any(|in_p| {
+        path == in_p
+            || (path.canonicalize().is_ok() && path.canonicalize().ok() == in_p.canonicalize().ok())
+    })
 }
 
 async fn inspect_and_validate_output(
@@ -252,14 +265,18 @@ async fn inspect_and_validate_output(
         )));
     }
 
-    let master_playlist = {
-        let p = output_dir.join("vod.m3u8");
-        if p.exists() {
-            Some(p)
-        } else {
-            None
+    let master_playlist = Some(output_dir.join("vod.m3u8")).filter(|p| p.exists());
+    if let Some(ref master) = master_playlist {
+        let content = tokio::fs::read_to_string(master)
+            .await
+            .map_err(DrmpackError::Io)?;
+        if !content.starts_with("#EXTM3U") {
+            return Err(DrmpackError::Gpac(format!(
+                "Master playlist {} is missing #EXTM3U header",
+                master.display()
+            )));
         }
-    };
+    }
 
     let mut variant_playlists = Vec::new();
     let mut media_files = Vec::new();
@@ -295,6 +312,13 @@ async fn inspect_and_validate_output(
         }
     }
 
+    if media_files.is_empty() {
+        return Err(DrmpackError::Gpac(format!(
+            "GPAC finished but produced no media files in {}",
+            output_dir.display()
+        )));
+    }
+
     variant_playlists.sort();
     media_files.sort();
     init_segments.sort();
@@ -315,33 +339,15 @@ async fn inspect_and_validate_output(
 
 fn merge_dual_results(
     config: &VodPackageConfig,
-    cenc: VodPackageResult,
+    mut cenc: VodPackageResult,
     cbcs: VodPackageResult,
 ) -> VodPackageResult {
-    let mut media_files = cenc.media_files;
-    media_files.extend(cbcs.media_files);
-    let mut init_segments = cenc.init_segments;
-    init_segments.extend(cbcs.init_segments);
-    let mut variant_playlists = cenc.variant_playlists;
-    variant_playlists.extend(cbcs.variant_playlists);
-
-    let mut keys = cenc.metadata.keys;
-    keys.extend(cbcs.metadata.keys);
-
-    let metadata = DrmStreamMetadata {
-        content_id: config.content_id.clone(),
-        scheme: EncryptionScheme::Dual,
-        keys,
-    };
-
-    VodPackageResult {
-        content_id: config.content_id.clone(),
-        output_dir: config.output_dir.clone(),
-        master_playlist: cbcs.master_playlist,
-        mpd_manifest: cenc.mpd_manifest,
-        variant_playlists,
-        media_files,
-        init_segments,
-        metadata,
-    }
+    cenc.output_dir = config.output_dir.clone();
+    cenc.master_playlist = cbcs.master_playlist;
+    cenc.variant_playlists.extend(cbcs.variant_playlists);
+    cenc.media_files.extend(cbcs.media_files);
+    cenc.init_segments.extend(cbcs.init_segments);
+    cenc.metadata.scheme = EncryptionScheme::Dual;
+    cenc.metadata.keys.extend(cbcs.metadata.keys);
+    cenc
 }

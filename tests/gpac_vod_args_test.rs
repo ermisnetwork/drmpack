@@ -36,6 +36,7 @@ fn test_gpac_vod_single_file_args() {
         .find(|a| a.starts_with("/out/vod/vod.mpd:"))
         .unwrap();
     assert!(dasher_arg.contains(":dual:"));
+    assert!(dasher_arg.contains(":segdur=2:"));
     assert!(dasher_arg.contains(":profile=onDemand:"));
     assert!(dasher_arg.contains(":pssh=mv:"));
     assert!(dasher_arg.contains(":template=$RepresentationID$"));
