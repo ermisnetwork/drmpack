@@ -17,9 +17,12 @@ fn test_vod_package_config_builder_defaults() {
     assert_eq!(config.output_dir, output_dir);
     assert_eq!(config.vod_mode, VodMode::SingleFile);
     assert_eq!(config.encryption_scheme, EncryptionScheme::Cbcs);
+    assert!(config.drm_systems.is_empty());
     assert_eq!(config.segment_duration, 2.0);
     assert_eq!(config.renditions.len(), 2);
     assert_eq!(config.key_mapping_policy, KeyMappingPolicy::SharedAll);
+    assert_eq!(config.gpac_bin, None);
+    assert!(!config.preserve_output);
     assert_eq!(config.timeout, Duration::from_secs(120));
 }
 
@@ -35,7 +38,10 @@ fn test_vod_package_config_builder_customizations() {
         .with_encryption_scheme(EncryptionScheme::Dual)
         .with_drm_system(DrmSystem::Widevine)
         .with_drm_system(DrmSystem::FairPlay)
+        .with_drm_system(DrmSystem::Widevine) // duplicate check
         .with_segment_duration(6.0)
+        .with_gpac_bin("/usr/local/bin/gpac")
+        .with_preserve_output(true)
         .with_timeout(Duration::from_secs(300))
         .with_key_mapping_policy(KeyMappingPolicy::PerTierAndTrack);
 
@@ -43,8 +49,23 @@ fn test_vod_package_config_builder_customizations() {
     assert_eq!(config.encryption_scheme, EncryptionScheme::Dual);
     assert_eq!(config.drm_systems.len(), 2);
     assert_eq!(config.segment_duration, 6.0);
+    assert_eq!(config.gpac_bin, Some("/usr/local/bin/gpac".to_string()));
+    assert!(config.preserve_output);
     assert_eq!(config.timeout, Duration::from_secs(300));
     assert_eq!(config.key_mapping_policy, KeyMappingPolicy::PerTierAndTrack);
+}
+
+#[test]
+fn test_vod_serde_roundtrip() {
+    let input = VodInputSource::SingleFile(PathBuf::from("test.mp4"));
+    let json = serde_json::to_string(&input).unwrap();
+    let decoded: VodInputSource = serde_json::from_str(&json).unwrap();
+    assert_eq!(input, decoded);
+
+    let mode = VodMode::SingleFile;
+    let mode_json = serde_json::to_string(&mode).unwrap();
+    let decoded_mode: VodMode = serde_json::from_str(&mode_json).unwrap();
+    assert_eq!(mode, decoded_mode);
 }
 
 #[test]

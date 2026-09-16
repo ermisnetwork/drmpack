@@ -19,7 +19,7 @@ pub enum VodMode {
 }
 
 /// Input media source for VOD batch packaging.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VodInputSource {
     /// A single multiplexed container containing video, audio, and/or subtitle tracks.
     SingleFile(PathBuf),
@@ -28,7 +28,7 @@ pub enum VodInputSource {
 }
 
 /// Configuration for a whole-file VOD batch packaging job.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VodPackageConfig {
     /// Content or asset identifier.
     pub content_id: String,
@@ -91,9 +91,11 @@ impl VodPackageConfig {
         self
     }
 
-    /// Add a target DRM system.
+    /// Add a target DRM system without duplicating existing entries.
     pub fn with_drm_system(mut self, drm: DrmSystem) -> Self {
-        self.drm_systems.push(drm);
+        if !self.drm_systems.contains(&drm) {
+            self.drm_systems.push(drm);
+        }
         self
     }
 
@@ -135,7 +137,7 @@ impl VodPackageConfig {
 }
 
 /// Result of a completed VOD batch packaging job.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VodPackageResult {
     /// Content identifier.
     pub content_id: String,
