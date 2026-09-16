@@ -65,12 +65,12 @@ Focuses on eliminating filesystem staging completely for live streams via in-pro
 - [x] End-to-end runnable examples: `10_http_output_live_stream` and `11_http_output_playback_server` (supporting both Axinom cloud DRM and offline ClearKey with Shaka Player UI)
 
 ### VOD Whole-File Batch Packaging (`drmpack::vod`)
-- [ ] Standalone batch packaging API `package_vod_file(config, key_provider)` decoupled from real-time live streaming sessions
-- [ ] Byte-Range Single-File mode (`profile=onDemand`) generating a single `.mp4` per rendition containing an `sidx` box, `#EXT-X-BYTERANGE` in HLS, and `<SegmentBase>` in DASH (reduces storage file count by 99% per Apple HLS & DASH-IF specifications)
-- [ ] Discrete Multi-Segment mode emitting independent `.m4s` segments for traditional segmented storage topologies
-- [ ] Flexible input support: Single multiplexed MP4 container or separate rendition track files
-- [ ] Static manifest generation with `#EXT-X-ENDLIST`, exact timeline duration, and DRM signaling (Widevine PSSH, PlayReady PSSH, FairPlay `#EXT-X-KEY`)
-- [ ] Integration test suite validating static manifests and single-file byte-range playback
+- [x] Standalone batch packaging API `package_vod_file(config, key_provider)` decoupled from real-time live streaming sessions
+- [x] Byte-Range Single-File mode (`profile=onDemand`) generating a single `.mp4` per rendition containing an `sidx` box, `#EXT-X-BYTERANGE` in HLS, and `<SegmentBase>` in DASH (reduces storage file count by 99% per Apple HLS & DASH-IF specifications)
+- [x] Discrete Multi-Segment mode emitting independent `.m4s` segments for traditional segmented storage topologies
+- [x] Flexible input support: Single multiplexed MP4 container or separate rendition track files
+- [x] Static manifest generation with `#EXT-X-ENDLIST`, exact timeline duration, and DRM signaling (Widevine PSSH, PlayReady PSSH, FairPlay `#EXT-X-KEY`)
+- [x] Integration test suite validating static manifests and single-file byte-range playback
 
 ### Observability & Telemetry Foundation
 - [ ] OpenTelemetry distributed tracing spans across session lifecycle (key acquisition, process spawn, streaming, finalization)
