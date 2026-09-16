@@ -81,4 +81,10 @@ fn test_gpac_vod_track_files_input_args() {
     let args = config.build_args();
     let i_count = args.iter().filter(|a| a.as_str() == "-i").count();
     assert_eq!(i_count, 2, "Must pass -i for each track file");
+    assert!(args
+        .iter()
+        .any(|a| a.contains("/inputs/video.mp4:#Representation=")));
+    assert!(args
+        .iter()
+        .any(|a| a.contains("/inputs/audio.mp4:#Representation=")));
 }
