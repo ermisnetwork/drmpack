@@ -58,8 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ])
             .output()?;
         if !status.status.success() {
-            eprintln!("FFmpeg failed: {}", String::from_utf8_lossy(&status.stderr));
-            return Ok(());
+            return Err(
+                format!("FFmpeg failed: {}", String::from_utf8_lossy(&status.stderr)).into(),
+            );
         }
     }
 
