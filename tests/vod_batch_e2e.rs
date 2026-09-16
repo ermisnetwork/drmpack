@@ -1,3 +1,6 @@
+mod common;
+
+use common::{find_box, is_complete_single_file_mp4, TempDirGuard};
 use drmpack::key::{ContentKey, StaticKeySource};
 use drmpack::types::{DrmSystem, EncryptionScheme, QualityTier, Rendition, TrackType};
 use drmpack::vod::{package_vod_file, VodInputSource, VodMode, VodPackageConfig};
@@ -41,13 +44,76 @@ fn generate_synthetic_mp4(path: &Path) {
         .expect("failed to run ffmpeg");
     assert!(
         status.status.success(),
-        "ffmpeg synthetic generation failed"
+        "ffmpeg synthetic generation failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn generate_synthetic_video_mp4(path: &Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=4:size=640x360:rate=30",
+            "-c:v",
+            "libx264",
+            "-g",
+            "60",
+            "-keyint_min",
+            "60",
+            "-sc_threshold",
+            "0",
+            "-an",
+            "-f",
+            "mp4",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run ffmpeg");
+    assert!(
+        status.status.success(),
+        "ffmpeg synthetic video generation failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn generate_synthetic_audio_mp4(path: &Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=4:sample_rate=48000",
+            "-vn",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-f",
+            "mp4",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run ffmpeg");
+    assert!(
+        status.status.success(),
+        "ffmpeg synthetic audio generation failed: {}",
+        String::from_utf8_lossy(&status.stderr)
     );
 }
 
 #[tokio::test]
 async fn test_package_vod_single_file_cbcs() {
-    let test_dir = std::env::temp_dir().join(format!("drmpack_vod_test_{}", Uuid::new_v4()));
+    let test_dir = TempDirGuard::new("drmpack_vod_test");
     let input_file = test_dir.join("input.mp4");
     generate_synthetic_mp4(&input_file);
 
@@ -90,12 +156,35 @@ async fn test_package_vod_single_file_cbcs() {
     assert!(mpd_content.contains(r#"type="static""#));
     assert!(mpd_content.contains("<SegmentBase"));
 
-    let _ = std::fs::remove_dir_all(&test_dir);
+    // Verify generated media files contain ftyp, moov, and sidx boxes
+    for media_file in &result.media_files {
+        let data = std::fs::read(media_file).expect("failed to read media file");
+        assert!(
+            is_complete_single_file_mp4(&data),
+            "media file {:?} must be complete single-file ISOBMFF container",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"ftyp").is_some(),
+            "media file {:?} missing ftyp box",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"moov").is_some(),
+            "media file {:?} missing moov box",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"sidx").is_some(),
+            "media file {:?} missing sidx box",
+            media_file
+        );
+    }
 }
 
 #[tokio::test]
 async fn test_package_vod_segmented_cenc() {
-    let test_dir = std::env::temp_dir().join(format!("drmpack_vod_test_{}", Uuid::new_v4()));
+    let test_dir = TempDirGuard::new("drmpack_vod_test");
     let input_file = test_dir.join("input.mp4");
     generate_synthetic_mp4(&input_file);
 
@@ -135,13 +224,11 @@ async fn test_package_vod_segmented_cenc() {
     let mpd_content = std::fs::read_to_string(&result.mpd_manifest).unwrap();
     assert!(mpd_content.contains(r#"type="static""#));
     assert!(mpd_content.contains("<SegmentTemplate") || mpd_content.contains("<SegmentList"));
-
-    let _ = std::fs::remove_dir_all(&test_dir);
 }
 
 #[tokio::test]
 async fn test_package_vod_dual_scheme() {
-    let test_dir = std::env::temp_dir().join(format!("drmpack_vod_test_{}", Uuid::new_v4()));
+    let test_dir = TempDirGuard::new("drmpack_vod_test");
     let input_file = test_dir.join("input.mp4");
     generate_synthetic_mp4(&input_file);
 
@@ -175,13 +262,11 @@ async fn test_package_vod_dual_scheme() {
     assert!(output_dir.join("cbcs").exists());
     assert!(output_dir.join("cenc/vod.mpd").exists());
     assert!(output_dir.join("cbcs/vod.mpd").exists());
-
-    let _ = std::fs::remove_dir_all(&test_dir);
 }
 
 #[tokio::test]
 async fn test_package_vod_invalid_config_empty_renditions() {
-    let test_dir = std::env::temp_dir().join(format!("drmpack_vod_test_{}", Uuid::new_v4()));
+    let test_dir = TempDirGuard::new("drmpack_vod_test");
     let input_file = test_dir.join("input.mp4");
     generate_synthetic_mp4(&input_file);
 
@@ -204,14 +289,13 @@ async fn test_package_vod_invalid_config_empty_renditions() {
         }
         other => panic!("Unexpected error: {:?}", other),
     }
-
-    let _ = std::fs::remove_dir_all(&test_dir);
 }
 
 #[tokio::test]
 async fn test_package_vod_missing_input_file() {
-    let non_existent_file = std::path::PathBuf::from("/tmp/non_existent_drmpack_input_file.mp4");
-    let output_dir = std::env::temp_dir().join(format!("drmpack_vod_missing_{}", Uuid::new_v4()));
+    let test_dir = TempDirGuard::new("drmpack_vod_missing");
+    let non_existent_file = test_dir.join("non_existent_drmpack_input_file.mp4");
+    let output_dir = test_dir.join("out_vod_missing");
     let key_source = Arc::new(StaticKeySource::new());
 
     let config = VodPackageConfig::new(
@@ -230,5 +314,79 @@ async fn test_package_vod_missing_input_file() {
             assert!(msg.contains("does not exist"));
         }
         other => panic!("Unexpected error: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_package_vod_track_files_input() {
+    let test_dir = TempDirGuard::new("drmpack_vod_track_files");
+    let video_path = test_dir.join("video.mp4");
+    let audio_path = test_dir.join("audio.mp4");
+    generate_synthetic_video_mp4(&video_path);
+    generate_synthetic_audio_mp4(&audio_path);
+
+    let output_dir = test_dir.join("out_vod_tracks");
+    let key_id = Uuid::new_v4();
+    let content_key = ContentKey::new(key_id, [0x44; 16], QualityTier::hd(), TrackType::Video);
+    let key_source = Arc::new(StaticKeySource::new().with_key(content_key));
+
+    let config = VodPackageConfig::new(
+        "test_track_files_content",
+        VodInputSource::TrackFiles(vec![video_path, audio_path]),
+        &output_dir,
+    )
+    .with_vod_mode(VodMode::SingleFile)
+    .with_encryption_scheme(EncryptionScheme::Cbcs)
+    .with_drm_system(DrmSystem::FairPlay)
+    .with_rendition(Rendition::video_hd().with_container_track_id(1))
+    .with_rendition(Rendition::audio().with_container_track_id(2).clear());
+
+    let result = package_vod_file(&config, &key_source)
+        .await
+        .expect("package_vod_file with TrackFiles failed");
+
+    assert!(result.mpd_manifest.exists());
+    assert!(result.master_playlist.as_ref().unwrap().exists());
+    assert_eq!(result.media_files.len(), 2);
+    assert_eq!(result.variant_playlists.len(), 2);
+
+    // Verify HLS master and variant playlists
+    let master_content = std::fs::read_to_string(result.master_playlist.as_ref().unwrap()).unwrap();
+    assert!(master_content.contains("#EXTM3U"));
+
+    for variant in &result.variant_playlists {
+        let variant_content = std::fs::read_to_string(variant).unwrap();
+        assert!(variant_content.contains("#EXT-X-ENDLIST"));
+        assert!(variant_content.contains("#EXT-X-BYTERANGE:"));
+    }
+
+    // Verify MPD manifest
+    let mpd_content = std::fs::read_to_string(&result.mpd_manifest).unwrap();
+    assert!(mpd_content.contains(r#"type="static""#));
+    assert!(mpd_content.contains("<SegmentBase"));
+
+    // Verify media files contain ftyp, moov, and sidx
+    for media_file in &result.media_files {
+        let data = std::fs::read(media_file).expect("failed to read media file");
+        assert!(
+            is_complete_single_file_mp4(&data),
+            "media file {:?} must be complete single-file ISOBMFF container",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"ftyp").is_some(),
+            "media file {:?} missing ftyp box",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"moov").is_some(),
+            "media file {:?} missing moov box",
+            media_file
+        );
+        assert!(
+            find_box(&data, b"sidx").is_some(),
+            "media file {:?} missing sidx box",
+            media_file
+        );
     }
 }
