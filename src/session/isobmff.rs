@@ -72,7 +72,7 @@ pub(crate) fn is_complete_isobmff_init_segment(data: &[u8]) -> bool {
     has_isobmff_boxes(data, b"ftyp", b"moov")
 }
 
-/// Verify if `data` contains an ISOBMFF box with matching 4-byte ASCII box identifier.
+/// Verify if `data` contains a top-level ISOBMFF box with matching 4-byte ASCII box identifier.
 #[allow(dead_code)]
 pub(crate) fn has_isobmff_box(data: &[u8], target_box: &[u8; 4]) -> bool {
     let mut offset = 0;
@@ -274,6 +274,27 @@ mod tests {
         missing_sidx.extend_from_slice(&moof);
         missing_sidx.extend_from_slice(&mdat);
         assert!(!is_complete_isobmff_single_file(&missing_sidx));
+
+        // Missing ftyp should fail
+        let mut missing_ftyp = Vec::new();
+        missing_ftyp.extend_from_slice(&moov);
+        missing_ftyp.extend_from_slice(&sidx);
+        missing_ftyp.extend_from_slice(&moof);
+        missing_ftyp.extend_from_slice(&mdat);
+        assert!(!is_complete_isobmff_single_file(&missing_ftyp));
+
+        // Missing moov should fail
+        let mut missing_moov = Vec::new();
+        missing_moov.extend_from_slice(&ftyp);
+        missing_moov.extend_from_slice(&sidx);
+        missing_moov.extend_from_slice(&moof);
+        missing_moov.extend_from_slice(&mdat);
+        assert!(!is_complete_isobmff_single_file(&missing_moov));
+
+        // Trailing garbage bytes should fail
+        let mut with_trailing_garbage = valid_single_file.clone();
+        with_trailing_garbage.push(0xAA);
+        assert!(!is_complete_isobmff_single_file(&with_trailing_garbage));
 
         // Empty or truncated data should fail
         assert!(!is_complete_isobmff_single_file(&[]));
