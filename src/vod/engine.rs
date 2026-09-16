@@ -34,7 +34,7 @@ pub async fn package_vod_file<P: KeyProvider>(
             tokio::fs::create_dir_all(&cenc_dir).await?;
             tokio::fs::create_dir_all(&cbcs_dir).await?;
 
-            let (res_cenc, res_cbcs) = tokio::try_join!(
+            tokio::try_join!(
                 execute_single_scheme(
                     config,
                     key_provider,
@@ -49,9 +49,8 @@ pub async fn package_vod_file<P: KeyProvider>(
                     &cbcs_dir,
                     &control_dir
                 )
-            )?;
-
-            Ok(merge_dual_results(config, res_cenc, res_cbcs))
+            )
+            .map(|(res_cenc, res_cbcs)| merge_dual_results(config, res_cenc, res_cbcs))
         }
         scheme => {
             execute_single_scheme(
@@ -65,13 +64,27 @@ pub async fn package_vod_file<P: KeyProvider>(
         }
     };
 
-    if !config.preserve_output {
+    let should_cleanup = !config.preserve_output || execution_res.is_ok();
+    if should_cleanup {
         let _ = tokio::fs::remove_dir_all(&control_dir).await;
     }
     execution_res
 }
 
 fn validate_config(config: &VodPackageConfig) -> Result<()> {
+    if config.content_id.trim().is_empty() {
+        return Err(DrmpackError::InvalidConfig(
+            "VOD packaging content_id cannot be empty".into(),
+        ));
+    }
+
+    if config.segment_duration <= 0.0 || config.segment_duration.is_nan() {
+        return Err(DrmpackError::InvalidConfig(format!(
+            "VOD packaging segment_duration must be positive: {}",
+            config.segment_duration
+        )));
+    }
+
     match &config.input {
         VodInputSource::SingleFile(path) => {
             if !path.exists() {
@@ -145,6 +158,10 @@ async fn execute_single_scheme<P: KeyProvider>(
                 rendition.quality_tier.clone(),
             );
         }
+        // Note: Unencrypted tracks are intentionally omitted from GpacDrmConfig.
+        // In GPAC cecrypt, unencrypted PIDs without a CrypTrack pass through in the clear.
+        // Emitting <CrypTrack IsEncrypted="0"/> causes MP4Mux to abort with
+        // "Invalid CENC key info / Missing CENC Key config".
     }
 
     let drm_xml = GpacDrmXmlGenerator::generate(&key_set, &drm_config)?;
