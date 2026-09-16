@@ -5,8 +5,11 @@
 
 /// Subprocess execution, pipe management, and supervisor tasks.
 pub mod process;
+/// Whole-file VOD GPAC subprocess configuration and command builder.
+pub mod vod;
 /// GPAC cecrypt DRM XML synthesis and track configuration.
 pub mod xml;
 
 pub use process::{GpacProcess, GpacProcessConfig};
+pub use vod::GpacVodProcessConfig;
 pub use xml::{GpacDrmConfig, GpacDrmXmlGenerator};
