@@ -164,19 +164,18 @@ async fn execute_single_scheme<P: KeyProvider>(
     let args = gpac_config.build_args();
     info!(scheme = %scheme, args = ?args, "Executing GPAC VOD batch packaging");
 
-    let mut child = Command::new(&gpac_config.gpac_bin)
-        .args(&args)
-        .stdout(std::process::Stdio::piped())
+    let mut cmd = Command::new(&gpac_config.gpac_bin);
+    cmd.args(&args)
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(DrmpackError::Io)?;
+        .kill_on_drop(true);
 
-    let status_res = tokio::time::timeout(config.timeout, child.wait()).await;
-    let status = match status_res {
-        Ok(Ok(s)) => s,
+    let child = cmd.spawn().map_err(DrmpackError::Io)?;
+
+    let output = match tokio::time::timeout(config.timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
         Ok(Err(e)) => return Err(DrmpackError::Io(e)),
         Err(_) => {
-            let _ = child.kill().await;
             return Err(DrmpackError::ProcessCrashed {
                 exit_code: None,
                 stderr: format!("GPAC VOD packaging timed out after {:?}", config.timeout),
@@ -184,23 +183,33 @@ async fn execute_single_scheme<P: KeyProvider>(
         }
     };
 
-    if !status.success() {
-        let stderr = if let Some(mut err) = child.stderr.take() {
-            use tokio::io::AsyncReadExt;
-            let mut err_str = String::new();
-            let _ = err.read_to_string(&mut err_str).await;
-            err_str
-        } else {
-            String::new()
-        };
-        error!(status = ?status.code(), stderr = %stderr, "GPAC VOD packaging failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        error!(status = ?output.status.code(), stderr = %stderr, "GPAC VOD packaging failed");
         return Err(DrmpackError::ProcessCrashed {
-            exit_code: status.code(),
+            exit_code: output.status.code(),
             stderr,
         });
     }
 
     inspect_and_validate_output(output_dir, config, scheme, &key_set).await
+}
+
+fn is_input_path(path: &Path, input: &VodInputSource) -> bool {
+    let check_match = |input_path: &Path| -> bool {
+        if path == input_path {
+            return true;
+        }
+        if let (Ok(c1), Ok(c2)) = (path.canonicalize(), input_path.canonicalize()) {
+            return c1 == c2;
+        }
+        false
+    };
+
+    match input {
+        VodInputSource::SingleFile(p) => check_match(p),
+        VodInputSource::TrackFiles(paths) => paths.iter().any(|p| check_match(p)),
+    }
 }
 
 async fn inspect_and_validate_output(
@@ -246,6 +255,9 @@ async fn inspect_and_validate_output(
     while let Some(entry) = entries.next_entry().await.map_err(DrmpackError::Io)? {
         let path = entry.path();
         if path.is_file() {
+            if is_input_path(&path, &config.input) {
+                continue;
+            }
             let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if fname.ends_with(".m3u8") && fname != "vod.m3u8" {
                 let content = tokio::fs::read_to_string(&path)
@@ -260,7 +272,7 @@ async fn inspect_and_validate_output(
                 variant_playlists.push(path);
             } else if fname.ends_with("_init.mp4") {
                 init_segments.push(path);
-            } else if (fname.ends_with(".mp4") && fname != "input.mp4") || fname.ends_with(".m4s") {
+            } else if fname.ends_with(".mp4") || fname.ends_with(".m4s") {
                 media_files.push(path);
             }
         }

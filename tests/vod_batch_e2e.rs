@@ -123,6 +123,15 @@ async fn test_package_vod_segmented_cenc() {
     assert!(!result.media_files.is_empty());
     assert!(!result.init_segments.is_empty());
 
+    let has_m4s = result
+        .media_files
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("m4s"));
+    assert!(
+        has_m4s,
+        "Segmented mode must produce .m4s media segments in media_files"
+    );
+
     let mpd_content = std::fs::read_to_string(&result.mpd_manifest).unwrap();
     assert!(mpd_content.contains(r#"type="static""#));
     assert!(mpd_content.contains("<SegmentTemplate") || mpd_content.contains("<SegmentList"));
@@ -197,4 +206,29 @@ async fn test_package_vod_invalid_config_empty_renditions() {
     }
 
     let _ = std::fs::remove_dir_all(&test_dir);
+}
+
+#[tokio::test]
+async fn test_package_vod_missing_input_file() {
+    let non_existent_file = std::path::PathBuf::from("/tmp/non_existent_drmpack_input_file.mp4");
+    let output_dir = std::env::temp_dir().join(format!("drmpack_vod_missing_{}", Uuid::new_v4()));
+    let key_source = Arc::new(StaticKeySource::new());
+
+    let config = VodPackageConfig::new(
+        "test_missing_input",
+        VodInputSource::SingleFile(non_existent_file),
+        &output_dir,
+    )
+    .with_rendition(Rendition::video_hd().with_container_track_id(1));
+
+    let err = package_vod_file(&config, &key_source)
+        .await
+        .expect_err("should fail with non-existent input file");
+
+    match err {
+        drmpack::error::DrmpackError::InvalidConfig(msg) => {
+            assert!(msg.contains("does not exist"));
+        }
+        other => panic!("Unexpected error: {:?}", other),
+    }
 }
