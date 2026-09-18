@@ -13,6 +13,7 @@ jobs:
     env:
       DRMPACK_REQUIRE_MEDIA_TOOLS: "1"
       GPAC_VERSION: "26.07"
+      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

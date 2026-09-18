@@ -182,6 +182,42 @@ async fn test_package_vod_single_file_cbcs() {
 }
 
 #[tokio::test]
+async fn test_package_vod_single_file_cenc() {
+    let test_dir = TempDirGuard::new("drmpack_vod_test");
+    let input_file = test_dir.join("input.mp4");
+    generate_synthetic_mp4(&input_file);
+
+    let output_dir = test_dir.join("out_vod_single_cenc");
+    let key_id = Uuid::new_v4();
+    let content_key = ContentKey::new(key_id, [0x44; 16], QualityTier::hd(), TrackType::Video);
+    let key_source = Arc::new(StaticKeySource::new().with_key(content_key));
+
+    let config = VodPackageConfig::new(
+        "test_single_cenc_content",
+        VodInputSource::SingleFile(input_file),
+        &output_dir,
+    )
+    .with_vod_mode(VodMode::SingleFile)
+    .with_encryption_scheme(EncryptionScheme::Cenc)
+    .with_drm_system(DrmSystem::Widevine)
+    .with_rendition(Rendition::video_hd().with_container_track_id(1))
+    .with_rendition(Rendition::audio().with_container_track_id(2).clear());
+
+    let result = package_vod_file(&config, &key_source)
+        .await
+        .expect("package_vod_file single_file cenc failed");
+
+    assert!(result.mpd_manifest.exists());
+    assert!(!result.media_files.is_empty());
+
+    let mpd_content = std::fs::read_to_string(&result.mpd_manifest).unwrap();
+    assert!(mpd_content.contains(r#"type="static""#));
+    assert!(mpd_content.contains("<SegmentBase"));
+
+    assert_isobmff_single_files(&result.media_files);
+}
+
+#[tokio::test]
 async fn test_package_vod_segmented_cenc() {
     let test_dir = TempDirGuard::new("drmpack_vod_test");
     let input_file = test_dir.join("input.mp4");
