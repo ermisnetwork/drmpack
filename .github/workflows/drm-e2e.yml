@@ -21,7 +21,8 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y ca-certificates curl
           sudo install -m 0755 -d /etc/apt/keyrings
-          sudo curl -fsSL https://dist.gpac.io/gpac/linux/gpg.asc -o /etc/apt/keyrings/gpac.asc
+          sudo curl -fsSL --retry 3 --connect-timeout 10 https://dist.gpac.io/gpac/linux/gpg.asc -o /etc/apt/keyrings/gpac.asc || \
+          sudo curl -fsSL https://web.archive.org/web/2024/https://dist.gpac.io/gpac/linux/gpg.asc -o /etc/apt/keyrings/gpac.asc
           sudo chmod a+r /etc/apt/keyrings/gpac.asc
 
           sudo tee /etc/apt/sources.list.d/gpac.sources <<EOF
