@@ -223,16 +223,32 @@ async fn execute_single_scheme(
         }
     };
 
-    if !output.status.success() {
+    let (code, success) = extract_exit_status(&output.status);
+    if !success {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        error!(status = ?output.status.code(), stderr = %stderr, "GPAC VOD packaging failed");
+        error!(status = ?code, stderr = %stderr, "GPAC VOD packaging failed");
         return Err(DrmpackError::ProcessCrashed {
-            exit_code: output.status.code(),
+            exit_code: code,
             stderr,
         });
     }
 
     inspect_and_validate_output(output_dir, config, scheme, key_set).await
+}
+
+pub(crate) fn extract_exit_status(status: &std::process::ExitStatus) -> (Option<i32>, bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        let code = status
+            .code()
+            .or_else(|| status.signal().map(|sig| 128 + sig));
+        (code, status.success())
+    }
+    #[cfg(not(unix))]
+    {
+        (status.code(), status.success())
+    }
 }
 
 fn is_input_path(path: &Path, input: &VodInputSource) -> bool {
@@ -350,4 +366,32 @@ fn merge_dual_results(
     cenc.metadata.scheme = EncryptionScheme::Dual;
     cenc.metadata.keys.extend(cbcs.metadata.keys);
     cenc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_extract_exit_code_from_signal() {
+        use std::os::unix::process::ExitStatusExt;
+        // Signal 11 (SIGSEGV)
+        let status = std::process::ExitStatus::from_raw(11);
+        let (code, success) = extract_exit_status(&status);
+        assert!(!success);
+        assert_eq!(code, Some(139)); // 128 + 11
+
+        // Signal 9 (SIGKILL)
+        let status_kill = std::process::ExitStatus::from_raw(9);
+        let (code_kill, success_kill) = extract_exit_status(&status_kill);
+        assert!(!success_kill);
+        assert_eq!(code_kill, Some(137)); // 128 + 9
+
+        // Normal success exit code 0
+        let status_ok = std::process::ExitStatus::from_raw(0);
+        let (code_ok, success_ok) = extract_exit_status(&status_ok);
+        assert!(success_ok);
+        assert_eq!(code_ok, Some(0));
+    }
 }
