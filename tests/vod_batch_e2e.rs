@@ -103,9 +103,19 @@ fn generate_synthetic_audio_mp4(path: &Path) {
 
     // Explicitly set ISO-BMFF track ID to 2 via MP4Box to guarantee track separation
     // from video track ID 1 across platforms and ffmpeg versions.
-    let _ = Command::new("MP4Box")
-        .args(["-set-track-id", "1:2", path.to_str().unwrap()])
+    let mp4box_status = Command::new("MP4Box")
+        .args(["-p=0", "-set-track-id", "1:2", path.to_str().unwrap()])
         .output();
+    if let Ok(ref out) = mp4box_status {
+        if !out.status.success() {
+            eprintln!(
+                "MP4Box -set-track-id failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    } else if let Err(ref e) = mp4box_status {
+        eprintln!("Failed to spawn MP4Box: {}", e);
+    }
 }
 
 fn assert_isobmff_single_files(files: &[std::path::PathBuf]) {

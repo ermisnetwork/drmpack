@@ -234,13 +234,16 @@ async fn execute_single_scheme(
     };
 
     let (code, success) = extract_exit_status(&output.status);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !success {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         error!(status = ?code, stderr = %stderr, "GPAC VOD packaging failed");
         return Err(DrmpackError::ProcessCrashed {
             exit_code: code,
             stderr,
         });
+    }
+    if !stderr.is_empty() {
+        eprintln!("GPAC VOD STDERR:\n{}", stderr);
     }
 
     inspect_and_validate_output(output_dir, config, scheme, key_set).await
