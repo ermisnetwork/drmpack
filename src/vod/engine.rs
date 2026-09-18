@@ -54,23 +54,28 @@ pub async fn package_vod_file<P: KeyProvider>(
             tokio::fs::create_dir_all(&cenc_dir).await?;
             tokio::fs::create_dir_all(&cbcs_dir).await?;
 
-            tokio::try_join!(
-                execute_single_scheme(
-                    config,
-                    &key_set,
-                    EncryptionScheme::Cenc,
-                    &cenc_dir,
-                    &control_dir
-                ),
-                execute_single_scheme(
-                    config,
-                    &key_set,
-                    EncryptionScheme::Cbcs,
-                    &cbcs_dir,
-                    &control_dir
-                )
+            // Execute CENC followed by CBCS sequentially.
+            // On resource-constrained environments (e.g. 2-vCPU CI runners),
+            // running two concurrent GPAC muxers causes CPU starvation and filter graph race conditions.
+            let res_cenc = execute_single_scheme(
+                config,
+                &key_set,
+                EncryptionScheme::Cenc,
+                &cenc_dir,
+                &control_dir,
             )
-            .map(|(res_cenc, res_cbcs)| merge_dual_results(config, res_cenc, res_cbcs))
+            .await?;
+
+            let res_cbcs = execute_single_scheme(
+                config,
+                &key_set,
+                EncryptionScheme::Cbcs,
+                &cbcs_dir,
+                &control_dir,
+            )
+            .await?;
+
+            Ok(merge_dual_results(config, res_cenc, res_cbcs))
         }
         scheme => {
             execute_single_scheme(config, &key_set, scheme, &config.output_dir, &control_dir).await
@@ -195,7 +200,8 @@ async fn execute_single_scheme(
         GpacVodProcessConfig::new(config.input.clone(), &drm_xml_path, output_dir)
             .with_vod_mode(config.vod_mode)
             .with_segment_duration(config.segment_duration)
-            .with_manifest_name("vod");
+            .with_manifest_name("vod")
+            .with_temp_dir(control_dir);
 
     if let Some(ref bin) = config.gpac_bin {
         gpac_config = gpac_config.with_gpac_bin(bin);
