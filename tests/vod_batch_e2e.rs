@@ -51,6 +51,7 @@ fn generate_synthetic_media(path: &Path, video: bool, audio: bool) {
     } else {
         args.push("-an");
     }
+    args.extend(["-movflags", "+faststart"]);
     let path_str = path.to_str().unwrap();
     args.extend(["-f", "mp4", path_str]);
 
@@ -74,48 +75,7 @@ fn generate_synthetic_video_mp4(path: &Path) {
 }
 
 fn generate_synthetic_audio_mp4(path: &Path) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    let status = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=1000:duration=4:sample_rate=48000",
-            "-vn",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-f",
-            "mp4",
-            path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("failed to run ffmpeg");
-    assert!(
-        status.status.success(),
-        "ffmpeg synthetic audio generation failed: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-
-    // Explicitly set ISO-BMFF track ID to 2 via MP4Box to guarantee track separation
-    // from video track ID 1 across platforms and ffmpeg versions.
-    let mp4box_status = Command::new("MP4Box")
-        .args(["-p=0", "-set-track-id", "1:2", path.to_str().unwrap()])
-        .output();
-    if let Ok(ref out) = mp4box_status {
-        if !out.status.success() {
-            eprintln!(
-                "MP4Box -set-track-id failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-    } else if let Err(ref e) = mp4box_status {
-        eprintln!("Failed to spawn MP4Box: {}", e);
-    }
+    generate_synthetic_media(path, false, true);
 }
 
 fn assert_isobmff_single_files(files: &[std::path::PathBuf]) {

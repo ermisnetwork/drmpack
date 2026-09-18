@@ -200,12 +200,20 @@ async fn execute_single_scheme(
     let drm_xml_path = control_dir.join(format!("drm_{}_{}.xml", scheme, Uuid::new_v4()));
     tokio::fs::write(&drm_xml_path, drm_xml).await?;
 
+    let track_ids: Vec<u32> = config
+        .renditions
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| r.effective_container_track_id(idx))
+        .collect();
+
     let mut gpac_config =
         GpacVodProcessConfig::new(config.input.clone(), &drm_xml_path, output_dir)
             .with_vod_mode(config.vod_mode)
             .with_segment_duration(config.segment_duration)
             .with_manifest_name("vod")
-            .with_temp_dir(control_dir);
+            .with_temp_dir(control_dir)
+            .with_track_ids(track_ids);
 
     if let Some(ref bin) = config.gpac_bin {
         gpac_config = gpac_config.with_gpac_bin(bin);

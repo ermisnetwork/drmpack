@@ -24,6 +24,8 @@ pub struct GpacVodProcessConfig {
     pub threads: i32,
     /// Optional isolated temporary directory for GPAC.
     pub temp_dir: Option<PathBuf>,
+    /// Container track IDs mapped to input track files.
+    pub track_ids: Vec<u32>,
 }
 
 const VOD_REPRESENTATION_MAPPING: &str = concat!(
@@ -60,7 +62,14 @@ impl GpacVodProcessConfig {
             gpac_bin: "gpac".into(),
             threads: 1,
             temp_dir: None,
+            track_ids: Vec::new(),
         }
+    }
+
+    /// Set container track IDs mapped to input track files.
+    pub fn with_track_ids(mut self, track_ids: Vec<u32>) -> Self {
+        self.track_ids = track_ids;
+        self
     }
 
     /// Set VOD mode.
@@ -118,9 +127,23 @@ impl GpacVodProcessConfig {
         args.push(format!("-threads={}", self.threads));
 
         // 4. Add input files with representation mapping
-        for path in self.input_source.paths() {
-            args.push("-i".into());
-            args.push(format!("{}{}", path.display(), VOD_REPRESENTATION_MAPPING));
+        match &self.input_source {
+            VodInputSource::SingleFile(path) => {
+                args.push("-i".into());
+                args.push(format!("{}{}", path.display(), VOD_REPRESENTATION_MAPPING));
+            }
+            VodInputSource::TrackFiles(paths) => {
+                for (idx, path) in paths.iter().enumerate() {
+                    let track_id = self.track_ids.get(idx).copied().unwrap_or((idx + 1) as u32);
+                    args.push("-i".into());
+                    args.push(format!(
+                        "{}{}:#ID={}",
+                        path.display(),
+                        VOD_REPRESENTATION_MAPPING,
+                        track_id
+                    ));
+                }
+            }
         }
 
         // 3. Cecrypt filter
