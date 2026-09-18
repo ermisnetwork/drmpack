@@ -62,3 +62,40 @@ pub fn find_box<'a>(data: &'a [u8], box_type: &[u8; 4]) -> Option<&'a [u8]> {
     }
     None
 }
+
+/// RAII guard ensuring temporary test directories in `/tmp` are cleaned up even on assertion failure or panic.
+#[allow(dead_code)]
+pub struct TempDirGuard {
+    path: std::path::PathBuf,
+}
+
+#[allow(dead_code)]
+impl TempDirGuard {
+    pub fn new(prefix: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("{}_{}", prefix, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("failed to create temp test dir");
+        Self { path }
+    }
+}
+
+impl std::ops::Deref for TempDirGuard {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for TempDirGuard {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}

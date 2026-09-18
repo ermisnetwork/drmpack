@@ -65,6 +65,8 @@ pub mod key;
 pub mod session;
 /// Core domain types, renditions, quality tiers, and encryption schemes.
 pub mod types;
+/// Standalone whole-file VOD batch packaging engine.
+pub mod vod;
 
 #[cfg(feature = "cpix")]
 /// DASH-IF CPIX 2.3 XML protocol support and client.

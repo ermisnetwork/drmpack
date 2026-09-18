@@ -58,6 +58,12 @@ impl KeyID {
     }
 }
 
+impl From<Uuid> for KeyID {
+    fn from(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
 /// AES-128 Content Key with associated KeyID and metadata.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentKey {
@@ -91,13 +97,13 @@ impl fmt::Debug for ContentKey {
 impl ContentKey {
     /// Construct a new ContentKey without explicit IV or scheme.
     pub fn new(
-        kid: KeyID,
+        kid: impl Into<KeyID>,
         key: [u8; 16],
         quality_tier: QualityTier,
         track_type: TrackType,
     ) -> Self {
         Self {
-            kid,
+            kid: kid.into(),
             key,
             quality_tier,
             track_type,
@@ -108,14 +114,14 @@ impl ContentKey {
 
     /// Construct a new ContentKey bound to a specific encryption scheme.
     pub fn new_with_scheme(
-        kid: KeyID,
+        kid: impl Into<KeyID>,
         key: [u8; 16],
         quality_tier: QualityTier,
         track_type: TrackType,
         scheme: EncryptionScheme,
     ) -> Self {
         Self {
-            kid,
+            kid: kid.into(),
             key,
             quality_tier,
             track_type,
@@ -402,6 +408,24 @@ pub trait KeyProvider: Send + Sync {
         &self,
         request: &KeyRequest,
     ) -> impl std::future::Future<Output = Result<KeySet>> + Send;
+}
+
+impl<P: KeyProvider + ?Sized> KeyProvider for std::sync::Arc<P> {
+    fn fetch_keys(
+        &self,
+        request: &KeyRequest,
+    ) -> impl std::future::Future<Output = Result<KeySet>> + Send {
+        (**self).fetch_keys(request)
+    }
+}
+
+impl<P: KeyProvider + ?Sized> KeyProvider for &P {
+    fn fetch_keys(
+        &self,
+        request: &KeyRequest,
+    ) -> impl std::future::Future<Output = Result<KeySet>> + Send {
+        (**self).fetch_keys(request)
+    }
 }
 
 #[cfg(test)]

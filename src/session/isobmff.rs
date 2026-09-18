@@ -72,6 +72,26 @@ pub(crate) fn is_complete_isobmff_init_segment(data: &[u8]) -> bool {
     has_isobmff_boxes(data, b"ftyp", b"moov")
 }
 
+/// Verify if `data` is a valid self-initializing Single-File media container (e.g. DASH onDemand / HLS byte-range)
+/// containing `ftyp`, `moov`, and `sidx` (Segment Index) boxes.
+pub fn is_complete_isobmff_single_file(data: &[u8]) -> bool {
+    let mut offset = 0;
+    let (mut has_ftyp, mut has_moov, mut has_sidx) = (false, false, false);
+
+    while let Some((box_type, box_size)) = next_isobmff_box(data, offset) {
+        if box_type == b"ftyp" {
+            has_ftyp = true;
+        } else if box_type == b"moov" {
+            has_moov = true;
+        } else if box_type == b"sidx" {
+            has_sidx = true;
+        }
+        offset += box_size;
+    }
+
+    has_ftyp && has_moov && has_sidx && !data.is_empty() && offset == data.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +234,58 @@ mod tests {
         truncated_init.extend_from_slice(&ftyp);
         truncated_init.extend_from_slice(&moov[..moov.len() - 3]);
         assert!(!is_complete_isobmff_init_segment(&truncated_init));
+    }
+
+    #[test]
+    fn test_isobmff_single_file_media_verification() {
+        let ftyp = make_box(b"ftyp", b"isom");
+        let moov = make_box(b"moov", b"moov_payload");
+        let sidx = make_box(b"sidx", b"sidx_payload");
+        let moof = make_box(b"moof", b"moof_payload");
+        let mdat = make_box(b"mdat", b"mdat_payload");
+
+        let mut valid_single_file = Vec::new();
+        valid_single_file.extend_from_slice(&ftyp);
+        valid_single_file.extend_from_slice(&moov);
+        valid_single_file.extend_from_slice(&sidx);
+        valid_single_file.extend_from_slice(&moof);
+        valid_single_file.extend_from_slice(&mdat);
+
+        assert!(is_complete_isobmff_single_file(&valid_single_file));
+
+        // Missing sidx should fail
+        let mut missing_sidx = Vec::new();
+        missing_sidx.extend_from_slice(&ftyp);
+        missing_sidx.extend_from_slice(&moov);
+        missing_sidx.extend_from_slice(&moof);
+        missing_sidx.extend_from_slice(&mdat);
+        assert!(!is_complete_isobmff_single_file(&missing_sidx));
+
+        // Missing ftyp should fail
+        let mut missing_ftyp = Vec::new();
+        missing_ftyp.extend_from_slice(&moov);
+        missing_ftyp.extend_from_slice(&sidx);
+        missing_ftyp.extend_from_slice(&moof);
+        missing_ftyp.extend_from_slice(&mdat);
+        assert!(!is_complete_isobmff_single_file(&missing_ftyp));
+
+        // Missing moov should fail
+        let mut missing_moov = Vec::new();
+        missing_moov.extend_from_slice(&ftyp);
+        missing_moov.extend_from_slice(&sidx);
+        missing_moov.extend_from_slice(&moof);
+        missing_moov.extend_from_slice(&mdat);
+        assert!(!is_complete_isobmff_single_file(&missing_moov));
+
+        // Trailing garbage bytes should fail
+        let mut with_trailing_garbage = valid_single_file.clone();
+        with_trailing_garbage.push(0xAA);
+        assert!(!is_complete_isobmff_single_file(&with_trailing_garbage));
+
+        // Empty or truncated data should fail
+        assert!(!is_complete_isobmff_single_file(&[]));
+        assert!(!is_complete_isobmff_single_file(
+            &valid_single_file[..valid_single_file.len() - 5]
+        ));
     }
 }

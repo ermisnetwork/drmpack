@@ -12,6 +12,8 @@ Native Rust DRM packaging and manifest generation library orchestrating GPAC fil
 
 `drmpack` is an in-process packaging orchestrator designed for high-throughput media servers (such as `media-server`). It accepts multiplexed fragmented MP4 (fMP4) streams in memory, pipes them directly into GPAC filter graphs over anonymous Unix pipes, and emits encrypted CMAF segments and playlists via an asynchronous in-memory channel.
 
+In addition to real-time live streaming, `drmpack` provides standalone whole-file VOD batch packaging (`drmpack::vod`) for static media files, generating DRM-encrypted DASH and HLS assets with Single-File Byte-Range (`profile=onDemand`) and Discrete Multi-Segment modes.
+
 By piping media ingress directly into memory pipes and using ephemeral staging with immediate harvesting on egress ([ADR-0015](docs/adr/0015-direct-output-channel-and-safe-storage.md)), `drmpack` minimizes disk wear, reduces segment-to-manifest latency to sub-second ranges, and guarantees synchronization between media segments and manifest updates.
 
 ## Architecture
@@ -31,6 +33,7 @@ By piping media ingress directly into memory pipes and using ephemeral staging w
   - `EgressMode::FileSystemStaging` (default): `ArtifactHarvester` detects finished segments and updated manifests from ephemeral staging using kernel filesystem events (`inotify`/`FSEvents`), delivering `PackagedArtifact` items through a bounded asynchronous channel.
   - `EgressMode::HttpPush`: GPAC streams segments directly over in-process HTTP loopback push (`httpout:hmode=push`) into RAM, completely eliminating disk staging for live streams.
 - Manifest-Driven Readiness: In `FileSystemStaging` mode, emits media segments only after GPAC has completely flushed the segment and referenced it in the manifest, eliminating partial-read race conditions for downstream edge handlers. In `HttpPush` mode, segments are validated via ISOBMFF box parsing upon arrival.
+- VOD Batch Packaging: Executes whole-file static packaging through `package_vod_file` (`drmpack::vod`), transforming local MP4 containers or separate track files into encrypted DASH and HLS assets with `#EXT-X-ENDLIST` and static timelines.
 
 ```
 +-------------------------------------------------------------------------------+
@@ -726,7 +729,61 @@ async fn mint_playback_token(
 }
 ```
 
-### 7. Runnable Examples
+### 7. VOD Whole-File Batch Packaging (`drmpack::vod`)
+
+For static files and on-demand video libraries, `drmpack::vod` provides a standalone batch packaging API decoupled from real-time live streaming sessions. It executes whole-file packaging of MP4 inputs into DRM-protected DASH (`.mpd`) and HLS (`.m3u8`) static assets.
+
+#### Packaging Delivery Modes (`VodMode`)
+- **`VodMode::SingleFile` (Default / On-Demand Byte-Range)**: Generates a single self-initializing `.mp4` container per rendition containing an `sidx` box, `#EXT-X-BYTERANGE` tags in HLS playlists, and `<SegmentBase>` in DASH manifests. Aligns with Apple HLS byte-range and DASH-IF On-Demand profiles, reducing CDN origin storage file counts by over 99% compared to discrete chunked storage.
+- **`VodMode::Segmented` (Discrete Multi-Segment)**: Emits an initialization fragment (`<tier>_init.mp4`) and discrete `.m4s` media segment files per rendition for traditional chunked CDN storage topologies.
+
+#### Flexible Input Sources (`VodInputSource`)
+- **`VodInputSource::SingleFile(path)`**: A single multiplexed MP4 container containing multiple video, audio, or subtitle tracks. Use `rendition.with_container_track_id(track_id)` to map declared renditions to container tracks.
+- **`VodInputSource::TrackFiles(vec![path1, path2])`**: Separate media files per rendition (e.g., dedicated video and audio tracks).
+
+#### Example: Packaging a VOD Asset with `package_vod_file`
+
+```rust,no_run
+use drmpack::key::{ContentKey, StaticKeySource};
+use drmpack::types::{DrmSystem, EncryptionScheme, QualityTier, Rendition, TrackType};
+use drmpack::vod::{package_vod_file, VodInputSource, VodMode, VodPackageConfig};
+use std::path::PathBuf;
+use std::sync::Arc;
+use uuid::Uuid;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Configure key provider (StaticKeySource or AxinomProvider)
+    let video_kid = Uuid::new_v4();
+    let video_key = ContentKey::new(video_kid, [0xaa; 16], QualityTier::hd(), TrackType::Video);
+    let key_provider = Arc::new(StaticKeySource::new().with_key(video_key));
+
+    // 2. Configure VOD batch packaging (SingleFile byte-range onDemand)
+    let config = VodPackageConfig::new(
+        "movie_demo_01",
+        VodInputSource::SingleFile(PathBuf::from("scratch/sample.mp4")),
+        PathBuf::from("scratch/vod_output"),
+    )
+    .with_vod_mode(VodMode::SingleFile)
+    .with_encryption_scheme(EncryptionScheme::Cbcs)
+    .with_drm_system(DrmSystem::FairPlay)
+    .with_drm_system(DrmSystem::Widevine)
+    .with_rendition(Rendition::video_hd().with_container_track_id(1))
+    .with_rendition(Rendition::audio().with_container_track_id(2).clear());
+
+    // 3. Execute whole-file packaging
+    let result = package_vod_file(&config, &key_provider).await?;
+
+    println!("DASH MPD: {}", result.mpd_manifest.display());
+    if let Some(ref master) = result.master_playlist {
+        println!("HLS Master: {}", master.display());
+    }
+    println!("Media Files: {:?}", result.media_files);
+    Ok(())
+}
+```
+
+### 8. Runnable Examples
 
 The `examples/` directory contains end-to-end runnable pipelines demonstrating drmpack capabilities:
 
@@ -736,6 +793,7 @@ The `examples/` directory contains end-to-end runnable pipelines demonstrating d
 | `09_axum_playback_server` | Standalone Axum playback server with Shaka Player and Axinom DRM token generation. | `cargo run --example 09_axum_playback_server -- --stream-dir scratch/example08_stream` |
 | `10_http_output_live_stream` | **Zero-disk HTTP egress** live packaging pipeline (`EgressMode::HttpPush`), streaming media segments directly over in-process HTTP into RAM. | `cargo run --example 10_http_output_live_stream -- --dual --static --duration 15` |
 | `11_http_output_playback_server` | Standalone playback server serving HTTP egress stream dump with Axinom & ClearKey DRM and Shaka Player Web UI. | `cargo run --example 11_http_output_playback_server -- --port 8080` |
+| `12_vod_batch_packaging` | Standalone whole-file VOD batch packaging example into DRM-protected DASH and HLS assets using Single-File Byte-Range mode (`profile=onDemand`). | `cargo run --example 12_vod_batch_packaging` |
 
 
 ## Domain Glossary
@@ -753,6 +811,10 @@ Key terminology used throughout `drmpack` (aligned with `CONTEXT.md`):
 - **Manifest-Driven Readiness**: Synchronization guarantee ensuring a media segment is emitted to callers only after GPAC has fully written the segment and updated the manifest.
 - **DrmStreamMetadata**: Public, serializable data transfer object emitted by `PackagingSession::playback_metadata()` for application-level state persistence (PostgreSQL/Redis). Encapsulates public KIDs, IVs, track bindings, and encryption schemes needed by playback authorization backends to issue DRM entitlement tokens, while strictly excluding raw AES keys to prevent leakage across service boundaries ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)).
 - **AxinomSigningConfig**: Secure credential container managing Axinom Communication Key ID and secret for minting entitlement JWTs, with redacted debug logs and direct JWT signing over `DrmStreamMetadata` ([ADR-0017](docs/adr/0017-drm-playback-metadata-handoff-and-credentials.md)).
+- **package_vod_file**: Standalone batch packaging function in `drmpack::vod` executing whole-file VOD encryption and static manifest generation.
+- **VodPackageConfig**: Configuration builder for VOD batch jobs specifying input sources, output directory, `VodMode`, encryption scheme, renditions, and DRM systems.
+- **VodMode**: Packaging delivery profile for VOD — `SingleFile` (on-demand byte-range with `sidx` box, 1 file per rendition) or `Segmented` (discrete `.m4s` segments).
+- **VodInputSource**: Input media source strategy for VOD packaging — single multiplexed container (`SingleFile`) or separate per-track files (`TrackFiles`).
 
 ## Roadmap
 

@@ -157,20 +157,20 @@ impl GpacProcessConfig {
 
     /// Build the command-line arguments for the `gpac` executable.
     pub fn build_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-
-        // 0. Disable ANSI color codes for clean machine-readable log parsing
-        args.push("-logs=ncl".into());
-
-        // 1. Disable GPAC filter session blocking regulation for live stdin streaming.
-        // In live piped ingest, disables filter blocking regulation to avoid backpressure deadlocks
-        // on the stdin pipe when downstream filters process packets at varying rates.
-        args.push("-no-block=all".into());
-
-        // 2. Enable multi-threaded filter execution to prevent pipeline starvation in encryption filters.
-        // In single-threaded mode, cecrypt is scheduled on secondary task lists and gets starved by
-        // blocking pipe reads on stdin, accumulating samples in internal queues (+2000ms/segment).
-        args.push("-threads=-1".into());
+        let mut args = vec![
+            // 0. Disable ANSI color codes for clean machine-readable log parsing
+            "-logs=ncl".into(),
+            // 1. Disable GPAC configuration file reading/writing for process isolation
+            "-p=0".into(),
+            // 2. Disable GPAC filter session blocking regulation for live stdin streaming.
+            // In live piped ingest, disables filter blocking regulation to avoid backpressure deadlocks
+            // on the stdin pipe when downstream filters process packets at varying rates.
+            "-no-block=all".into(),
+            // 3. Enable multi-threaded filter execution to prevent pipeline starvation in encryption filters.
+            // In single-threaded mode, cecrypt is scheduled on secondary task lists and gets starved by
+            // blocking pipe reads on stdin, accumulating samples in internal queues (+2000ms/segment).
+            "-threads=-1".into(),
+        ];
 
         // 3. Input filter: read continuous fMP4 from stdin pipe with semantic representation & playlist mapping.
         // Sets PID properties inherited by the downstream demuxer (mp4dmx):
@@ -595,23 +595,24 @@ mod tests {
         let args = config.build_args();
 
         assert_eq!(args[0], "-logs=ncl");
-        assert_eq!(args[1], "-no-block=all");
-        assert_eq!(args[2], "-threads=-1");
-        assert_eq!(args[3], "-i");
-        assert!(args[4].starts_with("stdin:ext=mp4:alltk:#Representation="));
-        assert!(args[4].contains("(video)video_$Height$p"));
-        assert!(args[4].contains("(audio)(Language=!und)audio_$Language$"));
-        assert!(args[4].contains("(text)(Language=!und)sub_$Language$"));
-        assert!(args[4].contains("(audio)(Language=!und)audio_$Language$.m3u8"));
-        assert!(args[4].contains("(text)(Language=!und)sub_$Language$.m3u8"));
-        assert_eq!(args[5], "cecrypt:cfile=/tmp/drm.xml");
-        assert_eq!(args[6], "-o");
-        assert!(args[7].contains("/dev/shm/test_stream/live.mpd:dual"));
-        assert!(args[7].contains(
+        assert_eq!(args[1], "-p=0");
+        assert_eq!(args[2], "-no-block=all");
+        assert_eq!(args[3], "-threads=-1");
+        assert_eq!(args[4], "-i");
+        assert!(args[5].starts_with("stdin:ext=mp4:alltk:#Representation="));
+        assert!(args[5].contains("(video)video_$Height$p"));
+        assert!(args[5].contains("(audio)(Language=!und)audio_$Language$"));
+        assert!(args[5].contains("(text)(Language=!und)sub_$Language$"));
+        assert!(args[5].contains("(audio)(Language=!und)audio_$Language$.m3u8"));
+        assert!(args[5].contains("(text)(Language=!und)sub_$Language$.m3u8"));
+        assert_eq!(args[6], "cecrypt:cfile=/tmp/drm.xml");
+        assert_eq!(args[7], "-o");
+        assert!(args[8].contains("/dev/shm/test_stream/live.mpd:dual"));
+        assert!(args[8].contains(
             "profile=live:dmode=dynauto:segdur=2:spd=4000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=auto:template=$RepresentationID$_$Init=init$$Number$"
         ));
-        assert!(args[7].contains("keep_segs=true"));
-        assert!(args[7].contains(":cdur=0.2:asto=0.0:llhls=br:cmaf=cmfc"));
+        assert!(args[8].contains("keep_segs=true"));
+        assert!(args[8].contains(":cdur=0.2:asto=0.0:llhls=br:cmaf=cmfc"));
     }
 
     #[test]
@@ -623,7 +624,7 @@ mod tests {
             .with_availability_time_offset(Some(1.8));
 
         let args = config.build_args();
-        assert!(args[7].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
+        assert!(args[8].contains(":cdur=0.2:asto=1.8:llhls=br:cmaf=cmfc"));
     }
 
     #[test]
@@ -632,7 +633,7 @@ mod tests {
             .with_time_shift_buffer(Duration::from_secs(120));
 
         let args = config.build_args();
-        assert!(args[7].contains(":tsb=120:"));
+        assert!(args[8].contains(":tsb=120:"));
     }
 
     #[test]
@@ -644,13 +645,14 @@ mod tests {
         let args = config.build_args();
 
         assert_eq!(args[0], "-logs=ncl");
-        assert_eq!(args[1], "-no-block=all");
-        assert_eq!(args[2], "-threads=-1");
-        assert_eq!(args[6], "-o");
-        assert!(args[7].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=auto:template=$RepresentationID$_$Init=init$$Number$"));
-        assert!(args[7].contains("keep_segs=true"));
-        assert!(!args[7].contains(":cdur="));
-        assert!(!args[7].contains(":llhls="));
+        assert_eq!(args[1], "-p=0");
+        assert_eq!(args[2], "-no-block=all");
+        assert_eq!(args[3], "-threads=-1");
+        assert_eq!(args[7], "-o");
+        assert!(args[8].contains("segdur=6:spd=12000:tsb=60:utcs=inband:pssh=mv:keep_segs=true:sbound=out:check_dur=false:seg_sync=auto:template=$RepresentationID$_$Init=init$$Number$"));
+        assert!(args[8].contains("keep_segs=true"));
+        assert!(!args[8].contains(":cdur="));
+        assert!(!args[8].contains(":llhls="));
     }
 
     #[test]
