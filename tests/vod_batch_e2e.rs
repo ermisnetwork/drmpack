@@ -85,10 +85,6 @@ fn generate_synthetic_audio_mp4(path: &Path) {
             "-i",
             "sine=frequency=1000:duration=4:sample_rate=48000",
             "-vn",
-            "-streamid",
-            "0:2",
-            "-use_stream_ids_as_track_ids",
-            "1",
             "-c:a",
             "aac",
             "-b:a",
@@ -104,6 +100,12 @@ fn generate_synthetic_audio_mp4(path: &Path) {
         "ffmpeg synthetic audio generation failed: {}",
         String::from_utf8_lossy(&status.stderr)
     );
+
+    // Explicitly set ISO-BMFF track ID to 2 via MP4Box to guarantee track separation
+    // from video track ID 1 across platforms and ffmpeg versions.
+    let _ = Command::new("MP4Box")
+        .args(["-set-track-id", "1:2", path.to_str().unwrap()])
+        .output();
 }
 
 fn assert_isobmff_single_files(files: &[std::path::PathBuf]) {
