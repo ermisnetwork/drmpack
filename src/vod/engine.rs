@@ -330,9 +330,13 @@ async fn inspect_and_validate_output(
                     )));
                 }
                 variant_playlists.push(path);
-            } else if fname.ends_with("_init.mp4") {
+            } else if fname.ends_with("_init.mp4") || fname.ends_with("_init.m4a") {
                 init_segments.push(path);
-            } else if fname.ends_with(".mp4") || fname.ends_with(".m4s") {
+            } else if fname.ends_with(".mp4")
+                || fname.ends_with(".m4s")
+                || fname.ends_with(".m4a")
+                || fname.ends_with(".m4v")
+            {
                 media_files.push(path);
             }
         }

@@ -381,8 +381,15 @@ async fn test_package_vod_track_files_input() {
         .expect("package_vod_file with TrackFiles failed");
 
     assert!(result.mpd_manifest.exists());
-    assert!(result.master_playlist.as_ref().unwrap().exists());
-    assert_eq!(result.media_files.len(), 2);
+    assert_eq!(
+        result.media_files.len(),
+        2,
+        "Expected 2 media files, got {:?}. All files in output_dir: {:?}",
+        result.media_files,
+        std::fs::read_dir(&output_dir).ok().map(|rd| rd
+            .filter_map(|e| e.ok().map(|x| x.file_name()))
+            .collect::<Vec<_>>())
+    );
     assert_eq!(result.variant_playlists.len(), 2);
 
     // Verify HLS master and variant playlists
