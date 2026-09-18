@@ -7,7 +7,7 @@ use crate::key::{KeyPolicyEngine, KeyProvider, KeySet};
 use crate::session::DrmStreamMetadata;
 use crate::types::EncryptionScheme;
 use crate::vod::{VodInputSource, VodPackageConfig, VodPackageResult};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tracing::{error, info, instrument};
 use uuid::Uuid;
@@ -44,13 +44,27 @@ pub async fn package_vod_file<P: KeyProvider>(
         preserve: false,
     };
 
-    // 3. Acquire encryption keys once upfront (single network request for both single and dual schemes)
-    let key_set = fetch_vod_key_set(config, key_provider).await?;
+    // 3. Prepare effective input: if input is TrackFiles, remux into an ephemeral container
+    // inside control_dir to eliminate multi-source filter graph races in GPAC.
+    let effective_input = match &config.input {
+        VodInputSource::SingleFile(path) => VodInputSource::SingleFile(path.clone()),
+        VodInputSource::TrackFiles(paths) => {
+            let mux_path = control_dir.join(format!("track_mux_{}.mp4", Uuid::new_v4()));
+            remux_track_files(paths, &mux_path, config.gpac_bin.as_deref()).await?;
+            VodInputSource::SingleFile(mux_path)
+        }
+    };
 
-    let execution_res = match config.encryption_scheme {
+    let mut effective_config = config.clone();
+    effective_config.input = effective_input;
+
+    // 4. Acquire encryption keys once upfront (single network request for both single and dual schemes)
+    let key_set = fetch_vod_key_set(&effective_config, key_provider).await?;
+
+    let execution_res = match effective_config.encryption_scheme {
         EncryptionScheme::Dual => {
-            let cenc_dir = config.output_dir.join("cenc");
-            let cbcs_dir = config.output_dir.join("cbcs");
+            let cenc_dir = effective_config.output_dir.join("cenc");
+            let cbcs_dir = effective_config.output_dir.join("cbcs");
             tokio::fs::create_dir_all(&cenc_dir).await?;
             tokio::fs::create_dir_all(&cbcs_dir).await?;
 
@@ -58,7 +72,7 @@ pub async fn package_vod_file<P: KeyProvider>(
             // On resource-constrained environments (e.g. 2-vCPU CI runners),
             // running two concurrent GPAC muxers causes CPU starvation and filter graph race conditions.
             let res_cenc = execute_single_scheme(
-                config,
+                &effective_config,
                 &key_set,
                 EncryptionScheme::Cenc,
                 &cenc_dir,
@@ -69,20 +83,27 @@ pub async fn package_vod_file<P: KeyProvider>(
             match res_cenc {
                 Ok(cenc) => {
                     let res_cbcs = execute_single_scheme(
-                        config,
+                        &effective_config,
                         &key_set,
                         EncryptionScheme::Cbcs,
                         &cbcs_dir,
                         &control_dir,
                     )
                     .await;
-                    res_cbcs.map(|cbcs| merge_dual_results(config, cenc, cbcs))
+                    res_cbcs.map(|cbcs| merge_dual_results(&effective_config, cenc, cbcs))
                 }
                 Err(e) => Err(e),
             }
         }
         scheme => {
-            execute_single_scheme(config, &key_set, scheme, &config.output_dir, &control_dir).await
+            execute_single_scheme(
+                &effective_config,
+                &key_set,
+                scheme,
+                &effective_config.output_dir,
+                &control_dir,
+            )
+            .await
         }
     };
 
@@ -376,6 +397,46 @@ async fn inspect_and_validate_output(
         init_segments,
         metadata,
     })
+}
+
+async fn remux_track_files(
+    paths: &[PathBuf],
+    output_path: &Path,
+    gpac_bin: Option<&str>,
+) -> Result<()> {
+    let mp4box_bin = resolve_mp4box_bin(gpac_bin);
+    let mut cmd = Command::new(&mp4box_bin);
+    cmd.arg("-p=0");
+    for path in paths {
+        cmd.arg("-add").arg(path);
+    }
+    cmd.arg("-new").arg(output_path);
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = cmd.output().await.map_err(DrmpackError::Io)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DrmpackError::Gpac(format!(
+            "MP4Box remux of TrackFiles failed with status {}: {}",
+            output.status, stderr
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_mp4box_bin(gpac_bin: Option<&str>) -> String {
+    if let Some(bin) = gpac_bin {
+        let bin_path = Path::new(bin);
+        if let Some(parent) = bin_path.parent() {
+            let candidate = parent.join("MP4Box");
+            if candidate.exists() {
+                return candidate.display().to_string();
+            }
+        }
+    }
+    "MP4Box".to_string()
 }
 
 fn merge_dual_results(
