@@ -229,74 +229,45 @@ To use `drmpack`, the host environment must meet the following requirements:
 
 ### 1. GPAC CLI (>= 2.2 required)
 
-`drmpack` orchestrates native GPAC filter graphs over anonymous Unix pipes. The `gpac` executable must be installed and accessible in the system `PATH` (or configured via `PackagingSessionConfig::with_gpac_bin()`).
+`drmpack` orchestrates native GPAC filter graphs over anonymous Unix pipes. The `gpac` executable must be installed and accessible in your system `PATH` (or configured via `PackagingSessionConfig::with_gpac_bin()`).
 
-#### Installation by Platform
+- **Version Requirements**: GPAC `>= 2.2` required (tested with `>= 2.2.1` and `26.07`).
+- **Required Filter Modules**: `cecrypt` (DRM encryption), `dasher` (DASH & HLS segmentation engine), and `mp4dmx` (MP4 demultiplexer).
 
-- **Ubuntu 24.04 LTS (`noble`):**
+#### Official Installation Guides & Resources
+
+Because Linux package availability and versions vary across distributions, please refer to the official GPAC documentation for installation instructions for your environment:
+
+- **Official Downloads & Package Repositories**: [GPAC Downloads](https://gpac.io/downloads/)
+- **Linux Build & Compilation Guide**: [GPAC Build Guide for Linux (Official Wiki)](https://wiki.gpac.io/Build/GPAC-Build-Guide-for-Linux/)
+- **Upstream Releases & Source Code**: [GPAC GitHub Releases](https://github.com/gpac/gpac/releases)
+- **Official Docker Images**: [gpac/gpac on Docker Hub](https://hub.docker.com/r/gpac/gpac)
+
+#### Quick Start by Platform
+
+- **Ubuntu 24.04 LTS (`noble`)+**:
   ```bash
   sudo apt-get update && sudo apt-get install -y gpac
   ```
-  *(Requires `universe` component enabled. Provides GPAC 2.2+).*
+  *(Packaged in the standard `universe` repository).*
 
-- **Official GPAC APT Repository (Ubuntu 22.04+, Debian 11/12):**
-  *Ubuntu 22.04 default repos only have GPAC 2.0 (too old), and Debian 12 has no GPAC package in official repos. Use the official GPAC repository:*
-  ```bash
-  sudo apt-get update && sudo apt-get install -y ca-certificates curl
-  sudo install -m 0755 -d /etc/apt/keyrings
-  sudo curl -fsSL https://dist.gpac.io/gpac/linux/gpg.asc -o /etc/apt/keyrings/gpac.asc
-  sudo chmod a+r /etc/apt/keyrings/gpac.asc
-
-  sudo tee /etc/apt/sources.list.d/gpac.sources <<EOF
-  Types: deb
-  URIs: https://dist.gpac.io/gpac/linux/$(. /etc/os-release && echo "$ID")
-  Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
-  Components: main
-  Signed-By: /etc/apt/keyrings/gpac.asc
-  EOF
-
-  sudo apt-get update && sudo apt-get install -y gpac
-  ```
-
-- **macOS (Homebrew):**
+- **macOS (Homebrew)**:
   ```bash
   brew install gpac
   ```
 
-- **Alpine Linux:**
-  GPAC is not packaged in Alpine's apk repositories. For Alpine-based containers, compile from source or copy pre-built binaries from a multi-stage builder.
-
-- **Building from Source (Universal Linux):**
-  ```bash
-  # 1. Install build dependencies
-  sudo apt-get update && sudo apt-get install -y \
-      build-essential git pkg-config zlib1g-dev libssl-dev
-
-  # 2. Clone and build GPAC (latest stable release, e.g. v26.07.0 or >= 2.2)
-  git clone https://github.com/gpac/gpac.git
-  cd gpac
-  git checkout v26.07.0
-  ./configure --prefix=/usr/local --use-ffmpeg=no
-  make -j$(nproc)
-  sudo make install
-  sudo ldconfig
-  ```
-
-- **Docker Production Image (Ubuntu 24.04 Example):**
+- **Docker Containers**:
+  Use the official [`gpac/gpac`](https://hub.docker.com/r/gpac/gpac) container image or install `gpac` in an Ubuntu 24.04+ base image:
   ```dockerfile
-  FROM rust:1.80-bookworm AS builder
-  WORKDIR /build
-  COPY . .
-  RUN cargo build --release
-
   FROM ubuntu:24.04
   RUN apt-get update && apt-get install -y --no-install-recommends \
       gpac \
       ca-certificates \
       && rm -rf /var/lib/apt/lists/*
-  COPY --from=builder /build/target/release/your_service /usr/local/bin/
-  ENTRYPOINT ["your_service"]
   ```
+
+- **Other Linux Distributions / From Source**:
+  Follow the [GPAC Linux Build Guide](https://wiki.gpac.io/Build/GPAC-Build-Guide-for-Linux/) using GNU Autotools (`./configure --prefix=/usr/local --use-ffmpeg=no && make -j$(nproc) && sudo make install`).
 
 #### Verifying GPAC Installation
 
