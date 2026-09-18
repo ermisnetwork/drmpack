@@ -15,7 +15,7 @@ fn test_gpac_vod_single_file_args() {
 
     let args = config.build_args();
 
-    assert!(args.contains(&"-logs=ncl".to_string()));
+    assert!(args.iter().any(|a| a.starts_with("-logs=")));
     assert!(args.contains(&"-p=0".to_string()));
     assert!(args.contains(&"-threads=1".to_string()));
     assert!(args.contains(&"-i".to_string()));

@@ -112,8 +112,8 @@ impl GpacVodProcessConfig {
     pub fn build_args(&self) -> Vec<String> {
         let mut args = Vec::new();
 
-        // 0. Disable ANSI color codes
-        args.push("-logs=ncl".into());
+        // 0. Disable ANSI color codes and enable filter debug
+        args.push("-logs=filter@debug:ncl".into());
 
         // 1. Disable GPAC configuration file reading/writing for process isolation
         args.push("-p=0".into());
