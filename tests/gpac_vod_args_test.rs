@@ -16,7 +16,8 @@ fn test_gpac_vod_single_file_args() {
     let args = config.build_args();
 
     assert!(args.contains(&"-logs=ncl".to_string()));
-    assert!(args.contains(&"-threads=-1".to_string()));
+    assert!(args.contains(&"-p=0".to_string()));
+    assert!(args.contains(&"-threads=1".to_string()));
     assert!(args.contains(&"-i".to_string()));
     // Input must include representation mapping
     let input_arg = args
@@ -88,4 +89,25 @@ fn test_gpac_vod_track_files_input_args() {
     assert!(args
         .iter()
         .any(|a| a.contains("/inputs/audio.mp4:#Representation=")));
+}
+
+#[test]
+fn test_gpac_vod_args_includes_isolation_and_threads() {
+    let input = VodInputSource::SingleFile(PathBuf::from("/inputs/movie.mp4"));
+    let config = GpacVodProcessConfig::new(
+        input,
+        PathBuf::from("/keys/drm.xml"),
+        PathBuf::from("/out/vod"),
+    )
+    .with_threads(2)
+    .with_temp_dir(PathBuf::from("/tmp/session_tmp"));
+
+    let args = config.build_args();
+
+    // Must disable configuration writing
+    assert!(args.contains(&"-p=0".to_string()));
+    // Must set thread count
+    assert!(args.contains(&"-threads=2".to_string()));
+    // Must isolate temp directory
+    assert!(args.contains(&"-tmp=/tmp/session_tmp".to_string()));
 }

@@ -20,6 +20,10 @@ pub struct GpacVodProcessConfig {
     pub manifest_name: String,
     /// Binary executable name or path for GPAC (defaults to `"gpac"`).
     pub gpac_bin: String,
+    /// Number of worker threads for GPAC execution (default is 1).
+    pub threads: i32,
+    /// Optional isolated temporary directory for GPAC.
+    pub temp_dir: Option<PathBuf>,
 }
 
 const VOD_REPRESENTATION_MAPPING: &str = concat!(
@@ -54,6 +58,8 @@ impl GpacVodProcessConfig {
             segment_duration: 2.0,
             manifest_name: "vod".into(),
             gpac_bin: "gpac".into(),
+            threads: 1,
+            temp_dir: None,
         }
     }
 
@@ -81,6 +87,18 @@ impl GpacVodProcessConfig {
         self
     }
 
+    /// Set the number of worker threads for GPAC execution (default is 1).
+    pub fn with_threads(mut self, threads: i32) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Specify an isolated temporary directory for GPAC instead of system default (/tmp).
+    pub fn with_temp_dir(mut self, temp_dir: impl Into<PathBuf>) -> Self {
+        self.temp_dir = Some(temp_dir.into());
+        self
+    }
+
     /// Build the command-line argument vector for GPAC execution.
     pub fn build_args(&self) -> Vec<String> {
         let mut args = Vec::new();
@@ -88,10 +106,18 @@ impl GpacVodProcessConfig {
         // 0. Disable ANSI color codes
         args.push("-logs=ncl".into());
 
-        // 1. Enable multi-threaded filter execution
-        args.push("-threads=-1".into());
+        // 1. Disable GPAC configuration file reading/writing for process isolation
+        args.push("-p=0".into());
 
-        // 2. Add input files with representation mapping
+        // 2. Set isolated temporary directory if configured
+        if let Some(ref temp_dir) = self.temp_dir {
+            args.push(format!("-tmp={}", temp_dir.display()));
+        }
+
+        // 3. Set thread count for GPAC execution
+        args.push(format!("-threads={}", self.threads));
+
+        // 4. Add input files with representation mapping
         for path in self.input_source.paths() {
             args.push("-i".into());
             args.push(format!("{}{}", path.display(), VOD_REPRESENTATION_MAPPING));
