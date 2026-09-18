@@ -64,18 +64,22 @@ pub async fn package_vod_file<P: KeyProvider>(
                 &cenc_dir,
                 &control_dir,
             )
-            .await?;
+            .await;
 
-            let res_cbcs = execute_single_scheme(
-                config,
-                &key_set,
-                EncryptionScheme::Cbcs,
-                &cbcs_dir,
-                &control_dir,
-            )
-            .await?;
-
-            Ok(merge_dual_results(config, res_cenc, res_cbcs))
+            match res_cenc {
+                Ok(cenc) => {
+                    let res_cbcs = execute_single_scheme(
+                        config,
+                        &key_set,
+                        EncryptionScheme::Cbcs,
+                        &cbcs_dir,
+                        &control_dir,
+                    )
+                    .await;
+                    res_cbcs.map(|cbcs| merge_dual_results(config, cenc, cbcs))
+                }
+                Err(e) => Err(e),
+            }
         }
         scheme => {
             execute_single_scheme(config, &key_set, scheme, &config.output_dir, &control_dir).await
